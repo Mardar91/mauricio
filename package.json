@@ -1,0 +1,16 @@
+{
+  "name": "turnos-mauricio",
+  "private": true,
+  "version": "1.0.0",
+  "description": "PWA para los turnos de trabajo de Mauricio (código en docs/, tests en test/)",
+  "type": "module",
+  "scripts": {
+    "serve": "node test/tools/serve.mjs",
+    "test": "node --test test/unit/",
+    "eval": "node test/lab/eval.mjs",
+    "e2e": "node test/e2e/run.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.56.1"
+  }
+}
