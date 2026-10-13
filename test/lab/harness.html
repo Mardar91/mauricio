@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Harness reconocimiento</title>
+<script src="/docs/vendor/tesseract/tesseract.min.js"></script>
+</head>
+<body>
+<p id="status">listo</p>
+<script type="module">
+  const TESS = {
+    workerPath: location.origin + '/docs/vendor/tesseract/worker.min.js',
+    corePath: location.origin + '/docs/vendor/tesseract/core/',
+    langPath: location.origin + '/docs/vendor/tesseract/lang/best_int/',
+    langPathLegacy: location.origin + '/docs/vendor/tesseract/lang/legacy/',
+  };
+  window.TESS_PATHS = TESS;
+  // Ejecuta un reconocedor (módulo ES con `export async function recognize(input, options)`) sobre una foto.
+  window.runRecognizer = async (implUrl, photoUrl, extra = {}) => {
+    const mod = await import(implUrl);
+    const blob = await (await fetch(photoUrl)).blob();
+    const t0 = performance.now();
+    const result = await mod.recognize(blob, { tesseract: TESS, debug: !!extra.debug, knownCodes: extra.knownCodes });
+    const ms = performance.now() - t0;
+    if (mod.dispose && extra.dispose) await mod.dispose();
+    return { result, ms };
+  };
+</script>
+</body>
+</html>
