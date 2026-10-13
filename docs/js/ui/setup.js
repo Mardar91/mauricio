@@ -63,7 +63,9 @@ const deviceWord = () => (isIOS() ? 'iPhone' : 'dispositivo');
 // Confirmar → comprobar (lee y descifra con una copia; si falla no cambia nada) → guardar → publicar
 // o solo leer → paso «Suscribirme en el iPhone» (solo si hace falta). opts.confirm: false en el
 // formulario avanzado.
-export async function runSetup(ctx, cfg, { confirm = true } = {}) {
+// helper: se conecta desde «Opciones avanzadas» (normalmente quien ayuda a Mauricio): no se adueña
+// del calendario ni pide suscribirse; lleva a «Crear enlace para Mauricio»
+export async function runSetup(ctx, cfg, { confirm = true, helper = false } = {}) {
   if (confirm) {
     const ok = await confirmDialog({
       icon: '🔗',
@@ -92,7 +94,9 @@ export async function runSetup(ctx, cfg, { confirm = true } = {}) {
     await alertDialog({ icon: '⚠️', title: 'No se pudo conectar', text: t.error?.message || 'No se pudo conectar.' });
     return false;
   }
-  if (t.readOnly) {
+  if (t.readOnly && helper) {
+    // Ya publica otro dispositivo (p. ej. el iPhone de Mauricio): quien ayuda solo lee
+  } else if (t.readOnly) {
     // Ya publica otro dispositivo (p. ej. el navegador de quien ayuda)
     const yes = await askUseThisDevice();
     if (yes) await becomePublisherNow(ctx);
@@ -101,13 +105,23 @@ export async function runSetup(ctx, cfg, { confirm = true } = {}) {
     let r = null;
     try { r = await ctx.syncQueue.sync(); } finally { b2.close(); }
     if (r && r.ok && r.readOnly) {
-      if (await askUseThisDevice()) await becomePublisherNow(ctx);
+      if (!helper && await askUseThisDevice()) await becomePublisherNow(ctx);
     } else if (r && !r.ok && r.error && !r.error.retry) {
       await alertDialog({ icon: '⚠️', title: 'Falta un detalle', text: r.error.message });
     }
   } else {
     // Sin internet: todavía no se sabe si otro dispositivo publica. Se preguntará al conectar.
     rememberAskTakeover(ctx.store.get().settings.sync);
+  }
+  if (helper) {
+    ctx.go('ajustes', { section: 'github' });
+    await alertDialog({
+      icon: '✅',
+      title: 'Conectado',
+      text: 'Ahora toca «Crear enlace para Mauricio» y envíaselo (por ejemplo, por WhatsApp). Él lo pega en su app: Ajustes → «Tengo un enlace». Si este es el iPhone de Mauricio, toca «Suscribirme en el iPhone» en «Calendario del iPhone».',
+    });
+    ctx.go('ajustes', { section: 'github' });
+    return true;
   }
   ctx.go('ajustes', { section: 'calendar' });
   const url = webcalUrl(ctx.store.get().settings.sync);

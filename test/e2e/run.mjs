@@ -839,11 +839,13 @@ test('flujo del README: el ordenador de quien ayuda crea el enlace y el iPhone d
   await waitState(A.page, (s) => Boolean(s.settings.sync.enabled && s.settings.sync.lastPushAt), null, 15000);
   const sA = (await getState(A.page)).settings.sync;
   assert.equal(sA.publisher, sA.deviceId, 'el ordenador vacío publica primero (repo vacío)');
-  // En el ordenador se puede cerrar el paso «Suscribirme» (es para el iPhone)
-  if (await A.page.locator('.sheet-subscribe').count()) {
-    await A.page.click('.sheet-subscribe .sheet-close');
-    await A.page.waitForSelector('.sheet-wrap', { state: 'detached' });
-  }
+  // Quien ayuda no ve el paso «Suscribirme»: le lleva a «Crear enlace para Mauricio»
+  await A.page.waitForSelector('.dialog-wrap.open .dialog-title:text("Conectado")');
+  assert.match(await text(A.page, '.dialog-wrap.open .dialog'), /Crear enlace para Mauricio/);
+  await A.page.click('.dialog-wrap.open .dialog .btn-primary');
+  await A.page.waitForSelector('.dialog-wrap.open', { state: 'detached' });
+  assert.equal(await A.page.locator('.sheet-subscribe').count(), 0, 'sin paso «Suscribirme» en el dispositivo de quien ayuda');
+  assert.ok(await A.page.locator('[data-testid="make-link"]').isVisible(), '«Crear enlace» a la vista');
   await A.ctx.grantPermissions(['clipboard-read', 'clipboard-write']);
   await A.page.click('[data-testid="make-link"]');
   await A.page.waitForSelector('.toast:has-text("Enlace copiado")');

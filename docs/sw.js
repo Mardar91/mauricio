@@ -1,7 +1,7 @@
 // Service worker: la app funciona sin conexión y avisa de nuevas versiones.
 // IMPORTANTE: sube VERSION (y APP_VERSION en js/app.js) en cada cambio publicado,
 // y añade aquí cualquier archivo nuevo de la app (los tests e2e lo comprueban).
-const VERSION = '1.3.0';
+const VERSION = '1.3.1';
 const SHELL = `turnos-shell-${VERSION}`;
 const RUNTIME = `turnos-runtime-${VERSION}`;
 // Tesseract (vendor/): grande y cambia poco, por eso va aparte de VERSION.

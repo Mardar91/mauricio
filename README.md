@@ -24,7 +24,7 @@ GitHub Pages è gratis per i repo pubblici e non usa minuti di Actions.
    - Repository access: *Only select* → `mauricio-datos`.
    - Permissions: *Contents* → **Read and write**.
    - Scadenza: la più lunga possibile. Quando scade, rifai il token e un link nuovo.
-3. Sul tuo computer apri l'app → **Ajustes → Opciones avanzadas → GitHub**: owner `Mardar91`, repo `mauricio-datos`, token → *Guardar y conectar* (il passo «Suscribirme» puoi chiuderlo: serve solo sull'iPhone) → **Crear enlace para Mauricio** → copia il link e mandalo a Mauricio (es. WhatsApp).
+3. Sul tuo computer apri l'app → **Ajustes → Opciones avanzadas → GitHub**: owner `Mardar91`, repo `mauricio-datos`, token → *Guardar y conectar* → nel messaggio «Conectado» tocca *Entendido* → **Crear enlace para Mauricio** (anche dal tuo iPhone) → copia il link e mandalo a Mauricio (es. WhatsApp).
 4. Sull'iPhone di Mauricio:
    1. Apri il sito in **Safari** e installa l'app: «•••» → Compartir → *Agregar a inicio*, lasciando attivo «Abrir como app web».
    2. Apri l'app **dall'icona**.

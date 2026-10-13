@@ -375,7 +375,8 @@ export function createSettings(ctx) {
     const eye = h('button', { class: 'icon-btn', type: 'button', 'aria-label': showToken ? 'Ocultar token' : 'Mostrar token', dataset: { fkey: 'eye' }, on: { click: () => { showToken = !showToken; refresh(); } } }, icon(showToken ? 'eyeOff' : 'eye'));
     const formCfg = () => normalizeSyncConfig({ ...(form || f) });
     const readOnly = isReadOnlyDevice(s);
-    const canLink = s.enabled && isSyncKey(s.key) && !readOnly && Boolean(s.lastPushAt || s.lastPullAt);
+    // El enlace lleva la misma clave y token: vale desde cualquier dispositivo que ya leyó o publicó
+    const canLink = s.enabled && isSyncKey(s.key) && Boolean(s.lastPushAt || s.lastPullAt);
 
     const tech = s.enabled ? h('ul', { class: 'tech-list' },
       h('li', {}, h('span', {}, 'Este dispositivo'), h('code', {}, s.deviceId || '—')),
@@ -406,7 +407,7 @@ export function createSettings(ctx) {
         actionButton('connect', 'Guardar y conectar', 'cloud', async () => {
           const cfg = formCfg();
           if (!cfg) { ctx.toast('Revisa los datos: usuario, repositorio, rama o token no válidos.', { type: 'error' }); return; }
-          const ok = await runSetup(ctx, cfg, { confirm: false });
+          const ok = await runSetup(ctx, cfg, { confirm: false, helper: true });
           if (ok) form = null;
         }, 'btn-primary btn-sm')),
       tech,
