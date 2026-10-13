@@ -48,7 +48,7 @@ test('Mauricio (conectado) abre el enlace de Ana: OTHER_PERSON, no cambia nada y
   assert.equal(t.error.message, 'Este enlace es del calendario de Ana y este dispositivo usa el de Mauricio. No se cambió nada.');
   assert.match(t.error.detail, /Mardar91\/mauricio-datos\/\(raíz\).*Mardar91\/mauricio-datos\/ana/);
   assert.deepEqual(t.otherPerson, {
-    reason: 'folder', name: 'Ana', dir: 'ana', current: { name: 'Mauricio', dir: '' }, working: true, bound: true,
+    reason: 'folder', name: 'Ana', dir: 'ana', current: { name: 'Mauricio', dir: '' }, working: true, bound: true, unnamed: false,
     from: 'Mardar91/mauricio-datos', to: 'Mardar91/mauricio-datos, carpeta ana',
   });
   assert.equal(t.apply, undefined);
@@ -99,6 +99,12 @@ test('Ana (conectada a ana/) abre el enlace de Mauricio: OTHER_PERSON con su nom
   A = setDay(A, '2026-10-14', ['F1'], { now: at(5) });
   const sa = memStore(A);
   const qa = createSyncQueue(sa, { fetchImpl: gh.fetch, clock: () => at(6) });
+  // Sin nombre y con turnos: primero se pregunta de quién son («¿Estos turnos son de Ana?»)
+  const ask = await qa.setup(parseSetupLink(ana.link));
+  assert.deepEqual([ask.error?.code, ask.otherPerson?.reason, ask.otherPerson?.unnamed, ask.otherPerson?.name], ['OTHER_PERSON', 'name', true, 'Ana']);
+  assert.equal(sa.get(), A, 'no cambió nada');
+  // «Sí, son de Ana» (la UI pone el nombre y repite)
+  sa.set((s) => updateSettings(s, { name: ask.otherPerson.name }));
   assert.equal((await qa.setup(parseSetupLink(ana.link))).ok, true);
   assert.equal((await qa.sync()).pushed, true);
   const Anow = sa.get();
@@ -132,7 +138,7 @@ test('Ana (conectada a ana/) abre el enlace de Mauricio: OTHER_PERSON con su nom
   assert.deepEqual(Object.keys(anaData.days).map((k) => anaData.days[k].codes), [['F1'], ['F1']]);
 });
 
-test('sin conectar: con turnos y otro nombre → OTHER_PERSON; sin nombre o con el mismo, no se bloquea', async () => {
+test('sin conectar: con turnos y otro nombre → OTHER_PERSON; sin nombre se pregunta (unnamed); con el mismo, no se bloquea', async () => {
   const { gh, ana } = await family();
   const link = parseSetupLink(ana.link);
   const days = { '2026-10-20': ['F1'] };
@@ -142,16 +148,29 @@ test('sin conectar: con turnos y otro nombre → OTHER_PERSON; sin nombre o con 
   assert.equal(t.error?.code, 'OTHER_PERSON');
   assert.deepEqual([t.otherPerson.reason, t.otherPerson.name, t.otherPerson.working], ['name', 'Ana', false]);
   assert.equal(t.error.message, 'Este enlace es del calendario de Ana y en este dispositivo hay turnos de Mauricio. No se cambió nada.');
-  // Ana escanea antes de tener su enlace (sin nombre, o con el suyo; mayúsculas y acentos no cuentan)
-  for (const name of [undefined, 'Ana', 'ána maría']) {
-    const s = stateWith(days, name ? { name } : undefined);
+  // Ana escanea antes de tener su enlace, sin poner su nombre: no se sabe de quién son → se pregunta
+  const unnamed = stateWith(days);
+  const u = await trySetupConfig(unnamed, link, { fetchImpl: gh.fetch, now: at(3) });
+  assert.equal(u.error?.code, 'OTHER_PERSON');
+  assert.deepEqual([u.otherPerson.reason, u.otherPerson.name, u.otherPerson.unnamed, u.otherPerson.bound, u.otherPerson.current.name], ['name', 'Ana', true, false, null]);
+  assert.equal(u.error.message, 'Este enlace es del calendario de Ana, y en este dispositivo ya hay turnos sin nombre (no se sabe de quién son). No se cambió nada.');
+  assert.equal(u.apply, undefined);
+  // Con el suyo (mayúsculas y acentos no cuentan; también tras «Sí, son de Ana»): no se bloquea
+  for (const name of ['Ana', 'ána maría']) {
+    const s = stateWith(days, { name });
     const r = await trySetupConfig(s, link, { fetchImpl: gh.fetch, now: at(3) });
     assert.equal(r.ok, true, `${name}: ${JSON.stringify(r.error)}`);
     assert.equal(r.switched, false);
     const applied = r.apply(s);
     assert.deepEqual(codesOf(applied), { '2026-10-20': ['F1'] }, 'sus turnos se quedan');
-    assert.equal(applied.settings.name, name ? name.trim() : 'Ana');
+    assert.equal(applied.settings.name, name.trim());
   }
+  // «No, no son de Ana» → cambio limpio (switchPerson): sus turnos no pasan a ana/
+  const sw = await trySetupConfig(unnamed, link, { fetchImpl: gh.fetch, now: at(3), switchPerson: true });
+  assert.equal(sw.ok, true, JSON.stringify(sw.error));
+  assert.equal(sw.switched, true);
+  const clean = sw.apply(unnamed);
+  assert.deepEqual([codesOf(clean), clean.settings.name, clean.settings.sync.dir], [{}, 'Ana', 'ana']);
   // Sin turnos y con otro nombre: no se bloquea (nada que mezclar) y conserva su nombre
   const empty = updateSettings(createDefaultState(), { name: 'Mauricio' });
   const e = await trySetupConfig(empty, link, { fetchImpl: gh.fetch, now: at(4) });

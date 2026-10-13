@@ -144,17 +144,19 @@ export function sheetsOpen() {
 
 // Diálogo de confirmación centrado → Promise<boolean>
 // onOk: se ejecuta dentro del mismo toque (p. ej. copiar al portapapeles en iOS)
-export function confirmDialog({ title, text = '', ok = 'Aceptar', cancel = 'Cancelar', danger = false, icon: emoji, onOk, className = '' } = {}) {
+// prefer: 'cancel' → lo recomendado es NO hacerlo: «cancelar» va primero y destacado (y «ok» discreto)
+export function confirmDialog({ title, text = '', ok = 'Aceptar', cancel = 'Cancelar', danger = false, icon: emoji, onOk, className = '', prefer = 'ok' } = {}) {
   return new Promise((resolve) => {
     const prevFocus = document.activeElement;
     const titleId = nextId('dlg');
-    const okBtn = h('button', { class: ['btn', danger ? 'btn-danger' : 'btn-primary'], type: 'button' }, ok);
-    const cancelBtn = cancel ? h('button', { class: 'btn btn-secondary', type: 'button' }, cancel) : null;
-    const box = h('div', { class: ['dialog', className], role: 'alertdialog', 'aria-modal': 'true', 'aria-labelledby': titleId, tabindex: '-1' },
+    const safe = prefer === 'cancel' && Boolean(cancel);
+    const okBtn = h('button', { class: ['btn', safe ? 'btn-secondary' : danger ? 'btn-danger' : 'btn-primary'], type: 'button', 'data-role': 'ok' }, ok);
+    const cancelBtn = cancel ? h('button', { class: ['btn', safe ? 'btn-primary' : 'btn-secondary'], type: 'button', 'data-role': 'cancel' }, cancel) : null;
+    const box = h('div', { class: ['dialog', className, safe && 'dialog-safe'], role: 'alertdialog', 'aria-modal': 'true', 'aria-labelledby': titleId, tabindex: '-1' },
       emoji ? h('div', { class: 'dialog-emoji', 'aria-hidden': 'true' }, emoji) : null,
       h('h2', { id: titleId, class: 'dialog-title' }, title),
       text ? (text instanceof Node ? h('div', { class: 'dialog-text' }, text) : h('p', { class: 'dialog-text' }, text)) : null,
-      h('div', { class: 'dialog-actions' }, okBtn, cancelBtn));
+      h('div', { class: 'dialog-actions' }, safe ? cancelBtn : okBtn, safe ? okBtn : cancelBtn));
     const wrap = h('div', { class: 'dialog-wrap' }, h('div', { class: 'backdrop' }), box);
     const api = { close: (v) => finish(v) };
     let done = false;

@@ -76,7 +76,7 @@ test('formulario con otro repositorio (el caso de la hermana): OTHER_TARGET, no 
   assert.equal(t.error.retry, false);
   assert.equal(t.error.message, 'Este dispositivo ya tiene el calendario de Mauricio (Mardar91/mauricio-datos). Esta conexión es a otro calendario (Mardar91/sorella-datos). No se cambió nada.');
   assert.deepEqual(t.otherPerson, {
-    reason: 'target', name: null, dir: '', current: { name: 'Mauricio', dir: '' }, working: true, bound: true,
+    reason: 'target', name: null, dir: '', current: { name: 'Mauricio', dir: '' }, working: true, bound: true, unnamed: false,
     from: 'Mardar91/mauricio-datos', to: 'Mardar91/sorella-datos',
   });
   assert.equal(t.apply, undefined);
@@ -121,6 +121,10 @@ test('cambio confirmado a otro repositorio: estado limpio y clave nueva; ni «Us
   const link = parseSetupLink(buildSetupLink(BASE, { ...store.get().settings.sync, name: 'Lucía' }));
   const ls = memStore(stateWith({ '2026-10-20': ['F1'] }));
   const ql = queue(ls, fetch, 20);
+  // Sus turnos no tienen nombre: «¿Estos turnos son de Lucía?» → «Sí» (la UI pone el nombre y repite)
+  const ask = await ql.setup(link);
+  assert.deepEqual([ask.error?.code, ask.otherPerson?.unnamed, ask.otherPerson?.name], ['OTHER_PERSON', true, 'Lucía']);
+  ls.set((x) => updateSettings(x, { name: ask.otherPerson.name }));
   const tl = await ql.setup(link);
   assert.equal(tl.ok, true, JSON.stringify(tl.error));
   assert.equal(tl.readOnly, true);
@@ -417,10 +421,13 @@ test('enlace de la raíz con el nombre (buildSetupLink con name): de punta a pun
   // Con el mismo nombre (mayúsculas aparte) no se bloquea
   const same = stateWith({ '2026-10-20': ['F1'] }, { name: 'mauricio' });
   assert.equal((await trySetupConfig(same, cfg, { fetchImpl: gh.fetch, now: at(3) })).ok, true);
-  // El iPhone de Mauricio (con lo que escaneó, sin nombre): toma el del enlace y, al pasar a publicar,
-  // el calendario es suyo
+  // El iPhone de Mauricio (con lo que escaneó, sin nombre): primero «¿Estos turnos son de Mauricio?»;
+  // con «Sí» toma el nombre y, al pasar a publicar, el calendario es suyo
   const ip = memStore(stateWith({ '2026-10-21': ['S1'] }, { onboardingDone: true }));
   const qi = queue(ip, gh.fetch, 5);
+  const ask = await qi.setup(cfg);
+  assert.deepEqual([ask.error?.code, ask.otherPerson?.unnamed, ask.otherPerson?.name], ['OTHER_PERSON', true, 'Mauricio']);
+  ip.set((x) => updateSettings(x, { name: ask.otherPerson.name }));
   const t = await qi.setup(cfg);
   assert.equal(t.ok, true, JSON.stringify(t.error));
   assert.equal(t.readOnly, true, 'publica el ordenador de quien ayuda');

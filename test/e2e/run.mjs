@@ -1749,11 +1749,10 @@ test('varias personas: el enlace de Ana abierto en su Android publica en «ana/�
   let st = core.updateSettings(core.createDefaultState(), { onboardingDone: true });
   st = core.setDay(st, '2026-10-14', ['S1'], { now: new Date('2026-10-12T10:00:00Z') });
   const { page, ctx, errors } = await openApp({ state: st, gh, hash: p.link.slice(APP.length), device: 'android', standalone: false });
-  await page.waitForSelector('.dialog-wrap.open');
-  const confirm = await text(page, '.dialog-wrap.open .dialog');
-  assert.match(confirm, /Conectar el calendario del teléfono/);
-  assert.match(confirm, /para Ana/);
-  await page.click('.dialog-wrap.open .dialog .btn-primary');
+  // Su turno no dice de quién es: primero «¿Estos turnos son de Ana?» (sin el «Conectar…» genérico)
+  await waitDialog(page, '¿Estos turnos son de Ana?');
+  assert.match(await text(page, '.dialog-wrap.open .dialog'), /En este teléfono hay 1 día con turnos y no dice de quién son/);
+  await clickDialog(page, 'Sí, son de Ana');
   await page.waitForSelector('[data-testid="subscribe-step"]', { timeout: 15000 });
   await page.waitForSelector('.sheet-subscribe [data-testid="webcal"][aria-disabled="false"]', { timeout: 15000 });
   assert.match(await page.getAttribute('.sheet-subscribe [data-testid="webcal"]', 'href'), /^intent:\/\/raw\.githubusercontent\.com\/[^#]+\/HEAD\/ana\/turnos\.ics#Intent;scheme=webcals;package=at\.bitfire\.icsdroid;/);
@@ -1761,7 +1760,8 @@ test('varias personas: el enlace de Ana abierto en su Android publica en «ana/�
   assert.ok(await visible(page, '.sheet-subscribe [data-testid="copy-cal-link"]'), '«Copiar enlace» siempre');
   const s = await getState(page);
   assert.equal(s.settings.sync.dir, 'ana');
-  assert.equal(s.settings.name, 'Ana', 'el nombre del enlace se guarda (no tenía)');
+  assert.equal(s.settings.name, 'Ana', '«Sí, son de Ana»: su nombre se guarda (no tenía)');
+  assert.deepEqual(Object.keys(s.days), ['2026-10-14'], 'su turno se queda');
   assert.equal(s.settings.sync.key, p.key);
   const backup = gh.json('ana/backup.json');
   assert.equal(backup.meta.publisher, s.settings.sync.deviceId, 'el teléfono de Ana publica su carpeta');
@@ -2162,6 +2162,19 @@ test('diseño a 360 px: las horas lado a lado pasan una debajo de otra (formato 
 const anaHash = () => setupHash({ dir: 'ana', key: OTHER_KEY, name: 'Ana' });
 const dialogTitle = (page) => text(page, '.dialog-wrap.open .dialog-title');
 const openHash = (page, hash) => page.evaluate((hsh) => { location.hash = hsh; }, hash);
+// Anota el título de cada diálogo que se abre (window.__titles)
+const recordDialogs = (page) => page.evaluate(() => {
+  window.__titles = [];
+  new MutationObserver((list) => {
+    for (const m of list) for (const n of m.addedNodes) {
+      if (n.nodeType !== 1) continue;
+      for (const t of n.matches?.('.dialog-title') ? [n] : n.querySelectorAll?.('.dialog-title') || []) window.__titles.push(t.textContent.trim());
+    }
+  }).observe(document.body, { childList: true, subtree: true });
+});
+const titles = (page) => page.evaluate(() => window.__titles || []);
+const waitDialog = (page, title) => page.waitForSelector(`.dialog-wrap.open .dialog-title:text-is(${JSON.stringify(title)})`, { timeout: 15000 });
+const clickDialog = (page, label) => page.click(`.dialog-wrap.open .dialog button:text-is(${JSON.stringify(label)})`);
 
 test('otra persona: el enlace de Ana en un teléfono que usa el calendario de Mauricio pregunta; Cancelar no cambia nada', async () => {
   const gh = await familyGitHub();
@@ -2170,11 +2183,11 @@ test('otra persona: el enlace de Ana en un teléfono que usa el calendario de Ma
   await waitState(page, (s) => Boolean(s.settings.sync.lastPullAt));
   const before = await getState(page);
   const writes = gh.writes().length;
+  await recordDialogs(page);
   await openHash(page, anaHash());
-  await page.waitForSelector('.dialog-wrap.open');
-  assert.match(await text(page, '.dialog-wrap.open .dialog'), /para Ana/);
-  await page.click('.dialog-wrap.open .dialog .btn-primary');
+  // Ya usa el calendario de otra persona: sin el «Conectar…» genérico, directamente la pregunta
   await page.waitForSelector('.dialog-wrap.open .dialog-title:text("¿Cambiar al calendario de Ana?")', { timeout: 15000 });
+  assert.deepEqual(await titles(page), ['¿Cambiar al calendario de Ana?'], 'un solo diálogo');
   const q = await text(page, '.dialog-wrap.open .dialog');
   assert.match(q, /Este enlace es del calendario de Ana y este dispositivo usa el de Mauricio\./, 'el mensaje del core');
   assert.match(q, /¿Cambiar este dispositivo a ese calendario\?/);
@@ -2200,16 +2213,14 @@ test('otra persona: confirmar pasa el teléfono al calendario de Ana sin llevar 
   await waitState(page, (s) => Boolean(s.settings.sync.lastPullAt));
   const nBefore = Object.keys((await getState(page)).days).length;
   const writes = gh.writes().length;
+  await recordDialogs(page);
   await openHash(page, anaHash());
-  await page.waitForSelector('.dialog-wrap.open');
-  await page.click('.dialog-wrap.open .dialog .btn-primary');
   await page.waitForSelector('.dialog-wrap.open .dialog-title:text("¿Cambiar al calendario de Ana?")', { timeout: 15000 });
   await page.click('.dialog-wrap.open .dialog .btn-primary');
-  // Ana ya publica desde su teléfono: este solo lee
-  await page.waitForSelector('.dialog-wrap.open .dialog-title:text("¿Usar este teléfono para actualizar el calendario?")', { timeout: 15000 });
-  await page.click('.dialog-wrap.open .dialog .btn-secondary');
+  // Ana ya publica desde su teléfono, y este es de Mauricio: no se ofrece tomar el relevo (solo lee)
   await page.waitForSelector('[data-testid="subscribe-step"]', { timeout: 15000 });
-  assert.match(await text(page, '[data-testid="switched-note"]'), /Este teléfono usa ahora «Turnos de Ana»\. Si antes te suscribiste al de Mauricio/);
+  assert.ok(!(await titles(page)).some((t) => /¿Usar este/.test(t)), `sin «¿Usar este…?»: ${await titles(page)}`);
+  assert.match(await text(page, '[data-testid="switched-note"]'), /Este teléfono usa ahora «Turnos de Ana»\. Solo lee: ese calendario lo sigue actualizando otro dispositivo\. Si antes te suscribiste al de Mauricio/);
   const s = await getState(page);
   assert.equal(s.settings.sync.dir, 'ana');
   assert.equal(s.settings.sync.key, OTHER_KEY);
@@ -2240,12 +2251,8 @@ test('otra persona: la copia de antes de cambiar sale en «Restaurar» y al recu
   await waitState(page, (s) => Boolean(s.settings.sync.lastPullAt));
   const writes = gh.writes().length;
   await openHash(page, anaHash());
-  await page.waitForSelector('.dialog-wrap.open');
-  await page.click('.dialog-wrap.open .dialog .btn-primary');
   await page.waitForSelector('.dialog-wrap.open .dialog-title:text("¿Cambiar al calendario de Ana?")', { timeout: 15000 });
   await page.click('.dialog-wrap.open .dialog .btn-primary');
-  await page.waitForSelector('.dialog-wrap.open .dialog-title:text("¿Usar este teléfono para actualizar el calendario?")', { timeout: 15000 });
-  await page.click('.dialog-wrap.open .dialog .btn-secondary');
   await page.waitForSelector('[data-testid="subscribe-step"]', { timeout: 15000 });
   await page.click('.sheet-subscribe .sheet-close');
   await page.waitForSelector('.sheet-wrap', { state: 'detached' });
@@ -2329,8 +2336,11 @@ test('datos de otro calendario (sincronización detenida): «Cambiar al calendar
   await page.waitForSelector('.dialog-wrap.open .dialog-title:text("¿Cambiar de calendario?")', { timeout: 15000 });
   assert.match(await text(page, '.dialog-wrap.open .dialog'), /¿Cambiar este dispositivo a ese calendario\?/);
   await page.click('.dialog-wrap.open .dialog .btn-primary');
-  await page.waitForSelector('.dialog-wrap.open .dialog-title:text("¿Usar este teléfono para actualizar el calendario?")', { timeout: 15000 });
-  await page.click('.dialog-wrap.open .dialog .btn-secondary');
+  // Es el calendario de Mauricio y este teléfono es de Mauricio: se ofrece, con su nombre
+  await waitDialog(page, '¿Usar este teléfono para actualizar el calendario de Mauricio?');
+  assert.match(await text(page, '.dialog-wrap.open .dialog'), /Hazlo solo si este es el teléfono de Mauricio\./);
+  assert.equal(await text(page, '.dialog-wrap.open .dialog .btn-primary'), 'Sí, usar este', 'recomendado (la misma persona)');
+  await clickDialog(page, 'No, solo leer');
   // La dirección del calendario no cambia: no hace falta suscribirse otra vez; «Deshacer» en el aviso
   await page.waitForSelector('.toast:has-text("usa ahora el calendario de Mauricio") .toast-action', { timeout: 15000 });
   const s = await getState(page);
@@ -2570,6 +2580,326 @@ test('PWA: el lector se descarga en segundo plano y el primer escaneo funciona S
     if (prevFlag === undefined) delete process.env.PW_EXPERIMENTAL_SERVICE_WORKER_NETWORK_EVENTS;
     else process.env.PW_EXPERIMENTAL_SERVICE_WORKER_NETWORK_EVENTS = prevFlag;
     for (const s of sockets) s.destroy();
+    proxy.close();
+  }
+}, { slow: true });
+
+// ---------- 1.4.3 ----------
+
+// Teléfono de Ana con sus turnos (ANA-MARK), nunca conectado. name '' = saltó «¿Cómo te llamas?»
+function anaPhoneState(name = '') {
+  let st = core.updateSettings(core.createDefaultState(), { onboardingDone: true, name });
+  st = core.setDay(st, '2026-10-15', ['N1'], { now: new Date('2026-10-12T10:00:00Z') });
+  st = core.setDay(st, '2026-12-24', ['N1'], { note: 'ANA-MARK', now: new Date('2026-10-12T10:00:00Z') });
+  return st;
+}
+const copiesIn = (page) => page.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith('turnos-mauricio:before-import:')).length);
+const mauState = () => core.updateSettings(demoState(), { name: 'Mauricio', sync: { ...SYNC, deviceId: 'iphone1' } });
+
+test('S2b: teléfono sin nombre y con turnos abre el enlace de Mauricio: «¿Estos turnos son de Mauricio?»; «No» → cancelar o cambiar limpio', async () => {
+  const gh = await familyGitHub();
+  const rootBackup = gh.text('backup.json');
+  const { page, ctx, errors } = await openApp({ state: anaPhoneState(), gh, device: 'android', standalone: false });
+  await recordDialogs(page);
+  const writes = gh.writes().length;
+  const link = setupHash({ name: 'Mauricio' });
+  await openHash(page, link);
+  await waitDialog(page, '¿Estos turnos son de Mauricio?');
+  assert.deepEqual(await titles(page), ['¿Estos turnos son de Mauricio?'], 'lo primero: de quién son (sin «Conectar…» ni «¿Usar este…?»)');
+  const q = await text(page, '.dialog-wrap.open .dialog');
+  assert.match(q, /En este teléfono hay 2 días con turnos y no dice de quién son\. El enlace es del calendario de Mauricio: si son de Mauricio, se juntan con su calendario\. Si son de otra persona, toca «No» y no se junta nada\./);
+  await clickDialog(page, 'No');
+  await waitDialog(page, '¿Cambiar este teléfono al calendario de Mauricio?');
+  assert.match(await text(page, '.dialog-wrap.open .dialog'), /no se juntan con los de Mauricio[\s\S]*se guardan como copia y puedes deshacerlo[\s\S]*pide el correcto/);
+  await clickDialog(page, 'Cancelar');
+  await page.waitForSelector('.dialog-wrap', { state: 'detached' });
+  await page.waitForTimeout(300);
+  let s = await getState(page);
+  assert.deepEqual([s.settings.sync.enabled, s.settings.name, Object.keys(s.days).sort()], [false, '', ['2026-10-15', '2026-12-24']], 'Cancelar: nada cambia');
+  assert.equal(await copiesIn(page), 0, 'sin copia sobrante');
+  assert.equal(gh.writes().length, writes);
+  // Otra vez: «No» → «Sí, cambiar»: solo lo de Mauricio, y no se ofrece tomar el relevo
+  await page.evaluate(() => { location.hash = ''; });
+  await openHash(page, link);
+  await waitDialog(page, '¿Estos turnos son de Mauricio?');
+  await clickDialog(page, 'No');
+  await waitDialog(page, '¿Cambiar este teléfono al calendario de Mauricio?');
+  await clickDialog(page, 'Sí, cambiar');
+  await page.waitForSelector('[data-testid="subscribe-step"]', { timeout: 15000 });
+  assert.ok(!(await titles(page)).some((t) => /¿Usar este/.test(t)), `sin «¿Usar este…?»: ${await titles(page)}`);
+  assert.match(await text(page, '[data-testid="switched-note"]'), /Solo lee: ese calendario lo sigue actualizando otro dispositivo/);
+  s = await getState(page);
+  assert.equal(s.settings.sync.dir, '');
+  assert.ok(!s.days['2026-12-24'] && s.days['2026-10-15']?.codes.join() !== 'N1', 'sin los turnos de Ana');
+  assert.equal(s.settings.name, 'Mauricio');
+  assert.equal(gh.text('backup.json'), rootBackup, 'el calendario de Mauricio no cambia');
+  assert.equal(gh.writes().length, writes, 'nada se escribe');
+  // «Restaurar»: la copia de antes (sin conectar) lo dice
+  await page.click('.sheet-subscribe .sheet-close');
+  await page.waitForSelector('.sheet-wrap', { state: 'detached' });
+  await page.click('[data-testid="advanced"] > summary');
+  const row = page.locator('#set-restore .set-row', { hasText: 'Copia de antes de cambiar de calendario' });
+  assert.match(await row.innerText(), /2 días \(sin conectar\)/);
+  await row.locator('[data-testid="restore-copy"]').click();
+  await waitDialog(page, '¿Volver a esta copia?');
+  const r = await text(page, '.dialog-wrap.open .dialog');
+  assert.match(r, /con 2 días \(sin conectar\)\. Este dispositivo vuelve a como estaba \(sin conectar\) y deja el calendario de ahora\./);
+  assert.doesNotMatch(r, /vuelve a ese calendario|Ojo/);
+  await clickDialog(page, 'Volver a esta copia');
+  await waitState(page, (x) => Boolean(x.days['2026-12-24']) && x.settings.sync.enabled === false && x.settings.name === '');
+  await page.waitForTimeout(800);
+  assert.equal(gh.writes().length, writes, 'tampoco al volver');
+  return { ctx, errors };
+});
+
+test('S2b: «Sí, son de Mauricio» → «¿Usar este teléfono para actualizar el calendario de Mauricio?… Hazlo solo si…»; «No, solo leer» no publica', async () => {
+  const gh = await familyGitHub();
+  const rootBackup = gh.text('backup.json');
+  const { page, ctx, errors } = await openApp({ state: anaPhoneState(), gh, device: 'android', standalone: false });
+  const writes = gh.writes().length;
+  await openHash(page, setupHash({ name: 'Mauricio' }));
+  await waitDialog(page, '¿Estos turnos son de Mauricio?');
+  await clickDialog(page, 'Sí, son de Mauricio');
+  await waitDialog(page, '¿Usar este teléfono para actualizar el calendario de Mauricio?');
+  const q = await text(page, '.dialog-wrap.open .dialog');
+  assert.match(q, /Hazlo solo si este es el teléfono de Mauricio\./);
+  assert.doesNotMatch(q, /Recomendado si este es tu/);
+  await clickDialog(page, 'No, solo leer');
+  await page.waitForSelector('[data-testid="subscribe-step"]', { timeout: 15000 });
+  const s = await getState(page);
+  assert.equal(s.settings.name, 'Mauricio', '«Sí»: el teléfono es de Mauricio');
+  assert.ok(s.days['2026-12-24'], 'sus turnos se quedan aquí');
+  assert.equal(gh.text('backup.json'), rootBackup, 'solo lee');
+  assert.equal(gh.writes().length, writes);
+  return { ctx, errors };
+});
+
+test('el teléfono de Ana (con nombre, sin turnos) abre el enlace de Mauricio: tomar el relevo no se recomienda («No, solo leer» primero)', async () => {
+  const gh = await familyGitHub({ ana: false });
+  const rootBackup = gh.text('backup.json');
+  const st = core.updateSettings(core.createDefaultState(), { onboardingDone: true, name: 'Ana' });
+  const { page, ctx, errors } = await openApp({ state: st, gh, device: 'android', standalone: false });
+  await openHash(page, setupHash({ name: 'Mauricio' }));
+  await waitDialog(page, 'Conectar el calendario del teléfono');
+  await clickDialog(page, 'Sí, conectar');
+  await waitDialog(page, '¿Usar este teléfono para actualizar el calendario de Mauricio?');
+  assert.match(await text(page, '.dialog-wrap.open .dialog'), /Hazlo solo si este es el teléfono de Mauricio\./);
+  assert.deepEqual(await page.locator('.dialog-wrap.open .dialog-actions button').allInnerTexts(), ['No, solo leer', 'Sí, usar este']);
+  assert.equal(await text(page, '.dialog-wrap.open .dialog .btn-primary'), 'No, solo leer');
+  await clickDialog(page, 'No, solo leer');
+  await page.waitForSelector('[data-testid="subscribe-step"]', { timeout: 15000 });
+  assert.equal(gh.text('backup.json'), rootBackup);
+  return { ctx, errors };
+});
+
+test('S1: el iPhone de Mauricio cambia al calendario de Ana: no se ofrece tomar el relevo y «Deshacer» deja ana/ con su teléfono publicando', async () => {
+  const gh = await familyGitHub();
+  const anaBefore = gh.text('ana/backup.json');
+  const { page, ctx, errors } = await openApp({ state: mauState(), gh, standalone: true });
+  await waitState(page, (s) => Boolean(s.settings.sync.lastPullAt));
+  await recordDialogs(page);
+  const writes = gh.writes().length;
+  await openHash(page, anaHash());
+  await waitDialog(page, '¿Cambiar al calendario de Ana?');
+  await clickDialog(page, 'Sí, cambiar');
+  await page.waitForSelector('[data-testid="subscribe-step"]', { timeout: 15000 });
+  assert.deepEqual(await titles(page), ['¿Cambiar al calendario de Ana?'], 'ni «Conectar…» ni «¿Usar este iPhone…?»');
+  const s = await getState(page);
+  assert.deepEqual([s.settings.sync.dir, s.settings.sync.publisher, s.settings.sync.key], ['ana', 'android-ana', OTHER_KEY]);
+  await page.click('[data-testid="switch-undo"]');
+  await waitState(page, (x, k) => x.settings.sync.dir === '' && x.settings.sync.key === k, KEY);
+  await page.evaluate(() => window.__turnosTest.background().runSync({ manual: true, force: true }));
+  await page.waitForTimeout(1200);
+  assert.equal(gh.text('ana/backup.json'), anaBefore, 'ana/ sigue igual');
+  assert.equal(gh.json('ana/backup.json').meta.publisher, 'android-ana', 'lo sigue publicando el teléfono de Ana');
+  assert.equal(gh.writes().slice(writes).filter((l) => /\/contents\/ana\//.test(l)).length, 0, 'nada se escribe en ana/');
+  return { ctx, errors };
+});
+
+test('S1b: tras cambiar al calendario de Ana, «Usar este dispositivo» lo nombra y «Restaurar» avisa de que dejará de actualizarse', async () => {
+  const gh = await familyGitHub();
+  const { page, ctx, errors } = await openApp({ state: mauState(), gh, standalone: true });
+  await waitState(page, (s) => Boolean(s.settings.sync.lastPullAt));
+  await openHash(page, anaHash());
+  await waitDialog(page, '¿Cambiar al calendario de Ana?');
+  await clickDialog(page, 'Sí, cambiar');
+  await page.waitForSelector('[data-testid="subscribe-step"]', { timeout: 15000 });
+  await page.click('.sheet-subscribe .sheet-close');
+  await page.waitForSelector('.sheet-wrap', { state: 'detached' });
+  await page.click('[data-testid="takeover"]');
+  await waitDialog(page, '¿Actualizar el calendario de Ana desde este iPhone?');
+  assert.match(await text(page, '.dialog-wrap.open .dialog'), /Hazlo solo si este es el iPhone de Ana\./);
+  await clickDialog(page, 'Sí, usar este');
+  await page.waitForSelector('.toast:has-text("ahora el calendario se actualiza desde aquí")', { timeout: 15000 });
+  assert.equal(gh.json('ana/backup.json').meta.publisher, 'iphone1');
+  await page.click('[data-testid="advanced"] > summary');
+  const row = page.locator('#set-restore .set-row', { hasText: 'Copia de antes de cambiar de calendario' });
+  await row.locator('[data-testid="restore-copy"]').click();
+  await waitDialog(page, '¿Volver a esta copia?');
+  assert.match(await text(page, '.dialog-wrap.open .dialog'), /\(calendario de Mauricio\)\. Este dispositivo vuelve a ese calendario y deja el de ahora\. Ojo: este iPhone actualiza ahora el calendario de Ana: dejará de actualizarse hasta que otro dispositivo toque «Usar este dispositivo»\./);
+  await clickDialog(page, 'Cancelar');
+  return { ctx, errors };
+});
+
+test('misma persona en otra carpeta: tras cambiar se ofrece el relevo con su nombre (recomendado) y «Deshacer» recuerda «Usar este dispositivo»', async () => {
+  const gh = await familyGitHub({ ana: false });
+  const MKEY = Buffer.alloc(32, 5).toString('base64url');
+  // Quien ayuda preparó otra carpeta para Mauricio y la publica desde su ordenador (vacía)
+  await seedRemote(gh, core.updateSettings(core.createDefaultState(), { onboardingDone: true }), { deviceId: 'pc1', dir: 'mauricio', key: MKEY, name: 'Mauricio' });
+  const { page, ctx, errors } = await openApp({ state: mauState(), gh, standalone: true });
+  await waitState(page, (s) => Boolean(s.settings.sync.lastPullAt));
+  await openHash(page, setupHash({ dir: 'mauricio', key: MKEY, name: 'Mauricio' }));
+  await waitDialog(page, '¿Cambiar de calendario?');
+  await clickDialog(page, 'Sí, cambiar');
+  await waitDialog(page, '¿Usar este iPhone para actualizar el calendario de Mauricio?');
+  assert.equal(await text(page, '.dialog-wrap.open .dialog .btn-primary'), 'Sí, usar este', 'recomendado: la misma persona');
+  await clickDialog(page, 'Sí, usar este');
+  await page.waitForSelector('[data-testid="subscribe-step"]', { timeout: 15000 });
+  await waitState(page, (x) => x.settings.sync.dir === 'mauricio' && x.settings.sync.publisher === x.settings.sync.deviceId);
+  assert.equal(gh.json('mauricio/backup.json').meta.publisher, 'iphone1');
+  await page.click('[data-testid="switch-undo"]');
+  await page.waitForSelector('.toast:has-text("ya no se actualiza desde aquí: en el dispositivo que lo usa, toca «Usar este dispositivo»")', { timeout: 10000 });
+  await waitState(page, (x) => x.settings.sync.dir === '');
+  return { ctx, errors };
+});
+
+test('S2c: enlace antiguo sin nombre y copia de la raíz sin meta.name: el nombre sale del calendario publicado («Turnos de Mauricio»)', async () => {
+  const gh = await familyGitHub({ ana: false });
+  const doc = gh.json('backup.json');
+  delete doc.meta.name; // como una copia de 1.4.1 (no va en los datos autenticados)
+  gh.write('backup.json', JSON.stringify(doc));
+  assert.match(gh.text('turnos.ics'), /X-WR-CALNAME:Turnos de Mauricio/);
+  const { page, ctx, errors } = await openApp({ state: anaPhoneState('Ana'), gh, device: 'android', standalone: false });
+  const writes = gh.writes().length;
+  await openHash(page, setupHash());
+  await waitDialog(page, 'Conectar el calendario del teléfono'); // el enlace no dice de quién es
+  await clickDialog(page, 'Sí, conectar');
+  await waitDialog(page, '¿Cambiar al calendario de Mauricio?');
+  assert.match(await text(page, '.dialog-wrap.open .dialog'), /Este enlace es del calendario de Mauricio y en este dispositivo hay turnos de Ana\./);
+  await clickDialog(page, 'Cancelar');
+  await page.waitForSelector('.dialog-wrap', { state: 'detached' });
+  await page.waitForTimeout(300);
+  const s = await getState(page);
+  assert.equal(s.settings.sync.enabled, false);
+  assert.ok(s.days['2026-12-24']);
+  assert.equal(gh.writes().length, writes);
+  return { ctx, errors };
+});
+
+test('S3b: quien ayuda cambia de rama en el formulario: no se pregunta ni se crea la rama; recomienda «Crear enlace para otra persona»', async () => {
+  const gh = await familyGitHub({ ana: false });
+  const helper = core.updateSettings(core.createDefaultState(), { onboardingDone: true, name: 'Mauricio', sync: { ...SYNC, deviceId: 'pc1' } });
+  const { page, ctx, errors } = await openApp({ state: helper, gh, device: 'desktop', width: 1280, height: 800, standalone: false });
+  await waitState(page, (s) => Boolean(s.settings.sync.lastPullAt) && Object.keys(s.days).length > 5);
+  await recordDialogs(page);
+  const writes = gh.writes().length;
+  const nDays = Object.keys((await getState(page)).days).length;
+  await tab(page, 'ajustes');
+  await page.click('[data-testid="advanced"] > summary');
+  await page.fill('[data-fkey="gh-branch"]', 'datos');
+  await page.click('[data-fkey="btn-connect"]');
+  await waitDialog(page, 'No se pudo conectar');
+  assert.match(await text(page, '.dialog-wrap.open .dialog'), /Esa rama todavía no existe[\s\S]*usa «Crear enlace para otra persona» \(le crea su carpeta\)\. No se cambió nada\./);
+  assert.deepEqual(await titles(page), ['No se pudo conectar'], 'sin «¿Cambiar de calendario?» antes');
+  await clickDialog(page, 'Entendido');
+  const s = await getState(page);
+  assert.deepEqual([s.settings.sync.branch, Object.keys(s.days).length], ['', nDays], 'nada cambia');
+  assert.equal(gh.branches.datos, undefined, 'la rama no se creó');
+  assert.equal(gh.writes().length, writes, 'nada se escribe');
+  assert.equal(await copiesIn(page), 0);
+  return { ctx, errors: errors.filter((e) => !/404/.test(e)) };
+});
+
+test('sin internet, un enlace de otro calendario en un teléfono conectado: «no se cambió nada… Abre el enlace otra vez»', async () => {
+  const gh = await familyGitHub();
+  const { page, ctx, errors } = await openApp({ state: mauState(), gh, standalone: true });
+  await waitState(page, (s) => Boolean(s.settings.sync.lastPullAt));
+  const before = await getState(page);
+  await page.route('https://api.github.com/**', (r) => r.abort('internetdisconnected'));
+  await openHash(page, anaHash());
+  await waitDialog(page, 'No se pudo conectar');
+  assert.equal(await text(page, '.dialog-wrap.open .dialog-text'), 'Sin conexión a internet: no se cambió nada. Abre el enlace otra vez cuando tengas internet.');
+  await clickDialog(page, 'Entendido');
+  const after = await getState(page);
+  assert.deepEqual([after.settings.sync.dir, after.settings.sync.key, Object.keys(after.days).length], ['', KEY, Object.keys(before.days).length]);
+  assert.equal(await copiesIn(page), 0);
+  return { ctx, errors: errors.filter((e) => !/INTERNET_DISCONNECTED|Failed to fetch/.test(e)) };
+});
+
+test('quien ayuda vuelve por el formulario a un calendario sin su clave: el aviso explica «Restaurar → Copia de antes de cambiar de calendario»', async () => {
+  const gh = await familyGitHub({ ana: false });
+  const other = fakeGitHub({ empty: true });
+  const helper = core.updateSettings(core.createDefaultState(), { onboardingDone: true, name: 'Mauricio', sync: { ...SYNC, deviceId: 'pc1' } });
+  const { page, ctx, errors } = await openApp({ state: helper, gh, device: 'desktop', width: 1280, height: 800, standalone: false });
+  const cors = { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*', 'access-control-allow-methods': 'GET,PUT,POST,DELETE' };
+  await page.route('https://api.github.com/repos/*/ana-datos**', (route) => {
+    const req = route.request();
+    if (req.method() === 'OPTIONS') return route.fulfill({ status: 204, headers: cors });
+    const r = other.handle({ method: req.method(), url: req.url(), body: req.postData() });
+    return route.fulfill({ status: r.status, contentType: 'application/json', headers: cors, body: JSON.stringify(r.body) });
+  });
+  await waitState(page, (s) => Boolean(s.settings.sync.lastPullAt) && Object.keys(s.days).length > 5);
+  await tab(page, 'ajustes');
+  await page.click('[data-testid="advanced"] > summary');
+  await page.fill('[data-fkey="gh-repo"]', 'ana-datos');
+  await page.click('[data-fkey="btn-connect"]');
+  await waitDialog(page, '¿Cambiar de calendario?');
+  await clickDialog(page, 'Sí, cambiar');
+  await waitDialog(page, 'Conectado');
+  await clickDialog(page, 'Entendido');
+  await waitState(page, (s) => s.settings.sync.repo === 'ana-datos');
+  await page.fill('[data-fkey="gh-repo"]', REPO);
+  await page.click('[data-fkey="btn-connect"]');
+  await waitDialog(page, 'No se pudo conectar');
+  const msg = await text(page, '.dialog-wrap.open .dialog-text');
+  assert.match(msg, /^Falta la clave para leer tus turnos guardados en internet\. No se envió nada\. Para volver a un calendario que ya usabas aquí: Opciones avanzadas → Restaurar → «Copia de antes de cambiar de calendario», o abre aquí el enlace del teléfono que lo publica\.$/);
+  assert.doesNotMatch(msg, /Pide ayuda a quien te configuró/);
+  await clickDialog(page, 'Entendido');
+  return { ctx, errors: errors.filter((e) => !/404|409/.test(e)) };
+});
+
+test('PWA: si empieza un escaneo mientras se descarga el lector, se corta la descarga en curso (y se reintenta luego)', async () => {
+  // Servidor delante del estático: el diccionario (eng.traineddata.gz) tarda en llegar
+  const sockets = new Set();
+  const proxy = http.createServer(async (req, res) => {
+    try {
+      const r = await fetch(server.url + req.url);
+      const body = Buffer.from(await r.arrayBuffer());
+      res.writeHead(r.status, { 'content-type': r.headers.get('content-type') || 'application/octet-stream', 'cache-control': 'no-store', 'content-length': body.length });
+      if (!/eng\.traineddata/.test(req.url)) { res.end(body); return; }
+      res.write(body.subarray(0, 1024));
+      setTimeout(() => { try { res.end(body.subarray(1024)); } catch { /* cortado */ } }, 15000);
+    } catch { res.writeHead(502).end(); }
+  });
+  proxy.on('connection', (sk) => { sockets.add(sk); sk.on('close', () => sockets.delete(sk)); });
+  await new Promise((r) => proxy.listen(0, '127.0.0.1', r));
+  try {
+    const ctx = await iphoneContext(browser, { scale: 1, sw: 'allow' });
+    openContexts.push(ctx);
+    const errors = [];
+    const page = await preparePage(ctx, { state: core.updateSettings(core.createDefaultState(), { onboardingDone: true }), errors, standalone: true });
+    await page.addInitScript(() => { window.__turnosPrefetch = false; });
+    await page.goto(`http://127.0.0.1:${proxy.address().port}/docs/`);
+    await page.waitForSelector('.tabbar');
+    await page.waitForFunction(() => Boolean(navigator.serviceWorker.controller), null, { timeout: 20000 });
+    await page.evaluate(async () => {
+      const { createOcrPrefetch } = await import('./js/ui/prefetch.js');
+      window.__busy = false;
+      window.__pf = createOcrPrefetch({ isBusy: () => window.__busy });
+      window.__pf.run();
+    });
+    // Ya bajó el lector y su núcleo; el diccionario está a medias
+    await page.waitForFunction(() => window.__pf.status().status === 'running' && window.__pf.status().fetched.length === 3, null, { timeout: 60000 });
+    await page.evaluate(() => { window.__busy = true; }); // empieza un escaneo
+    await page.waitForFunction(() => window.__pf.status().aborted === 1, null, { timeout: 5000 });
+    const st = await page.evaluate(() => window.__pf.status());
+    assert.equal(st.status, 'waiting', 'se aplaza (se reintenta luego)');
+    assert.equal(st.error, null);
+    const cached = await page.evaluate(async () => Boolean(await caches.match(window.__pf.files().find((f) => f.endsWith('eng.traineddata.gz')))));
+    assert.equal(cached, false, 'el diccionario a medias no queda en la caché');
+    return { ctx, errors: errors.filter((e) => !/abort/i.test(e)) };
+  } finally {
+    for (const sk of sockets) sk.destroy();
     proxy.close();
   }
 }, { slow: true });

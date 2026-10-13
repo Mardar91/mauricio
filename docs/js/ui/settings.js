@@ -23,7 +23,7 @@ import {
 import { banners, inSafariTab, saveFailedToast, savedToast } from './banners.js';
 import { androidInstallSteps, installButton, installSteps, openInstallSheet } from './install.js';
 import { androidGuides, copyLine, copyLinkButton, openFamilyCalendar } from './calguide.js';
-import { appleDevice, calendarPhrase, calendarTitle, subscribeLabel } from './platform.js';
+import { appleDevice, calendarPhrase, calendarTitle, deviceWord, subscribeLabel } from './platform.js';
 import { calendarReady, isConfigured, isSubscribed, markSubscribed, syncState, webcalUrl } from './syncStatus.js';
 import { DRAFT_KEY } from './scan.js';
 
@@ -696,16 +696,29 @@ export function createSettings(ctx) {
       ] : h('p', { class: 'hint' }, 'Con el calendario conectado puedes recuperar aquí la copia de internet.'),
       copies.map((c) => {
         const info = copyInfo(state, c.key);
-        // De otro calendario (antes de cambiar de persona o de borrar): se vuelve a él entero
+        // De otro calendario (antes de cambiar de persona o de borrar): se vuelve a él entero. Sin
+        // conectar (nunca leyó ni publicó): vuelve a estar sin conectar
         const other = Boolean(info?.otherTarget);
-        const whose = other && info.name ? ` (calendario de ${info.name})` : '';
+        const connected = info?.connected !== false;
+        const whose = !other ? '' : connected ? (info.name ? ` (calendario de ${info.name})` : '')
+          : info.name ? ` (turnos de ${info.name}, sin conectar)` : ' (sin conectar)';
         return row(info?.switch ? 'Copia de antes de cambiar de calendario' : 'Copia de antes de importar', h('button', {
           class: 'btn btn-tinted btn-sm', type: 'button', 'data-testid': 'restore-copy',
           on: { click: async () => {
+            const cur = store.get();
+            const cs = cur.settings.sync;
+            // Este dispositivo publica el calendario de ahora: al volver, ese calendario deja de actualizarse
+            const publishing = other && cs.enabled && cs.deviceId && cs.publisher === cs.deviceId;
+            const curName = publicName(cur.settings.name || '');
+            const warn = publishing
+              ? ` Ojo: este ${deviceWord()} actualiza ahora ${curName ? `el calendario de ${curName}` : 'el calendario de ahora'}: dejará de actualizarse hasta que otro dispositivo toque «Usar este dispositivo».`
+              : '';
             const ok = await confirmDialog({
               title: '¿Volver a esta copia?', danger: true, ok: 'Volver a esta copia',
               text: other
-                ? `Copia del ${dateTime(c.at)} con ${plural(c.days, 'día', 'días')}${whose}. Este dispositivo vuelve a ese calendario y deja el de ahora.`
+                ? `Copia del ${dateTime(c.at)} con ${plural(c.days, 'día', 'días')}${whose}. ${connected
+                  ? 'Este dispositivo vuelve a ese calendario y deja el de ahora.'
+                  : 'Este dispositivo vuelve a como estaba (sin conectar) y deja el calendario de ahora.'}${warn}`
                 : `Copia del ${dateTime(c.at)} con ${plural(c.days, 'día', 'días')}. Reemplaza los datos de este teléfono.`,
             });
             if (ok) undo(c.key);

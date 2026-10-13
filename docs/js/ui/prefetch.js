@@ -39,7 +39,7 @@ async function missingFiles(files) {
 
 // isBusy: () => true mientras se escanea (entonces se aplaza: el lector ya descarga lo suyo)
 export function createOcrPrefetch({ isBusy = () => false } = {}) {
-  const st = { status: 'idle', error: null, attempts: 0, fetched: [] };
+  const st = { status: 'idle', error: null, attempts: 0, fetched: [], aborted: 0 };
   let timer = null;
   let running = null;
   let started = false;
@@ -70,9 +70,19 @@ export function createOcrPrefetch({ isBusy = () => false } = {}) {
     st.status = 'running';
     for (const u of todo) {
       if (isBusy()) { st.status = 'waiting'; schedule(60000); return; }
-      const res = await fetch(u, { credentials: 'same-origin' });
-      if (!res.ok) throw new Error(`HTTP ${res.status} ${u}`);
-      await res.arrayBuffer(); // el service worker guarda su copia mientras se lee
+      // Si empieza un escaneo a mitad de un archivo, se corta: el lector descarga el suyo (y no dos veces)
+      const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+      const watch = ctrl ? setInterval(() => { if (isBusy()) ctrl.abort(); }, 1000) : null;
+      try {
+        const res = await fetch(u, { credentials: 'same-origin', signal: ctrl?.signal });
+        if (!res.ok) throw new Error(`HTTP ${res.status} ${u}`);
+        await res.arrayBuffer(); // el service worker guarda su copia mientras se lee
+      } catch (e) {
+        if (ctrl?.signal.aborted) { st.status = 'waiting'; st.aborted++; schedule(60000); return; }
+        throw e;
+      } finally {
+        clearInterval(watch);
+      }
       st.fetched.push(u);
     }
     // cache.put del service worker termina un poco después de la descarga

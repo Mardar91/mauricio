@@ -22,7 +22,7 @@ import { inSafariTab } from './ui/banners.js';
 import { createOcrPrefetch } from './ui/prefetch.js';
 
 // Debe coincidir con VERSION en sw.js
-export const APP_VERSION = '1.4.2';
+export const APP_VERSION = '1.4.3';
 
 const TABS = [
   { id: 'hoy', label: 'Hoy', icon: 'today' },

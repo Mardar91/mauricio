@@ -57,6 +57,8 @@ export const SYNC_MESSAGES = Object.freeze({
 });
 // CONFIG de trySetupConfig: el enlace de otro calendario trae la clave del de este dispositivo
 const SAME_KEY_MESSAGE = 'Este enlace lleva la misma clave que el calendario de este dispositivo, y cada calendario necesita la suya. Pide un enlace nuevo a quien te ayuda. No se cambió nada.';
+// CONFIG de trySetupConfig: cambiar a una rama que no existe (crearla copiaría los archivos de la rama por defecto)
+export const NEW_BRANCH_MESSAGE = 'Esa rama todavía no existe, y al crearla se copiarían los archivos del calendario principal. Para el calendario de otra persona, usa «Crear enlace para otra persona» (le crea su carpeta). No se cambió nada.';
 // Errores pasajeros: se reintenta solo; el resto necesita ayuda. RETRY: repetir en cuanto se guarde el
 // resultado (la identidad recién creada ya está a salvo)
 const RETRY_CODES = new Set(['RATE_LIMIT', 'SERVER', 'NETWORK', 'CONFLICT', 'RETRY']);
@@ -577,7 +579,7 @@ function newResult(state, now, patch = {}) {
   return {
     ok: false, readOnly: false, publisher: null, tookOver: false, keyRestored: false,
     state, merged: false, pulled: false, pushed: false, icsPushed: false, conflictCount: 0, pulledDays: [],
-    unpublishedDays: [], unpublishedCodes: [], unpublishedSettings: false,
+    unpublishedDays: [], unpublishedCodes: [], unpublishedSettings: false, missingBranch: false,
     rev: null, remote: null, sync: patch, error: null, startedAt: now.toISOString(),
     target: { owner: String(sync.owner || '').trim(), repo: String(sync.repo || '').trim(), branch: branchName(sync), dir: dirOf(sync), keyTag: keyTag(sync.key) },
   };
@@ -622,6 +624,7 @@ export async function syncNow(state, fetchArg) {
     const base = ctxOf(sync, fetchImpl);
     // Una rama que no existe solo la crea quien puede publicar
     const ctx = { ...base, ...(await branchInfo(base, !onlyPull && (takeover || !remembered))) };
+    res.missingBranch = Boolean(ctx.missing); // la rama indicada no existe (y aquí no se creó)
     const baseRev = Number(sync.baseRev) || 0;
     let local = state;
     let backupSha = null;
@@ -683,7 +686,10 @@ export async function syncNow(state, fetchArg) {
       const localHash = publishHash(merged);
       const remoteHash = remoteState ? publishHash(remoteState) : null;
       const oldFormat = Boolean(remote && !remote.legacy && Number(remote.doc.v) < BACKUP_VERSION);
-      const needBackup = force || claim || oldFormat || !remote || remote.legacy || localHash !== remoteHash;
+      // Copia sin el nombre de ahora (de 1.4.1 o antes, o se cambió el nombre): se reescribe una vez, para
+      // que el guardián y «Calendarios de la familia» sepan de quién es
+      const nameStale = Boolean(remote && !remote.legacy && publicName(remote.doc.meta?.name) !== publicName(merged?.settings?.name));
+      const needBackup = force || claim || oldFormat || nameStale || !remote || remote.legacy || localHash !== remoteHash;
       const remoteDays = remoteState ? daysIn(remoteState) : 0;
       // 0 días encima de una copia con días: solo si cada día de la copia lo borró aquí alguien a
       // propósito (tombstone más nueva, que ganó al fusionar); si no, es una copia vacía
@@ -860,7 +866,17 @@ export async function trySetupConfig(state, cfg, options) {
     const err = new SyncError(SAME_KEY_MESSAGE, 0, { code: 'CONFIG', detail: `La clave del enlace (${targetId(c)}) es la de ${targetId(cur)}.` });
     return { ok: false, error: errorInfo(err), res };
   }
-  const guard = targetGuard(state, c, res);
+  // Sin nombre en la copia ni en el enlace (copias de 1.4.1 o antes, enlaces antiguos): el del calendario
+  // publicado (X-WR-CALNAME), si hace falta para saber de quién es (aquí hay turnos que no son de un destino)
+  const calName = !res.error && daysIn(state) > 0 && !boundTargetOf(cur) && !publicName(res.remote?.name) && !publicName(c.name)
+    ? await publishedCalendarName(c, o.fetchImpl) : null;
+  const guard = targetGuard(state, c, res, { calName });
+  // Otro calendario en una rama que no existe: crearla copiaría los archivos de la rama por defecto
+  // (la copia cifrada y el calendario de otra persona). Para otra persona, otra carpeta
+  if (guard && res.missingBranch) {
+    const err = new SyncError(NEW_BRANCH_MESSAGE, 0, { code: 'CONFIG', detail: `La rama ${branchName(c)} no existe en ${c.owner}/${c.repo}: no se crea al cambiar de calendario.` });
+    return { ok: false, error: errorInfo(err), res };
+  }
   if (guard && o.switchPerson !== true) {
     return { ok: false, error: { ...errorInfo(syncError(guard.code, guard.detail)), message: guard.message }, res, otherPerson: guard.info };
   }
@@ -870,6 +886,7 @@ export async function trySetupConfig(state, cfg, options) {
     // red) no se cambia nada: no se borra lo de aquí sin saber que el calendario nuevo se puede usar
     ({ res, key } = await probe(personSwitchState(state)));
     if (res.error) return { ok: false, error: res.error, res };
+    if (res.missingBranch) return { ok: false, error: errorInfo(new SyncError(NEW_BRANCH_MESSAGE, 0, { code: 'CONFIG', detail: `La rama ${branchName(c)} no existe.` })), res };
   }
   // Sin clave y sin copia remota: se crea ahora (antes de guardar nada y de publicar)
   const finalKey = key || (res.ok ? generateSyncKey(o.getRandomValues) : false);
@@ -893,6 +910,7 @@ function guardMessage({ reason, name, current, bound, from, to }) {
   }
   if (name && mine && firstNameKey(name) === firstNameKey(mine)) return 'Este enlace es de otro calendario, no del que usa este dispositivo. No se cambió nada.';
   if (!name) return SYNC_MESSAGES.OTHER_PERSON;
+  if (!bound && !mine) return `Este enlace es del calendario de ${name}, y en este dispositivo ya hay turnos sin nombre (no se sabe de quién son). No se cambió nada.`;
   if (!bound) return `Este enlace es del calendario de ${name} y en este dispositivo hay turnos de ${mine}. No se cambió nada.`;
   return `Este enlace es del calendario de ${name}${mine ? ` y este dispositivo usa el de ${mine}` : ', no del que usa este dispositivo'}. No se cambió nada.`;
 }
@@ -906,31 +924,36 @@ function guardError(guard) {
 // ¿Llevaría c los datos de este dispositivo a otro calendario? (SPEC §11) → null | { code, message, detail, info }
 //  - 'folder' (OTHER_PERSON): los datos de aquí son de otra carpeta (otro dir);
 //  - 'name' (OTHER_PERSON): el calendario de c es de otro nombre (meta.name de la copia o, sin ella, el
-//    del enlace) y aquí hay datos de un destino, o turnos y un nombre. names: false no lo mira (sin leer);
+//    del enlace o el del calendario publicado, calName) y aquí hay datos de un destino, o turnos y un
+//    nombre; o aquí hay turnos sin nombre y que no son de ningún destino (info.unnamed: hay que preguntar
+//    de quién son). names: false no lo mira (sin leer);
 //  - 'target' (OTHER_TARGET): los datos de aquí son de otro destino (otro owner, repo o rama).
 // Los datos son «de un destino» si este dispositivo leyó o publicó allí (boundTargetOf), aunque se
-// haya desconectado. Uno que nunca leyó ni publicó, sin turnos o sin nombre no se bloquea (p. ej. Ana
-// escanea antes de tener su enlace). info: { reason, name, dir, current: { name, dir }, working, bound,
+// haya desconectado. Uno que nunca leyó ni publicó y sin turnos no se bloquea; con turnos y el mismo
+// nombre (o sin nombre del calendario) tampoco (p. ej. Ana escanea antes de tener su enlace).
+// info: { reason, name, dir, current: { name, dir }, working, bound, unnamed,
 // from: texto de dónde son los datos de aquí | null, to: texto del destino nuevo }
-function targetGuard(state, c, res = null, { names = true } = {}) {
+function targetGuard(state, c, res = null, { names = true, calName = null } = {}) {
   const st = state?.settings || {};
   const cur = st.sync || {};
   const bound = boundTargetOf(cur);
   if (bound && bound === targetId(c)) return null; // el mismo calendario (otra clave, otro token…)
-  const theirs = publicName(res?.remote?.name) || publicName(c.name);
+  const theirs = publicName(res?.remote?.name) || publicName(c.name) || publicName(calName);
   const mine = publicName(st.name);
   const differ = Boolean(names && mine && theirs && firstNameKey(mine) !== firstNameKey(theirs));
   const fromPlace = !bound ? null : bound === targetId(cur) ? placeOf(cur) : parseTargetId(bound);
+  // Turnos sin nombre que no son de ningún destino, y el calendario es de alguien: ¿son suyos?
+  const unnamed = Boolean(names && !mine && theirs && !fromPlace && daysIn(state) > 0);
   let reason = null;
   if (fromPlace && fromPlace.dir !== dirOf(c)) reason = 'folder';
-  else if (differ && (fromPlace || daysIn(state) > 0)) reason = 'name';
+  else if ((differ || unnamed) && (fromPlace || daysIn(state) > 0)) reason = 'name';
   else if (fromPlace) reason = 'target';
   if (!reason) return null;
   const toPlace = placeOf(c);
   const info = {
     reason, name: theirs || null, dir: dirOf(c), current: { name: mine || null, dir: fromPlace ? fromPlace.dir : dirOf(cur) },
     working: Boolean(cur.enabled && (cur.lastPullAt || cur.lastPushAt)), bound: Boolean(fromPlace),
-    from: fromPlace ? placeText(fromPlace) : null, to: placeText(toPlace),
+    unnamed: reason === 'name' && unnamed, from: fromPlace ? placeText(fromPlace) : null, to: placeText(toPlace),
   };
   const label = { folder: 'Otra carpeta', name: 'Otro nombre', target: 'Otro destino' }[reason];
   const here = fromPlace || placeOf(cur);
@@ -1119,6 +1142,20 @@ async function listDir(ctx, path) {
   const r = await gh(ctx, 'GET', `${repoPath(ctx.sync)}/contents${path ? `/${filePath(path)}` : ''}${refQuery(ctx)}`, null, [404]);
   if (r.status === 404 || !Array.isArray(r.data)) return null;
   return r.data.filter((e) => isPlainObject(e) && typeof e.name === 'string').map((e) => ({ type: e.type, name: e.name }));
+}
+
+// Nombre del calendario publicado en el destino c (X-WR-CALNAME de su turnos.ics) → 'Mauricio' | null.
+// Solo lee; nunca lanza (sin red o sin archivo: null)
+async function publishedCalendarName(c, fetchImpl) {
+  try {
+    const base = ctxOf(c, fetchImpl);
+    const ctx = { ...base, ...(await branchInfo(base, false)) };
+    if (ctx.missing || ctx.empty) return null;
+    const f = await getFile(ctx, ICS_FILE);
+    return f ? nameFromIcs(await fileText(ctx, f)) : null;
+  } catch {
+    return null;
+  }
 }
 
 // Nombre desde X-WR-CALNAME («Turnos de Ana» → 'Ana'; «Mis turnos» → null)
