@@ -263,3 +263,33 @@ Problema: en iOS Safari y la app instalada tienen almacenamientos distintos; una
 7. Acerca de.
 
 Notificaciones: la vía principal es el **calendario del iPhone** (suscripción). ntfy queda como opción avanzada, desactivada por defecto.
+
+## 11. Varias personas (Mauricio y su hermana) — decisión del propietario
+
+- Cada persona usa **su propio teléfono** (Mauricio: iPhone; su hermana: **Android**). Los datos ya están separados por dispositivo; la app y la URL son las mismas.
+- `settings.name` = nombre de pila (saludo «Hola, Ana»; vacío → «Hola 👋»). `settings.planName` = nombre tal como sale en el Dienstplan («Ducuara Mauricio», «Ducuara Ana»): se pasa como `employeeName` al reconocedor de la tabla del PC, que debe exigir **todas** las palabras (apellido y nombre) cuando hay varias filas, para no confundir a dos «Ducuara». El primer uso pregunta ambos (saltables). Instalaciones existentes de Mauricio: `name 'Mauricio'`, `planName` vacío → se sugiere «Ducuara Mauricio».
+- App con nombre neutro: «Turnos» (manifest, `<title>`, textos). El calendario publicado se llama «Turnos de <name>» (o «Mis turnos»).
+- **Carpeta por persona en el mismo repo de datos** (`mauricio-datos`): `settings.sync.dir` ('' = raíz, la de Mauricio, sin cambios; si no, slug `[a-z0-9-]{1,32}`, p. ej. `ana`). Archivos: `<dir>/backup.json`, `<dir>/turnos.ics`; URLs del calendario con la carpeta. Cada carpeta tiene **su propia clave** y su propio publisher. El enlace de configuración lleva `dir`.
+- `backup.json` `meta.name` (nombre de pila, en claro) para listar calendarios.
+- «Crear enlace para otra persona» (Opciones avanzadas, en cualquier dispositivo conectado): pide el nombre → carpeta (slug único entre las existentes) + clave nueva + mismo owner/repo/token → enlace. No hace falta repo ni token nuevos.
+- «Calendarios de la familia» (Ajustes): lista las carpetas del repo de datos (API contents con el token) con su nombre; cada una con «Ver sus turnos en mi calendario» (suscripción webcal / instrucciones Android) — solo lectura, para ver turnos y poder cambiárselos.
+
+## 12. Android (la hermana)
+
+- Detectar plataforma (`ios` / `android` / `desktop`) y adaptar textos: «Calendario del iPhone» → «Calendario del teléfono» fuera de iOS; guías de instalación y de calendario específicas.
+- Instalar en Android (Chrome): botón «Instalar la app» con `beforeinstallprompt` si está disponible; si no, guía «Menú ⋮ → Instalar app / Añadir a pantalla de inicio». En Android, Chrome y la app instalada comparten almacenamiento: no hay aviso de pérdida de datos como en Safari.
+- Calendario en Android (sin la suscripción integrada de iOS): opción recomendada y opción alternativa según la investigación (p. ej. app ICSx⁵ que abre el enlace webcal y respeta las alarmas; o Google Calendar «Desde URL» en calendar.google.com + notificaciones por defecto del calendario, con actualización lenta). Guía paso a paso en español neutro.
+- Botón/gesto «Atrás» de Android: cierra la hoja o diálogo abierto en lugar de salir de la app (history.pushState al abrir; popstate cierra).
+- ntfy (opcional, Android lo maneja muy bien) puede ofrecerse como alternativa en Android.
+
+## 13. Funciones nuevas
+
+1. **Recordatorio «Sube el plan»**: si el mes siguiente no tiene ningún día cargado, el `.ics` incluye un evento «📷 Sube el plan de <mes>» el día 20 del mes actual a las 19:00 (o mañana a las 19:00 si ya pasó el 20 y queda mes), 15 min, con alarma al inicio; UID estable por mes; desaparece al cargar ese mes. `settings.reminders.planUpload` (por defecto true).
+2. **Tiempo de viaje por lugar**: `CodeDef.travelMin` (0–180, sobre todo en lugares; también admitido en turnos). Tiempo de un día = el mayor de sus códigos. El aviso «antes del turno» se adelanta: inicio − viaje − minutesBefore, con texto «Sal a las 12:35 hacia F51 (25 min de viaje)». Igual en el `.ics` (alarma) y ntfy. Enlace «Abrir en Mapas» con la dirección del lugar (iOS: maps.apple.com; resto: Google Maps).
+3. **Suplementos** (para revisar la nómina): `settings.supplements = { night: { from, to, pct }, saturday: { from, to, pct }, sunday: { pct }, holiday: { pct }, hourlyWage: null }` con valores por defecto según la investigación (configurables, con aviso «comprueba tu contrato»). `monthSummary` añade minutos trabajados en noche, sábado (franja), domingo y festivo (Berlín), con la pausa descontada proporcionalmente, y una estimación en € si hay salario por hora.
+4. **Saldos**: `settings.balances = { overtimeStartMin: 0, overtimeStartMonth: 'YYYY-MM' | null, vacationDaysPerYear: 30, vacationCarryOver: 0 }`. Saldo de horas acumulado mes a mes desde el mes inicial (mes en curso: hasta hoy; meses sin plan completo no inventan horas), y vacaciones del año: derecho + arrastre, usadas (U en días con Soll), planificadas, restantes.
+5. **Enfermedad**: código integrado `K` (kind 'sick', «Enfermedad», texto rojo), acreditado como vacaciones; disponible en la paleta.
+
+## 14. Diseño adaptable
+
+Debe verse bien y ser cómodo en: Android pequeño (360×740), iPhone (390×844 y 430×932), tablet (iPad 820×1180, también en horizontal) y ordenador (1280×800; lo usa quien ayuda): columna central con ancho máximo legible, sin estirar tarjetas a todo el ancho, barra de pestañas y hojas centradas; teclado, foco y ratón usables en ordenador.
