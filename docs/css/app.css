@@ -1422,3 +1422,10 @@ label.set-row { cursor: pointer; }
 @media (max-height: 760px) {
   .ob-step { gap: 10px; padding-bottom: 8px; }
 }
+
+/* 360 px: filas con un campo ancho (mes de «Desde», «En el plan»): el campo pasa debajo del texto */
+@media (max-width: 400px) {
+  .set-row-stack { flex-wrap: wrap; row-gap: 8px; }
+  .set-row-stack > .input { flex: 1 0 100%; width: 100%; max-width: none; text-align: left; }
+  .set-row-stack:has(> .set-icon) > .input { flex-basis: calc(100% - 42px); margin-left: 42px; }
+}

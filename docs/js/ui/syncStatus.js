@@ -9,10 +9,12 @@ export const TRANSIENT = ['NETWORK', 'SERVER', 'RATE_LIMIT', 'CONFLICT', 'RETRY'
 // Errores que se arreglan actualizando la app (no con un enlace nuevo)
 export const NEWER = ['NEWER_REMOTE', 'NEWER_LOCAL'];
 
-// Qué arregla un error: 'update' (actualizar la app), 'pull' (traer los turnos de internet) o 'link'
+// Qué arregla un error: 'update' (actualizar la app), 'pull' (traer los turnos de internet), 'switch'
+// (los datos de aquí son de otro calendario: pasar al conectado, tras confirmarlo) o 'link'
 export function errorRemedy(code) {
   if (NEWER.includes(code)) return 'update';
   if (code === 'EMPTY_LOCAL') return 'pull';
+  if (code === 'OTHER_TARGET' || code === 'OTHER_PERSON') return 'switch';
   return 'link';
 }
 

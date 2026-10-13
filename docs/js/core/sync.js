@@ -14,7 +14,10 @@
 // cola (createSyncQueue) y aplica cada resultado con applySyncResult, que descarta los resultados viejos.
 import { decryptText, encryptText, generateSyncKey, isSyncKey, randomId } from './cipher.js';
 import { buildICS } from './ics.js';
-import { SCHEMA, USER_SETTINGS, dataFingerprint, firstNameKey, mergeStates, migrateState, personSwitchState, syncPayload, updateSettings } from './store.js';
+import {
+  SCHEMA, USER_SETTINGS, dataFingerprint, dataTargetOf, firstNameKey, mergeStates, migrateState, personSwitchState, syncPayload,
+  syncTargetId, updateSettings,
+} from './store.js';
 import { base64ToUtf8, base64UrlDecode, base64UrlEncode, defaultFetch, hashString, isPlainObject, stableStringify, utf8ToBase64 } from './util.js';
 
 export const API = 'https://api.github.com';
@@ -50,7 +53,10 @@ export const SYNC_MESSAGES = Object.freeze({
   NO_REMOTE: 'Todavía no hay ninguna copia guardada en internet.',
   RETRY: 'Preparando el calendario. Se volverá a intentar en un momento.',
   OTHER_PERSON: 'Este enlace es del calendario de otra persona. No se cambió nada.',
+  OTHER_TARGET: `Los turnos de este dispositivo son de otro calendario. No se envió nada. ${HELP}`,
 });
+// CONFIG de trySetupConfig: el enlace de otro calendario trae la clave del de este dispositivo
+const SAME_KEY_MESSAGE = 'Este enlace lleva la misma clave que el calendario de este dispositivo, y cada calendario necesita la suya. Pide un enlace nuevo a quien te ayuda. No se cambió nada.';
 // Errores pasajeros: se reintenta solo; el resto necesita ayuda. RETRY: repetir en cuanto se guarde el
 // resultado (la identidad recién creada ya está a salvo)
 const RETRY_CODES = new Set(['RATE_LIMIT', 'SERVER', 'NETWORK', 'CONFLICT', 'RETRY']);
@@ -159,20 +165,26 @@ const dirOf = (sync) => String(sync?.dir ?? '').trim().toLowerCase();
 // cfg sin dir → la carpeta actual del dispositivo
 const withDir = (cfg, cur) => (cfg && cfg.dir === undefined ? { ...cfg, dir: dirOf(cur) } : cfg);
 
-// ¿Misma carpeta de datos (owner, repo y carpeta)? Solo entonces se reutiliza la clave guardada.
-// GitHub no distingue mayúsculas en owner y repo.
-const lower = (v) => String(v || '').trim().toLowerCase();
-function sameFolder(a, b) {
-  return Boolean(a && b) && lower(a.owner) === lower(b.owner) && lower(a.repo) === lower(b.repo) && dirOf(a) === dirOf(b);
+// Destino de sincronización = calendario (owner, repo, carpeta y rama; ver syncTargetId en store.js).
+// Otro destino = otro calendario: nunca recibe los datos ni la clave de este.
+const targetId = syncTargetId;
+const boundTargetOf = dataTargetOf;
+const sameTarget = (a, b) => Boolean(a && b) && targetId(a) === targetId(b);
+function parseTargetId(id) {
+  const i = id.indexOf(':');
+  const [owner = '', repo = '', dir = ''] = (i < 0 ? id : id.slice(0, i)).split('/');
+  return { owner, repo, dir, branch: i < 0 ? '' : id.slice(i + 1) };
 }
 
 // Parche para settings.sync al aplicar una configuración nueva (enlace o formulario): activa la sync
 // y reinicia la contabilidad para que lo primero sea leer y fusionar el remoto.
-// current (State, opcional): con el mismo repositorio y rama se recuerda quién publicaba (por si
-// backup.json desaparece); si la clave cambia, la anterior queda en prevKey (red de seguridad).
+// current (State, opcional): con el mismo destino (owner, repo, carpeta y rama) se recuerda quién
+// publicaba (por si backup.json desaparece); si la clave cambia, la anterior queda en prevKey.
 // El publishPlaces del enlace NO va aquí: lo aplica applySyncConfig (solo si aquí nunca se eligió).
-// Otra carpeta (otro owner, repo o dir) = otra persona: sin clave en cfg, la clave guardada NO se
-// reutiliza (cada carpeta tiene la suya; se crea una nueva si no hay copia) y no queda en prevKey.
+// Otro destino = otro calendario: sin clave en cfg, la clave guardada NO se reutiliza (cada calendario
+// tiene la suya; se crea una nueva si no hay copia) y no queda en prevKey.
+// Bajo nivel: NO comprueba de quién son los datos (eso lo hace applySyncConfig). Pero conserva el
+// destino del que son (boundTarget): si es otro, la sincronización se niega (OTHER_TARGET).
 export function syncConfigPatch(config, current = null) {
   const cur = current?.settings?.sync ?? null;
   const cfg = withDir(config, cur);
@@ -183,18 +195,20 @@ export function syncConfigPatch(config, current = null) {
     baseRev: 0, lastPushAt: null, lastPushHash: null, lastPullAt: null,
     lastError: null, lastErrorCode: null, lastErrorDetail: null, lastErrorSince: null, unpublished: 0,
   };
-  const folder = sameFolder(cur, cfg);
-  const same = folder && branchName(cur) === branch;
+  const same = sameTarget(cur, { ...cfg, branch, dir });
   if (!same) Object.assign(patch, { publisher: null, publisherSince: null });
   // Con el mismo destino se recuerda qué calendario publicó este dispositivo (si backup.json
   // desaparece, solo quien escribió el turnos.ics publicado lo vuelve a crear sin preguntar)
   if (cur && !same) patch.lastIcsHash = null;
   if (cfg.key) {
     patch.key = cfg.key;
-    if (isSyncKey(cur?.key) && cur.key !== cfg.key) patch.prevKey = folder ? cur.key : '';
-  } else if (cur && !folder) {
+    if (isSyncKey(cur?.key) && cur.key !== cfg.key) patch.prevKey = same ? cur.key : '';
+  } else if (cur && !same) {
     Object.assign(patch, { key: '', prevKey: '' });
   }
+  // La contabilidad se reinicia, pero no de quién son los datos
+  const bound = boundTargetOf(cur);
+  if (bound) patch.boundTarget = bound;
   return patch;
 }
 
@@ -217,10 +231,17 @@ export function ensureSyncIdentity(state, { getRandomValues, deviceId, key } = {
 // Aplica una configuración (enlace o formulario) a un estado. Puro: usar dentro de store.set.
 // = syncConfigPatch(cfg, state) + publishPlaces del enlace (solo si este dispositivo nunca eligió, y con
 // el sello mínimo para que gane cualquier decisión publicada) + ensureSyncIdentity. Lanza SyncError
-// CONFIG si cfg no es válida. options: { now, getRandomValues, deviceId, key } (ver ensureSyncIdentity).
-export function applySyncConfig(state, cfg, { now, getRandomValues, deviceId, key } = {}) {
+// CONFIG si cfg no es válida. options: { now, getRandomValues, deviceId, key, switchPerson }.
+// Los datos de aquí son de otro destino (leyó o publicó allí): lanza SyncError OTHER_PERSON (otra
+// carpeta) u OTHER_TARGET (otro owner, repo o rama), con e.otherPerson. Con switchPerson: true (tras
+// confirmarlo) parte de personSwitchState: nada de aquí llega al destino nuevo, clave nueva (o la de cfg).
+// Sin motivo, switchPerson se ignora.
+export function applySyncConfig(state, cfg, { now, getRandomValues, deviceId, key, switchPerson } = {}) {
   const c = withDir(normalizeSyncConfig(cfg), state?.settings?.sync);
   if (!c) throw syncError('CONFIG', 'Configuración de sincronización no válida.');
+  const guard = targetGuard(state, c, null, { names: false });
+  if (guard && switchPerson !== true) throw guardError(guard);
+  if (guard) state = personSwitchState(state);
   const st = state?.settings || {};
   const patch = { sync: syncConfigPatch(c, state) };
   // Nombre que trae el enlace («Crear enlace para otra persona»): solo si aquí no hay ninguno
@@ -586,6 +607,11 @@ export async function syncNow(state, fetchArg) {
   let claimSent = false; // se envió un backup.json que cambia quién publica y aún no hay respuesta
   try {
     checkConfig(sync);
+    // Los datos de aquí son de otro destino (configuración cambiada sin switchPerson): ni se leen ni se
+    // escriben, para no mezclar ni publicar los turnos de una persona en el calendario de otra
+    const tid = targetId(sync);
+    const bound = typeof sync.boundTarget === 'string' ? sync.boundTarget.trim() : '';
+    if (bound && bound !== tid) throw syncError('OTHER_TARGET', `Datos de ${bound}; configurado ${tid}. Hace falta cambiar con switchPerson.`);
     // Datos de una versión más nueva: publicarlos desde aquí los recortaría
     if (state?.__newerSchema) throw syncError('NEWER_LOCAL', `Estado con esquema ${state.schema} (esta app: ${SCHEMA}).`);
     if (sync.key && !isSyncKey(sync.key)) throw syncError('NO_KEY', 'La clave guardada no tiene el formato correcto (base64url de 32 bytes).');
@@ -620,6 +646,7 @@ export async function syncNow(state, fetchArg) {
         res.state = merged;
         res.merged = merged !== state;
         patch.lastPullAt = now.toISOString();
+        patch.boundTarget = tid; // aquí ya hay datos de este destino
         if (!remote.legacy) Object.assign(patch, { baseRev: remote.rev, lastPushHash: publishHash(remoteState) });
         res.rev = remote.rev;
       }
@@ -689,7 +716,7 @@ export async function syncNow(state, fetchArg) {
         }
         await afterFirstWrite(ctx, put.commit);
         backupSha = put.sha;
-        Object.assign(patch, { baseRev: rev, lastPushHash: localHash, lastPushAt: now.toISOString() });
+        Object.assign(patch, { baseRev: rev, lastPushHash: localHash, lastPushAt: now.toISOString(), boundTarget: tid });
         res.pushed = true;
         res.rev = rev;
         res.tookOver = Boolean(pub) && pub.deviceId !== sync.deviceId;
@@ -795,14 +822,14 @@ export function applySyncResult(current, res, { now } = {}) {
 // estado lee y descifra el remoto (pullOnly: no escribe nada). Si la clave no descifra la copia, falta
 // la clave, el token no vale… → { ok:false } y la configuración actual sigue intacta.
 // Un fallo pasajero (sin red) solo se acepta en un dispositivo que aún no tenía una configuración que
-// funcionara (se reintentará solo). options: { fetchImpl, now, getRandomValues }
-// → { ok:true, res, readOnly, publisher, error (pasajero o null), apply(state) → state }
-//   | { ok:false, error, res }
+// funcionara (se reintentará solo). options: { fetchImpl, now, getRandomValues, switchPerson }
+// → { ok:true, res, readOnly, publisher, error (pasajero o null), switched, apply(state) → state }
+//   | { ok:false, error, res, otherPerson? }
 // apply: store.set((s) => t.apply(s)) guarda configuración + identidad (la probada) + lo leído.
-// Otra persona (SPEC §11): si el enlace es del calendario de otra persona → { ok:false, error OTHER_PERSON,
-// otherPerson } y no cambia nada. Con options.switchPerson: true (tras confirmarlo) el dispositivo pasa a
-// ese calendario desde un estado limpio (personSwitchState): nada de la persona anterior se fusiona ni se
-// publica allí (→ switched: true).
+// Otro calendario (SPEC §11): si los datos de aquí son de otro destino, o el enlace es de otra persona →
+// { ok:false, error OTHER_PERSON | OTHER_TARGET, otherPerson } y no cambia nada. Con switchPerson: true
+// (tras confirmarlo) el dispositivo pasa a ese calendario desde un estado limpio (personSwitchState):
+// nada de lo de aquí se fusiona ni se publica allí, y hace falta poder leerlo (→ switched: true).
 export async function trySetupConfig(state, cfg, options) {
   const o = opts(options);
   const now = o.now instanceof Date ? o.now : new Date();
@@ -811,30 +838,38 @@ export async function trySetupConfig(state, cfg, options) {
   if (!c) return { ok: false, error: errorInfo(syncError('CONFIG', 'Enlace o configuración no válidos.')), res: null };
   const deviceId = cur.deviceId || randomId(12, o.getRandomValues);
   const working = Boolean(cur.enabled && (cur.lastPullAt || cur.lastPushAt));
-  // Lee el remoto con una copia de prueba de base (no escribe nada) → { res, key }
+  // Lee el remoto con una copia de prueba de base (no escribe nada) → { res, key }. Si los datos de base
+  // son de otro destino, la prueba parte de un estado limpio (ni en memoria se mezclan)
   const probe = async (base) => {
-    const bs = base?.settings?.sync || {};
-    // La clave guardada solo vale para su carpeta: otra persona (otro dir/repo) nunca la hereda
-    const key = c.key || (isSyncKey(bs.key) && sameFolder(bs, c) ? bs.key : '');
+    const from = targetGuard(base, c, null, { names: false }) ? personSwitchState(base) : base;
+    const bs = from.settings.sync;
+    // La clave guardada solo vale para su destino: otro calendario nunca la hereda
+    const key = c.key || (isSyncKey(bs.key) && sameTarget(bs, c) ? bs.key : '');
     // Con la clave que se va a usar (sin la red de seguridad prevKey: se prueba ESTA); sin clave se
     // prueba sin ninguna (NO_KEY si ya hay copia cifrada)
-    let trial = applySyncConfig(base, c, { now, getRandomValues: o.getRandomValues, deviceId, key: key || false });
+    let trial = applySyncConfig(from, c, { now, getRandomValues: o.getRandomValues, deviceId, key: key || false });
     trial = updateSettings(trial, { sync: { prevKey: '', ...(key ? {} : { key: '' }) } });
     return { res: await pullOnly(trial, { ...o, now }), key };
   };
   const failedRead = (res) => res.error && (!res.error.retry || working);
   let { res, key } = await probe(state);
   if (failedRead(res)) return { ok: false, error: res.error, res };
-  const other = otherPersonOf(state, c, res);
-  if (other && o.switchPerson !== true) {
-    const error = { ...errorInfo(syncError('OTHER_PERSON', other.detail)), message: otherPersonMessage(other.info) };
-    return { ok: false, error, res, otherPerson: other.info };
+  // Cada calendario tiene su clave: la de este dispositivo no se lleva a otro destino aunque la traiga
+  // el enlace (salvo que allí ya haya una copia cifrada con ella)
+  if (c.key && c.key === cur.key && !sameTarget(cur, c) && !res.remote) {
+    const err = new SyncError(SAME_KEY_MESSAGE, 0, { code: 'CONFIG', detail: `La clave del enlace (${targetId(c)}) es la de ${targetId(cur)}.` });
+    return { ok: false, error: errorInfo(err), res };
   }
-  const switched = Boolean(other);
+  const guard = targetGuard(state, c, res);
+  if (guard && o.switchPerson !== true) {
+    return { ok: false, error: { ...errorInfo(syncError(guard.code, guard.detail)), message: guard.message }, res, otherPerson: guard.info };
+  }
+  const switched = Boolean(guard);
   if (switched) {
-    // Cambio de persona confirmado: se prueba (y luego se guarda) desde un estado limpio
+    // Cambio confirmado: se lee ese calendario desde un estado limpio. Sin poder leerlo (también sin
+    // red) no se cambia nada: no se borra lo de aquí sin saber que el calendario nuevo se puede usar
     ({ res, key } = await probe(personSwitchState(state)));
-    if (failedRead(res)) return { ok: false, error: res.error, res };
+    if (res.error) return { ok: false, error: res.error, res };
   }
   // Sin clave y sin copia remota: se crea ahora (antes de guardar nada y de publicar)
   const finalKey = key || (res.ok ? generateSyncKey(o.getRandomValues) : false);
@@ -844,36 +879,64 @@ export async function trySetupConfig(state, cfg, options) {
   };
 }
 
-// Mensaje de OTHER_PERSON con los nombres que se conocen
-function otherPersonMessage({ reason, name, current }) {
+// Dónde está un calendario, para mostrarlo: 'Mardar91/mauricio-datos, carpeta ana, rama datos'
+const placeText = (p) => `${p.owner}/${p.repo}${p.dir ? `, carpeta ${p.dir}` : ''}${p.branch ? `, rama ${p.branch}` : ''}`;
+// Lo mismo, técnico (detail): 'Mardar91/mauricio-datos/ana@datos', '(raíz)' sin carpeta
+const placeTech = (p) => `${p.owner}/${p.repo}/${p.dir || '(raíz)'}${p.branch ? `@${p.branch}` : ''}`;
+const placeOf = (s) => ({ owner: String(s.owner || '').trim(), repo: String(s.repo || '').trim(), dir: dirOf(s), branch: branchName(s) });
+
+// Mensaje de OTHER_PERSON / OTHER_TARGET con los nombres que se conocen
+function guardMessage({ reason, name, current, bound, from, to }) {
   const mine = current?.name;
+  if (reason === 'target') {
+    return `Este dispositivo ya tiene ${mine ? `el calendario de ${mine}` : 'otro calendario'} (${from}). Esta conexión es a otro calendario (${to}). No se cambió nada.`;
+  }
   if (name && mine && firstNameKey(name) === firstNameKey(mine)) return 'Este enlace es de otro calendario, no del que usa este dispositivo. No se cambió nada.';
   if (!name) return SYNC_MESSAGES.OTHER_PERSON;
-  if (reason === 'name') return `Este enlace es del calendario de ${name} y en este dispositivo hay turnos de ${mine}. No se cambió nada.`;
+  if (!bound) return `Este enlace es del calendario de ${name} y en este dispositivo hay turnos de ${mine}. No se cambió nada.`;
   return `Este enlace es del calendario de ${name}${mine ? ` y este dispositivo usa el de ${mine}` : ', no del que usa este dispositivo'}. No se cambió nada.`;
 }
 
-// ¿El enlace (c) es del calendario de otra persona? (SPEC §11) Lo es si:
-//  - folder: este dispositivo ya funciona con otra carpeta (otro owner, repo o dir);
-//  - name: aquí hay turnos y un nombre, y el del calendario del enlace (meta.name de la copia o, sin
-//    ella, el del enlace) es otro.
-// Un dispositivo sin conectar y sin nombre (o con el mismo) no se bloquea (p. ej. Ana escanea antes de
-// tener su enlace). → null | { info: { reason, name, dir, current: { name, dir }, working }, detail }
-function otherPersonOf(state, c, res) {
-  const cur = state?.settings?.sync || {};
-  const working = Boolean(cur.enabled && (cur.lastPullAt || cur.lastPushAt));
-  const folder = sameFolder(cur, c);
-  if (working && folder) return null; // la misma carpeta (otra clave, otro token…)
+function guardError(guard) {
+  const e = new SyncError(guard.message, 0, { code: guard.code, detail: guard.detail });
+  e.otherPerson = guard.info;
+  return e;
+}
+
+// ¿Llevaría c los datos de este dispositivo a otro calendario? (SPEC §11) → null | { code, message, detail, info }
+//  - 'folder' (OTHER_PERSON): los datos de aquí son de otra carpeta (otro dir);
+//  - 'name' (OTHER_PERSON): el calendario de c es de otro nombre (meta.name de la copia o, sin ella, el
+//    del enlace) y aquí hay datos de un destino, o turnos y un nombre. names: false no lo mira (sin leer);
+//  - 'target' (OTHER_TARGET): los datos de aquí son de otro destino (otro owner, repo o rama).
+// Los datos son «de un destino» si este dispositivo leyó o publicó allí (boundTargetOf), aunque se
+// haya desconectado. Uno que nunca leyó ni publicó, sin turnos o sin nombre no se bloquea (p. ej. Ana
+// escanea antes de tener su enlace). info: { reason, name, dir, current: { name, dir }, working, bound,
+// from: texto de dónde son los datos de aquí | null, to: texto del destino nuevo }
+function targetGuard(state, c, res = null, { names = true } = {}) {
+  const st = state?.settings || {};
+  const cur = st.sync || {};
+  const bound = boundTargetOf(cur);
+  if (bound && bound === targetId(c)) return null; // el mismo calendario (otra clave, otro token…)
   const theirs = publicName(res?.remote?.name) || publicName(c.name);
-  const mine = publicName(state?.settings?.name);
+  const mine = publicName(st.name);
+  const differ = Boolean(names && mine && theirs && firstNameKey(mine) !== firstNameKey(theirs));
+  const fromPlace = !bound ? null : bound === targetId(cur) ? placeOf(cur) : parseTargetId(bound);
   let reason = null;
-  if (working) reason = 'folder';
-  else if (daysIn(state) > 0 && mine && theirs && firstNameKey(mine) !== firstNameKey(theirs)) reason = 'name';
+  if (fromPlace && fromPlace.dir !== dirOf(c)) reason = 'folder';
+  else if (differ && (fromPlace || daysIn(state) > 0)) reason = 'name';
+  else if (fromPlace) reason = 'target';
   if (!reason) return null;
-  const where = (s) => `${String(s.owner || '').trim()}/${String(s.repo || '').trim()}/${dirOf(s) || '(raíz)'}`;
+  const toPlace = placeOf(c);
+  const info = {
+    reason, name: theirs || null, dir: dirOf(c), current: { name: mine || null, dir: fromPlace ? fromPlace.dir : dirOf(cur) },
+    working: Boolean(cur.enabled && (cur.lastPullAt || cur.lastPushAt)), bound: Boolean(fromPlace),
+    from: fromPlace ? placeText(fromPlace) : null, to: placeText(toPlace),
+  };
+  const label = { folder: 'Otra carpeta', name: 'Otro nombre', target: 'Otro destino' }[reason];
+  const here = fromPlace || placeOf(cur);
   return {
-    info: { reason, name: theirs || null, dir: dirOf(c), current: { name: mine || null, dir: dirOf(cur) }, working },
-    detail: `${reason === 'folder' ? 'Otra carpeta' : 'Otro nombre'}: este dispositivo ${where(cur)}${mine ? ` (${mine})` : ''}; enlace ${where(c)}${theirs ? ` (${theirs})` : ''}.`,
+    code: reason === 'target' ? 'OTHER_TARGET' : 'OTHER_PERSON', info, message: guardMessage(info),
+    detail: `${label}: este dispositivo ${placeTech(here)}${mine ? ` (${mine})` : ''}${fromPlace ? '' : ' (sin datos de ningún destino)'}; enlace ${placeTech(toPlace)}${theirs ? ` (${theirs})` : ''}.`,
   };
 }
 
@@ -935,7 +998,14 @@ export function createSyncQueue(store, { fetchImpl, clock = () => new Date() } =
     becomePublisher: (extra) => enqueue(call(becomePublisher, extra)),
     setup: (cfg, extra = {}) => enqueue(async () => {
       const t = await trySetupConfig(store.get(), cfg, { ...extra, fetchImpl: extra.fetchImpl ?? fetchImpl, now: clock() });
-      if (t.ok) save((s) => t.apply(s));
+      if (!t.ok) return t;
+      try {
+        save((s) => t.apply(s));
+      } catch (e) {
+        // El estado cambió mientras se comprobaba (p. ej. otra pestaña conectó otro calendario): no se guardó nada
+        const err = e instanceof SyncError ? e : syncError('UNKNOWN', String(e?.message || e));
+        return { ok: false, error: errorInfo(err), res: t.res, ...(e?.otherPerson ? { otherPerson: e.otherPerson } : {}) };
+      }
       return t;
     }),
     idle: () => tail,

@@ -14,6 +14,22 @@ import { banners } from './banners.js';
 import { adviceCard } from './today.js';
 import { forDevice } from './platform.js';
 
+// «Incluye 7 h de vacaciones» / «… de enfermedad» / «… de vacaciones y 7 h de enfermedad» (ambas se
+// acreditan como jornada)
+function creditedText(state, s) {
+  if (!s.credited) return '';
+  let vac = 0, sick = 0;
+  for (const d of s.days) {
+    for (const it of d.items || []) {
+      if (it.type !== 'credited' || !it.minutes) continue;
+      if (getCode(state, it.code)?.kind === 'sick') sick += it.minutes; else vac += it.minutes;
+    }
+  }
+  if (!vac && !sick) return ` Incluye ${formatHours(s.credited)} de vacaciones o enfermedad.`;
+  const parts = [vac ? `${formatHours(vac)} de vacaciones` : '', sick ? `${formatHours(sick)} de enfermedad` : ''].filter(Boolean);
+  return ` Incluye ${parts.join(' y ')}.`;
+}
+
 export function createHours(ctx) {
   const el = h('section', { 'aria-label': 'Horas' });
   const t = ctx.today();
@@ -60,7 +76,7 @@ export function createHours(ctx) {
       partial || !s.daysKnown ? null : h('p', { class: 'hs-diff' }, h('b', { class: ['diff', diffCls] }, formatSignedHours(s.diff)), ' ', h('span', { class: 'muted' }, diffText)),
       h('p', { class: 'hs-foot muted small' },
         `Objetivo: ${workdays} días laborables × ${formatHours(weekly / (Number(state.settings.workDaysPerWeek) || 5))} (festivos descontados).`,
-        s.credited ? ` Incluye ${formatHours(s.credited)} de vacaciones.` : ''),
+        creditedText(state, s)),
       !s.daysKnown ? h('p', { class: 'notice notice-info small' }, icon('info'), h('span', {}, 'Este mes todavía no tiene turnos cargados.')) : null);
 
     const stats = h('div', { class: 'stats' },

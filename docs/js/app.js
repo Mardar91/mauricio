@@ -18,9 +18,11 @@ import { createBackground } from './ui/background.js';
 import { attentionCount } from './ui/attention.js';
 import { initInstallPrompt, onInstallChange } from './ui/install.js';
 import { platform } from './ui/platform.js';
+import { inSafariTab } from './ui/banners.js';
+import { createOcrPrefetch } from './ui/prefetch.js';
 
 // Debe coincidir con VERSION en sw.js
-export const APP_VERSION = '1.4.1';
+export const APP_VERSION = '1.4.2';
 
 const TABS = [
   { id: 'hoy', label: 'Hoy', icon: 'today' },
@@ -259,6 +261,7 @@ function exposeTestHooks() {
     version: APP_VERSION,
     injectScanResult: (result) => { go('escanear'); return views.escanear.showReview(result, { source: 'test' }); },
     background: () => ctx.background,
+    prefetch: () => ctx.prefetch,
   };
 }
 
@@ -321,6 +324,13 @@ function start() {
     showOnboarding(ctx);
   }
   ctx.background.start();
+
+  // Lector de fotos sin conexión: descarga en segundo plano lo que usará el primer escaneo. No en
+  // Safari sin instalar (su almacenamiento no es el de la app). __turnosPrefetch: solo para tests
+  // (false = no; { delay } = antes).
+  ctx.prefetch = createOcrPrefetch({ isBusy: () => Boolean(views.escanear && views.escanear.mode !== 'home') });
+  const pf = window.__turnosPrefetch;
+  if (pf !== false && !inSafariTab()) ctx.prefetch.start(pf && typeof pf.delay === 'number' ? { delay: pf.delay } : undefined);
 }
 
 window.addEventListener('hashchange', () => { if (/setup=/.test(location.hash)) handleSetupLink(); });

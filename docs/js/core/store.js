@@ -55,6 +55,9 @@ export const DEFAULT_SETTINGS = Object.freeze({
     unpublished: 0,      // cambios de aquí que no están publicados (días + códigos + avisos/lugares; solo lectura)
     prevKey: '',         // clave anterior a un enlace con otra clave (se recupera si la nueva no descifra)
     lastSyncStartedAt: null, // inicio de la última sincronización aplicada (descarta resultados viejos)
+    // Destino (owner/repo/carpeta:rama) del que son los datos de aquí: lo pone cada lectura o publicación.
+    // Con otro destino configurado, la sincronización no lee ni escribe (OTHER_TARGET). '' = ninguno
+    boundTarget: '',
   },
   ntfy: { enabled: false, server: 'https://ntfy.sh', topic: '', scheduled: {}, lastRunAt: null, lastError: null },
   onboardingDone: false,
@@ -102,6 +105,25 @@ export function personSwitchState(state) {
   out.settings.onboardingDone = st.onboardingDone === true;
   return out;
 }
+
+// Destino de sincronización = un calendario: 'owner/repo/carpeta:rama' (owner y repo sin mayúsculas,
+// como GitHub). Otro destino = otro calendario: nunca recibe los datos ni la clave de este (SPEC §11).
+export function syncTargetId(sync) {
+  const t = (v) => String(v ?? '').trim();
+  return `${t(sync?.owner).toLowerCase()}/${t(sync?.repo).toLowerCase()}/${t(sync?.dir).toLowerCase()}:${t(sync?.branch)}`;
+}
+
+// Destino del que son los datos de este dispositivo: el sello boundTarget (lo pone cada lectura o
+// publicación) o, en datos de antes, el configurado si ya leyó o publicó allí (aunque se haya
+// desconectado). '' = ninguno: sus turnos son solo suyos (nunca leyó ni publicó).
+export function dataTargetOf(sync) {
+  const b = typeof sync?.boundTarget === 'string' ? sync.boundTarget.trim() : '';
+  if (b) return b;
+  return sync && (sync.lastPullAt || sync.lastPushAt) ? syncTargetId(sync) : '';
+}
+
+// Calendario al que va lo de aquí: el de sus datos o, si no hay, el conectado ('' = ninguno)
+const placeOfSync = (sync) => dataTargetOf(sync) || (sync?.enabled && String(sync.token ?? '').trim() ? syncTargetId(sync) : '');
 
 const nowIso = (now) => (now instanceof Date ? now : new Date()).toISOString();
 const tsOf = (v) => { const t = Date.parse(v); return Number.isFinite(t) ? t : 0; };
@@ -170,7 +192,7 @@ function fixSettings(st) {
   st.balances = sanitizeBalances(st.balances);
   for (const k of ['calendarUpdatedAt', 'remindersUpdatedAt', 'placesUpdatedAt']) st[k] = isoOrNull(st[k]);
   const s = st.sync;
-  for (const [k, n] of [['owner', 39], ['repo', 100], ['branch', 100], ['token', 300], ['key', 64], ['prevKey', 64], ['deviceId', 40]]) s[k] = capStr(s[k], n).trim();
+  for (const [k, n] of [['owner', 39], ['repo', 100], ['branch', 100], ['token', 300], ['key', 64], ['prevKey', 64], ['deviceId', 40], ['boundTarget', 300]]) s[k] = capStr(s[k], n).trim();
   // Carpeta: en minúsculas; una no válida NO se cambia por '' (sería la carpeta de otra persona): sync da CONFIG
   s.dir = capStr(s.dir, 64).trim().toLowerCase();
   s.baseRev = Number.isSafeInteger(s.baseRev) && s.baseRev > 0 ? s.baseRev : 0;
@@ -930,6 +952,8 @@ export function listBeforeImport(storage = globalThis.localStorage) {
 // (obligatoria: nunca se elige «la más nueva», que podría ser de otra importación anterior).
 // Devuelve el estado anterior (como una importación nueva, conservando sync/ntfy actuales) y borra
 // esa copia; null si no hay key o la copia ya no existe (p. ej. un segundo toque en «Deshacer»).
+// Si la copia es de otro calendario (deshacer un cambio de persona, switchPerson), vuelve el estado
+// anterior entero, con su conexión y su clave: sus turnos nunca se importan en el calendario nuevo.
 export function undoImport(storage = globalThis.localStorage, current, { now, key } = {}) {
   if (!storage || typeof key !== 'string' || !key.startsWith(BEFORE_IMPORT_PREFIX)) return null;
   const k = key;
@@ -938,7 +962,18 @@ export function undoImport(storage = globalThis.localStorage, current, { now, ke
   if (!text) return null;
   let restored;
   try {
-    restored = importBackup(current ?? createDefaultState(), text, { now, force: true });
+    const cur = current ?? createDefaultState();
+    const saved = JSON.parse(text);
+    if (isPlainObject(saved) && placeOfSync(saved.settings?.sync) !== placeOfSync(cur.settings?.sync)) {
+      restored = migrateState(saved);
+      // Lo del dispositivo se queda como está ahora
+      const st = cur.settings || {};
+      if (isPlainObject(st.ntfy)) restored.settings.ntfy = mergeSettings(DEFAULT_SETTINGS.ntfy, st.ntfy, DEFAULT_SETTINGS.ntfy);
+      if (!restored.settings.sync.deviceId) restored.settings.sync.deviceId = capStr(st.sync?.deviceId, 40).trim();
+      if (st.onboardingDone === true) restored.settings.onboardingDone = true;
+    } else {
+      restored = importBackup(cur, text, { now, force: true });
+    }
   } catch {
     return null;
   }

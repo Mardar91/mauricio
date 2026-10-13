@@ -10,6 +10,7 @@ import { icon } from './icons.js';
 import { banners, saveFailedToast } from './banners.js';
 import { confirmDialog, openSheet } from './sheet.js';
 import { dayTimes, rangeText } from './times.js';
+import { OTHER_SHEET_WARNING } from '../recognize/pc/calendar.js';
 
 const LOW_CONFIDENCE = 0.7;
 export const DRAFT_KEY = 'turnos-mauricio:scan-draft';
@@ -596,7 +597,12 @@ export function createScan(ctx) {
         counts.doubtful ? h('span', { class: 'rc rc-doubt' }, `${counts.doubtful} por revisar`) : null,
         counts.unread ? h('span', { class: 'rc rc-doubt' }, `${counts.unread} sin leer`) : null) : null);
 
-    for (const w of shownWarnings) notices.push(h('div', { class: 'notice notice-info' }, icon('info'), h('p', {}, w)));
+    // «Esta hoja parece de otra persona»: aviso fuerte (sus días van sin marcar), antes que los demás
+    // (detrás de «Tu plan ya estaba al día», que va arriba)
+    const otherSheet = (w) => w.startsWith(OTHER_SHEET_WARNING);
+    notices.push(...shownWarnings.filter(otherSheet)
+      .map((w) => h('div', { class: 'notice notice-warn', 'data-testid': 'other-sheet' }, icon('warning'), h('p', {}, w))));
+    for (const w of shownWarnings.filter((x) => !otherSheet(x))) notices.push(h('div', { class: 'notice notice-info' }, icon('info'), h('p', {}, w)));
     if (counts.unread) {
       const list = rows.filter((r) => r.unread && !r.present);
       notices.push(h('div', { class: 'notice notice-alert', 'data-testid': 'unread-notice' }, icon('help'), h('p', {},

@@ -295,7 +295,9 @@ test('applySyncConfig: mismo repositorio → recuerda quién publica; otro → e
   assert.equal(same.settings.sync.deviceId, 'a');
   assert.equal(same.settings.sync.key, KEY);
   assert.equal(same.settings.sync.prevKey, ''); // misma clave
-  const other = applySyncConfig(s, { ...SYNC, repo: 'otros-datos' }, { now: at(1) });
+  // Otro repositorio: ya leyó aquí (sus datos son de este destino) → solo con switchPerson, desde cero
+  assert.throws(() => applySyncConfig(s, { ...SYNC, repo: 'otros-datos' }, { now: at(1) }), (e) => e.code === 'OTHER_TARGET');
+  const other = applySyncConfig(s, { ...SYNC, repo: 'otros-datos' }, { now: at(1), switchPerson: true });
   assert.equal(other.settings.sync.publisher, null);
   assert.equal(other.settings.sync.repo, 'otros-datos');
   assert.throws(() => applySyncConfig(s, { owner: 'x' }), (e) => e.code === 'CONFIG');

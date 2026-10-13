@@ -5,8 +5,8 @@
 import {
   SUPPLEMENT_NOTE, UNKNOWN_PUBLISHER, addDays, balanceSettings, buildICS, buildPersonLink, buildSetupLink, calendarName,
   calendarUrls, cleanPersonName, createDefaultState, exportBackup, fetchRemoteBackup, formatHours, formatMonth,
-  generateSyncKey, hasTime, importBackup, isReadOnlyDevice, isSyncKey, listBeforeImport, listCalendars, normalizeSyncConfig,
-  publicName, randomTopic, saveBeforeImport, suggestPlanName, supplementSettings, testConnection, testNtfy, toKey, travelOf, undoImport,
+  generateSyncKey, hasTime, importBackup, isSyncKey, listBeforeImport, listCalendars, normalizeSyncConfig,
+  publicName, randomTopic, saveBeforeImport, suggestPlanName, supplementSettings, testConnection, testNtfy, toKey, travelOf,
   updateSettings,
 } from '../core/index.js';
 import { badgeFromDef, displayName, groupCodes, timeRange } from './badge.js';
@@ -18,7 +18,7 @@ import { confirmDialog, openSheet } from './sheet.js';
 import { unconfirmedInUse } from './attention.js';
 import { showOnboarding } from './onboarding.js';
 import {
-  alertsNotice, openPasteSetup, ownLinkLabel, runSetup, subscribeButton, subscribeSteps, subscribedBlock, takeOver,
+  alertsNotice, copyInfo, openPasteSetup, ownLinkLabel, restoreCopy, runSetup, subscribeButton, subscribeSteps, subscribedBlock, takeOver,
 } from './setup.js';
 import { banners, inSafariTab, saveFailedToast, savedToast } from './banners.js';
 import { androidInstallSteps, installButton, installSteps, openInstallSheet } from './install.js';
@@ -31,6 +31,9 @@ const MINUTES = [15, 30, 45, 60, 90, 120];
 const SUP_LABEL = { night: 'Noche', saturday: 'Sábado', sunday: 'Domingo', holiday: 'Festivo' };
 const CORE_SHIFTS = ['F1', 'S1', 'N1', 'Z1'];
 const SOON_DAYS = 60; // «Mis turnos»: los turnos que se usan en los próximos ~2 meses
+// Con estos errores el enlace llevaría una clave o un token que no valen (o que no pueden publicar)
+const LINK_BLOCKERS = ['DECRYPT', 'NO_KEY', 'AUTH', 'FORBIDDEN'];
+const LINK_BLOCK_WHY = { DECRYPT: 'la clave no vale', NO_KEY: 'falta la clave', AUTH: 'el token no vale', FORBIDDEN: 'el token no tiene permiso para escribir' };
 
 export function createSettings(ctx) {
   const { store } = ctx;
@@ -151,6 +154,15 @@ export function createSettings(ctx) {
           if (r.ok) savedToast(ctx, r.pulledDays?.length ? `Listo: llegaron ${plural(r.pulledDays.length, 'día', 'días')}.` : 'Listo.');
           else ctx.toast(r.error.message, { type: 'error', duration: 7000 });
         }, 'btn-primary btn-block');
+      } else if (st.remedy === 'switch') {
+        // Los turnos de aquí son de otro calendario: pasar al conectado (pregunta antes y se puede deshacer)
+        fix = actionButton('switchfix', 'Cambiar al calendario conectado…', 'refresh', async () => {
+          const cur = store.get().settings.sync;
+          const cfg = normalizeSyncConfig({ owner: cur.owner, repo: cur.repo, branch: cur.branch || '', dir: cur.dir || '', token: cur.token, key: cur.key || '' });
+          if (!cfg) { ctx.toast('La conexión guardada no es válida: pide un enlace nuevo.', { type: 'error' }); return; }
+          await runSetup(ctx, cfg, { confirm: false });
+        }, 'btn-primary btn-block');
+        fix = [fix, linkBtn(false)];
       } else {
         fix = linkBtn(true);
       }
@@ -336,7 +348,7 @@ export function createSettings(ctx) {
           parse: (v) => { const n = String(v).trim() === '' ? 0 : parseSigned(v); return Number.isFinite(n) && Math.abs(n) <= 100000 ? { value: Math.round(n * 60) } : { error: 'Escribe las horas, por ejemplo 12,5 o -3.' }; },
           save: (n) => set({ balances: { overtimeStartMin: n } }),
         }), { sub: 'Horas de más (o de menos, con «-») que ya tenías' }),
-        row('Desde', monthSel, { sub: 'El mes en que empiezas a contar' })),
+        row('Desde', monthSel, { sub: 'El mes en que empiezas a contar', cls: 'set-row-stack' })),
       h('h3', { class: 'set-subtitle' }, 'Suplementos'),
       h('div', { class: 'card set-card' },
         row(SUP_LABEL.night, pct('night'), { sub: `${sp.night.from}–${sp.night.to}` }),
@@ -402,8 +414,11 @@ export function createSettings(ctx) {
   function names(state) {
     const s = state.settings;
     const sug = suggestPlanName({ settings: { name: s.name, planName: '' } });
+    // En el ordenador (quien ayuda): el nombre es el de la persona de estos turnos
+    const pcName = ctx.platform === 'desktop';
     const name = h('input', {
-      class: 'input input-inline input-name', value: s.name || '', maxlength: '60', placeholder: 'Tu nombre', 'aria-label': 'Tu nombre', autocomplete: 'given-name',
+      class: 'input input-inline input-name', value: s.name || '', maxlength: '60', placeholder: pcName ? 'Su nombre' : 'Tu nombre',
+      'aria-label': pcName ? 'Nombre de la persona' : 'Tu nombre', autocomplete: pcName ? 'off' : 'given-name',
       dataset: { fkey: 'name' }, on: { change: (e) => { set({ name: cleanPersonName(e.target.value) }); savedToast(ctx, 'Guardado'); } },
     });
     const plan = h('input', {
@@ -411,10 +426,12 @@ export function createSettings(ctx) {
       autocomplete: 'off', spellcheck: 'false', dataset: { fkey: 'planName' },
       on: { change: (e) => { set({ planName: cleanPersonName(e.target.value) }); savedToast(ctx, 'Guardado'); } },
     });
-    return group('Tu nombre', [
+    return group(pcName ? 'Nombre de la persona' : 'Tu nombre', [
       row('Nombre', name, { icon: 'user' }),
-      row('En el plan', plan, { icon: 'tag', sub: 'Como sale en la hoja del PC' }),
-    ], { id: 'set-name', footer: 'El nombre del plan (apellido y nombre) sirve para encontrar tu fila en la hoja impresa del PC.' });
+      row('En el plan', plan, { icon: 'tag', sub: 'Como sale en la hoja del PC', cls: 'set-row-stack' }),
+    ], { id: 'set-name', footer: pcName
+      ? 'El de la persona de estos turnos (no el tuyo, si la ayudas). El nombre del plan (apellido y nombre) sirve para encontrar su fila en la hoja impresa del PC.'
+      : 'El nombre del plan (apellido y nombre) sirve para encontrar tu fila en la hoja impresa del PC.' });
   }
 
   // ---------- 4. Copia de seguridad ----------
@@ -488,11 +505,10 @@ export function createSettings(ctx) {
     });
   }
 
+  // Deshacer una importación o volver a una copia: si es de otro calendario, se vuelve a él entero
   function undo(key) {
-    const prev = undoImport(ls, store.get(), { now: new Date(), key });
-    if (!prev) return; // segundo toque: ya no hay copia
-    store.set(() => prev);
-    savedToast(ctx, 'Listo: todo está como antes');
+    const msg = restoreCopy(ctx, key);
+    if (msg) savedToast(ctx, msg); // null: segundo toque, ya no hay copia
   }
 
   // ---------- 5. Instalar ----------
@@ -532,9 +548,11 @@ export function createSettings(ctx) {
     const token = input('token', 'Token de GitHub', { type: showToken ? 'text' : 'password', placeholder: 'github_pat_…', class: 'input input-token' });
     const eye = h('button', { class: 'icon-btn', type: 'button', 'aria-label': showToken ? 'Ocultar token' : 'Mostrar token', dataset: { fkey: 'eye' }, on: { click: () => { showToken = !showToken; refresh(); } } }, icon(showToken ? 'eyeOff' : 'eye'));
     const formCfg = () => normalizeSyncConfig({ ...(form || f) });
-    const readOnly = isReadOnlyDevice(s);
-    // El enlace lleva la misma clave y token: vale desde cualquier dispositivo que ya leyó o publicó
-    const canLink = s.enabled && isSyncKey(s.key) && Boolean(s.lastPushAt || s.lastPullAt);
+    // El enlace lleva la misma clave y token: vale desde cualquier dispositivo que ya leyó o publicó,
+    // salvo si ahora mismo falla por la clave o el token (clave vieja, sin clave, token caducado o sin
+    // permiso de escritura)
+    const linkBlocked = LINK_BLOCKERS.includes(s.lastErrorCode);
+    const canLink = s.enabled && isSyncKey(s.key) && Boolean(s.lastPushAt || s.lastPullAt) && !linkBlocked;
 
     const tech = s.enabled ? h('ul', { class: 'tech-list' },
       h('li', {}, h('span', {}, 'Este dispositivo'), h('code', {}, s.deviceId || '—')),
@@ -587,11 +605,15 @@ export function createSettings(ctx) {
         canLink ? h('button', {
           class: 'btn btn-tinted btn-sm', type: 'button', 'data-testid': 'make-link',
           on: { click: async () => {
-            const link = buildSetupLink(location.href, store.get().settings.sync);
+            // Con el nombre: la confirmación dice «para Mauricio» y el core puede comprobar de quién es
+            const st = store.get().settings;
+            const link = buildSetupLink(location.href, { ...st.sync, name: publicName(st.name || '') });
             const ok = await copyText(link);
             ctx.toast(ok ? 'Enlace copiado. Lleva la clave y el token: envíalo solo a la persona de este calendario.' : 'No se pudo copiar', { type: ok ? 'ok' : 'error', duration: 8000 });
           } },
         }, icon('copy'), ownLinkLabel(state)) : null,
+        linkBlocked && s.enabled ? h('p', { class: 'set-hint link-blocked', 'data-testid': 'make-link-blocked' },
+          `«${ownLinkLabel(state)}» no está disponible hasta arreglar la conexión (${LINK_BLOCK_WHY[s.lastErrorCode]}). También se puede crear desde el teléfono que publica.`) : null,
         isConfigured(s) ? h('button', {
           class: 'btn btn-tinted btn-sm', type: 'button', 'data-testid': 'make-person-link', on: { click: () => openPersonLink() },
         }, icon('user'), 'Crear enlace para otra persona') : null,
@@ -672,13 +694,24 @@ export function createSettings(ctx) {
           await importText(JSON.stringify(got.data), { from: 'de internet', savedAt: got.meta?.savedAt || null });
         }, 'btn-tinted btn-sm'), { sub: 'Este teléfono queda igual que la copia (se puede deshacer)' }),
       ] : h('p', { class: 'hint' }, 'Con el calendario conectado puedes recuperar aquí la copia de internet.'),
-      copies.map((c) => row(`Copia de antes de importar`, h('button', {
-        class: 'btn btn-tinted btn-sm', type: 'button',
-        on: { click: async () => {
-          const ok = await confirmDialog({ title: '¿Volver a esta copia?', text: `Copia del ${dateTime(c.at)} con ${plural(c.days, 'día', 'días')}. Reemplaza los datos de este teléfono.`, ok: 'Volver a esta copia', danger: true });
-          if (ok) undo(c.key);
-        } },
-      }, 'Recuperar'), { sub: `${dateTime(c.at)} · ${plural(c.days, 'día', 'días')}` })));
+      copies.map((c) => {
+        const info = copyInfo(state, c.key);
+        // De otro calendario (antes de cambiar de persona o de borrar): se vuelve a él entero
+        const other = Boolean(info?.otherTarget);
+        const whose = other && info.name ? ` (calendario de ${info.name})` : '';
+        return row(info?.switch ? 'Copia de antes de cambiar de calendario' : 'Copia de antes de importar', h('button', {
+          class: 'btn btn-tinted btn-sm', type: 'button', 'data-testid': 'restore-copy',
+          on: { click: async () => {
+            const ok = await confirmDialog({
+              title: '¿Volver a esta copia?', danger: true, ok: 'Volver a esta copia',
+              text: other
+                ? `Copia del ${dateTime(c.at)} con ${plural(c.days, 'día', 'días')}${whose}. Este dispositivo vuelve a ese calendario y deja el de ahora.`
+                : `Copia del ${dateTime(c.at)} con ${plural(c.days, 'día', 'días')}. Reemplaza los datos de este teléfono.`,
+            });
+            if (ok) undo(c.key);
+          } },
+        }, 'Recuperar'), { sub: `${dateTime(c.at)} · ${plural(c.days, 'día', 'días')}${whose}` });
+      }));
 
     const dangerCard = h('div', { class: 'card set-card adv-card' },
       h('h3', { class: 'adv-title' }, 'Borrar'),

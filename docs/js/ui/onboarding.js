@@ -1,5 +1,7 @@
 // Bienvenida del primer uso (se puede saltar): bienvenida → tu nombre → instalar (iPhone en Safari o
 // Android en Chrome) → avisos. «Atrás» (Android) vuelve un paso; en el primero, cierra.
+// En el ordenador (lo usa quien ayuda) se pregunta «¿De quién son estos turnos?»: el nombre de quien
+// ayuda no debe acabar como nombre del calendario.
 import { cleanPersonName, suggestPlanName, updateSettings } from '../core/index.js';
 import { h, isStandalone, minutesText, nextId, setChildren } from './dom.js';
 import { androidInstallSteps, installButton, installSteps, onInstallChange } from './install.js';
@@ -12,6 +14,7 @@ export function showOnboarding(ctx, { again = false } = {}) {
   const plat = platform();
   const inSafari = plat === 'ios' && !isStandalone();
   const inChrome = plat === 'android' && !isStandalone();
+  const helperPc = plat === 'desktop';
   const steps = ['welcome', 'name'];
   if (inSafari || inChrome) steps.push('install');
   steps.push('reminders');
@@ -23,7 +26,7 @@ export function showOnboarding(ctx, { again = false } = {}) {
   const fid = nextId('ob');
   const nameInput = h('input', {
     class: 'input', id: `${fid}-name`, value: st0.name || '', maxlength: '60', autocomplete: 'given-name', autocapitalize: 'words',
-    placeholder: 'Ej.: Ana', 'data-testid': 'ob-name', enterkeyhint: 'next',
+    placeholder: helperPc ? 'Ej.: Mauricio' : 'Ej.: Ana', 'data-testid': 'ob-name', enterkeyhint: 'next',
   });
   const planInput = h('input', {
     class: 'input', id: `${fid}-plan`, value: st0.planName || '', maxlength: '60', autocomplete: 'off', autocapitalize: 'words',
@@ -67,7 +70,8 @@ export function showOnboarding(ctx, { again = false } = {}) {
     nextBtn.className = 'btn btn-primary btn-lg btn-block';
     let body;
     if (step === 'welcome') {
-      const name = cleanPersonName(store.get().settings.name).split(' ')[0];
+      // En el ordenador no se saluda con el nombre (es el de la persona de los turnos, no el de quien ayuda)
+      const name = helperPc ? '' : cleanPersonName(store.get().settings.name).split(' ')[0];
       body = [
         h('div', { class: 'ob-art ob-art-icon', 'aria-hidden': 'true' }, h('img', { src: 'icons/icon.svg', alt: '', width: '112', height: '112' })),
         h('h1', { class: 'ob-title' }, name ? `¡Hola, ${name}! 👋` : '¡Hola! 👋'),
@@ -76,6 +80,16 @@ export function showOnboarding(ctx, { again = false } = {}) {
           h('li', {}, h('span', { 'aria-hidden': 'true' }, '📷'), h('span', {}, h('b', {}, 'Toma una foto'), ' de tu plan y la app lo lee.')),
           h('li', {}, h('span', { 'aria-hidden': 'true' }, '🔔'), h('span', {}, h('b', {}, 'Te avisa'), ' la noche antes y antes de cada turno.')),
           h('li', {}, h('span', { 'aria-hidden': 'true' }, '⏱️'), h('span', {}, h('b', {}, 'Cuenta tus horas'), ' de la semana y del mes.'))),
+      ];
+    } else if (step === 'name' && helperPc) {
+      body = [
+        h('div', { class: 'ob-art', 'aria-hidden': 'true' }, '🙂'),
+        h('h1', { class: 'ob-title' }, '¿De quién son estos turnos?'),
+        h('p', { class: 'ob-text' }, 'Si usas este ordenador para ayudar a alguien, escribe el nombre de esa persona, no el tuyo.'),
+        h('div', { class: 'card ob-form' },
+          h('div', { class: 'field' }, h('label', { class: 'label', for: nameInput.id }, 'Nombre de la persona'), nameInput),
+          h('div', { class: 'field' }, h('label', { class: 'label', for: planInput.id }, '¿Cómo sale su nombre en el plan?'), planInput, planHint)),
+        h('p', { class: 'ob-note' }, 'Puedes dejar el nombre vacío: al conectar su calendario se usa el de ese calendario. Se cambia en Ajustes.'),
       ];
     } else if (step === 'name') {
       body = [

@@ -170,3 +170,16 @@ export function fakeGitHub({ empty = false, defaultBranch = 'main', repoStatus =
   });
   return gh;
 }
+
+// Varios repositorios de datos: { 'owner/repo': fakeGitHub() } → fetch que reparte cada petición al suyo
+// (owner y repo sin distinguir mayúsculas, como GitHub); un repositorio que no está → 404
+export function multiRepo(map) {
+  const entries = Object.entries(map).map(([k, gh]) => [k.toLowerCase(), gh]);
+  return mockFetch(async (req) => {
+    const u = new URL(req.url);
+    const m = /^\/repos\/([^/]+)\/([^/]+)(.*)$/.exec(u.pathname);
+    const gh = m && entries.find(([k]) => k === `${decodeURIComponent(m[1])}/${decodeURIComponent(m[2])}`.toLowerCase())?.[1];
+    if (!gh) return { status: 404, body: { message: 'Not Found' } };
+    return gh.fetch(`${u.origin}${REPO}${m[3]}${u.search}`, { method: req.method, headers: req.headers, body: req.body });
+  });
+}

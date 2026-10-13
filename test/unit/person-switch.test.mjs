@@ -47,7 +47,10 @@ test('Mauricio (conectado) abre el enlace de Ana: OTHER_PERSON, no cambia nada y
   assert.equal(t.error.retry, false);
   assert.equal(t.error.message, 'Este enlace es del calendario de Ana y este dispositivo usa el de Mauricio. No se cambió nada.');
   assert.match(t.error.detail, /Mardar91\/mauricio-datos\/\(raíz\).*Mardar91\/mauricio-datos\/ana/);
-  assert.deepEqual(t.otherPerson, { reason: 'folder', name: 'Ana', dir: 'ana', current: { name: 'Mauricio', dir: '' }, working: true });
+  assert.deepEqual(t.otherPerson, {
+    reason: 'folder', name: 'Ana', dir: 'ana', current: { name: 'Mauricio', dir: '' }, working: true, bound: true,
+    from: 'Mardar91/mauricio-datos', to: 'Mardar91/mauricio-datos, carpeta ana',
+  });
   assert.equal(t.apply, undefined);
   assert.equal(gh.puts().length, puts);
   assert.equal(gh.file('ana/backup.json'), null);

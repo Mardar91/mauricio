@@ -2,7 +2,7 @@
 
 Web app (PWA) in spagnolo per i turni di lavoro di Mauricio (iPhone) e di sua sorella (Android):
 
-- **Foto del piano → turni salvati.** Funziona sia con la foto dell'app "Dienstplan" sia con la foto della stampa del PC (cerca la riga con il nome «come nel piano», es. «Ducuara Ana»). La lettura avviene sul telefono, senza server.
+- **Foto del piano → turni salvati.** Funziona sia con la foto dell'app "Dienstplan" sia con la foto della stampa del PC (cerca la riga con il nome «come nel piano», es. «Ducuara Ana»). La lettura avviene sul telefono, senza server. Al primo avvio con internet l'app scarica in background il lettore di testo (circa 7 MB), così anche la prima foto si legge senza connessione.
 - **Promemoria** tramite il calendario del telefono (iPhone: Calendario; Android: app ICSx⁵), con avviso la sera prima alle 20:00, 1 ora prima del turno (prima ancora se il luogo ha un tempo di viaggio: «Sal a las 13:05») e il giorno 20 se manca il piano del mese dopo.
 - **Ore settimanali e mensili** confrontate con il contratto, più consigli; **maggiorazioni** (notte, sabato, domenica, festivi, con stima in € se si inserisce la paga oraria) e **saldi** (ore in più/in meno e ferie dell'anno). I valori di default sono indicativi: vanno controllati sul contratto (Ajustes → «Contrato y nómina»).
 - **Cambio turno a mano**, anche con orario speciale solo per un giorno; codice `K` per la malattia.
@@ -24,7 +24,8 @@ GitHub Pages è gratis per i repo pubblici e non usa minuti di Actions.
    - Repository access: *Only select* → `mauricio-datos`.
    - Permissions: *Contents* → **Read and write**.
    - Scadenza: la più lunga possibile. Quando scade, rifai il token e un link nuovo.
-3. Sul tuo computer apri l'app → **Ajustes → Opciones avanzadas → GitHub**: owner `Mardar91`, repo `mauricio-datos`, token → *Guardar y conectar* → nel messaggio «Conectado» tocca *Entendido* → **Crear enlace de configuración** (o «Crear enlace para Mauricio», se il dispositivo conosce già il nome) → copia il link e mandalo a Mauricio (es. WhatsApp).
+3. Sul tuo computer apri l'app. Al primo avvio chiede «¿De quién son estos turnos?»: scrivi **Mauricio** (non il tuo nome) o lascia vuoto. Poi **Ajustes → Opciones avanzadas → GitHub**: owner `Mardar91`, repo `mauricio-datos`, token → *Guardar y conectar* → nel messaggio «Conectado» tocca *Entendido* → **Crear enlace para Mauricio** (o «Crear enlace de configuración», se il dispositivo non conosce il nome) → copia il link e mandalo a Mauricio (es. WhatsApp). Il link porta il nome: sul telefono la conferma dice «para Mauricio».
+   - Se compare un errore (token senza permesso di scrittura, token scaduto, chiave sbagliata) l'app lo dice e il pulsante per creare il link non c'è finché non si risolve. Senza internet dice «Se conectará cuando haya internet»: il link si crea dopo.
 4. Sull'iPhone di Mauricio:
    1. Apri il sito in **Safari** e installa l'app: «•••» → Compartir → *Agregar a inicio*, lasciando attivo «Abrir como app web».
    2. Apri l'app **dall'icona**.
@@ -42,6 +43,8 @@ Stesso repo `mauricio-datos` e stesso token: i suoi dati vanno nella cartella `a
 3. Al primo avvio scrive il nome e **come appare nel piano** (es. «Ducuara Ana»); si cambia in Ajustes → «Tu nombre». Si presume che usi gli stessi codici (F1, S1, N1…): i codici nuovi vengono creati da soli e l'app chiede di confermarne l'orario.
 4. Calendario con avvisi (consigliato): installa **ICSx⁵** da Google Play (1,99 €; gratis su F-Droid), aprila una volta e tocca «Permitir». Poi nell'app Turnos: **Ver mis turnos en el calendario** → si apre ICSx⁵ → *SUBSCRIBE* (in basso) o la freccia → (in alto) → nella schermata successiva («Título y color», «Alarms») lascia **spento** «Ignore alerts embedded in the calendar» e tocca la **freccia → in alto a destra** (qui il pulsante in basso non c'è): ICSx⁵ salva l'abbonamento e si chiude da sola. Poi riapri ICSx⁵ dalla sua icona → menu ⋮ → «Marcar intervalo de sincronización» → **Cada hora**. Se ICSx⁵ avvisa per la batteria: «Sin restricciones». La guida passo passo è nell'app (Ajustes → Calendario del teléfono).
 5. Alternativa gratis ma lenta (fino a un giorno per gli aggiornamenti, senza gli avvisi dell'app): Google Calendar dal computer → «Otros calendarios» → + → «Desde una URL» con il link di *Copiar enlace*, e poi aggiungere una notifica predefinita a quel calendario.
+
+Se un telefono usa già il calendario di una persona e apre il link di un'altra (es. il telefono di Ana collegato per sbaglio a quello di Mauricio), l'app chiede **«¿Cambiar al calendario de Ana?»**. Con *Cancelar* non cambia nulla. Con *Sí, cambiar* il telefono passa al calendario di Ana partendo pulito: i turni di prima non finiscono nel suo calendario, ma restano salvati come copia (pulsante «Deshacer» subito dopo, oppure Ajustes → Opciones avanzadas → Restaurar → «Copia de antes de cambiar de calendario»). Lo stesso succede se dal modulo di GitHub si cambia repository su un dispositivo che ha già dati.
 
 Ognuno può vedere i turni dell'altro: **Ajustes → Calendarios de la familia → Ver sus turnos en mi calendario** (solo lettura, senza i suoi avvisi). Sull'iPhone l'app lo ricorda prima di aprire l'abbonamento: qui «Eliminar alertas» va lasciato **attivo** (al contrario del proprio calendario); su Android, in ICSx⁵, si attiva «Ignore alerts embedded in the calendar».
 

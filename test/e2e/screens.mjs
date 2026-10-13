@@ -647,6 +647,64 @@ scenario('importar', async (ctx, theme) => {
   return page;
 });
 
+scenario('v142', async (_ctx, theme) => {
+  // Teléfono (Android) con el calendario de Mauricio que abre el enlace de Ana: pregunta antes de cambiar
+  const ctx = await iphoneContext(browser, { theme, scale, device: 'android', width: 360, height: 740 });
+  const gh = await familyGitHub();
+  const st = core.updateSettings(demoState(), { name: 'Mauricio', sync: { ...SYNC, deviceId: 'android1' } });
+  const page = await open(ctx, { state: st, gh, standalone: false });
+  await page.waitForFunction(() => JSON.parse(localStorage.getItem('turnos-mauricio:v1')).settings.sync.lastPullAt, null, { timeout: 10000 });
+  const anaHash = core.buildSetupLink(APP, { owner: OWNER, repo: REPO, branch: '', token: TOKEN, key: OTHER_KEY, dir: 'ana', name: 'Ana' }).slice(APP.length);
+  await page.evaluate((hsh) => { location.hash = hsh; }, anaHash);
+  await page.waitForSelector('.dialog-wrap.open');
+  await page.click('.dialog-wrap.open .btn-primary');
+  await page.waitForSelector('.dialog-wrap.open .dialog-title:text("¿Cambiar al calendario de Ana?")', { timeout: 15000 });
+  await snap(page, '30-cambiar-calendario', { theme });
+  await page.click('.dialog-wrap.open .btn-primary');
+  await page.waitForSelector('.dialog-wrap.open .dialog-title:text("¿Usar este teléfono para actualizar el calendario?")', { timeout: 15000 });
+  await page.click('.dialog-wrap.open .btn-secondary');
+  await page.waitForSelector('[data-testid="subscribe-step"]', { timeout: 15000 });
+  await page.waitForSelector('.sheet-subscribe [data-testid="webcal"][aria-disabled="false"]', { timeout: 15000 });
+  await snap(page, '30-cambiado-ultimo-paso', { theme });
+  for (const e of page.__errors) problems.push(`[v142/${theme}] ${e}`);
+  await ctx.close();
+  // Ordenador de quien ayuda: guardar sin internet
+  const ctx2 = await iphoneContext(browser, { theme, scale: 1, device: 'desktop', width: 1280, height: 800 });
+  const gh2 = fakeGitHub({ empty: true });
+  const p2 = await open(ctx2, { state: core.updateSettings(core.createDefaultState(), { onboardingDone: true }), gh: gh2, standalone: false });
+  await p2.route('https://api.github.com/**', (r) => r.abort('internetdisconnected'));
+  await tab(p2, 'ajustes');
+  await p2.click('[data-testid="advanced"] > summary');
+  await p2.fill('[data-fkey="gh-owner"]', OWNER);
+  await p2.fill('[data-fkey="gh-repo"]', REPO);
+  await p2.fill('[data-fkey="gh-token"]', TOKEN);
+  await p2.click('[data-fkey="btn-connect"]');
+  await p2.waitForSelector('.dialog-wrap.open .dialog-title:text("Guardado, sin conexión")', { timeout: 15000 });
+  await snap(p2, '30-quien-ayuda-sin-conexion', { theme });
+  await ctx2.close();
+  // «Crear enlace» no disponible (la clave ya no vale)
+  const ctx3 = await iphoneContext(browser, { theme, scale });
+  const gh3 = fakeGitHub();
+  await seedRemote(gh3, demoState(), { deviceId: 'iphone1', key: OTHER_KEY });
+  const p3 = await open(ctx3, { state: core.updateSettings(demoState(), { name: 'Mauricio', sync: { ...SYNC, deviceId: 'pc1', lastPullAt: '2026-10-12T08:00:00.000Z' } }), gh: gh3 });
+  await p3.waitForFunction(() => JSON.parse(localStorage.getItem('turnos-mauricio:v1')).settings.sync.lastErrorCode === 'DECRYPT', null, { timeout: 10000 });
+  await tab(p3, 'ajustes');
+  await p3.click('[data-testid="advanced"] > summary');
+  await p3.locator('[data-testid="make-link-blocked"]').scrollIntoViewIfNeeded();
+  await p3.evaluate(() => window.scrollBy(0, 120));
+  await snap(p3, '30-crear-enlace-no-disponible', { theme });
+  await ctx3.close();
+  // Revisión: hoja de otra persona (aviso naranja)
+  const p4 = await open(_ctx, { state: demoState() });
+  await p4.evaluate((r) => window.__turnosTest.injectScanResult(r), {
+    layout: 'pc-table', month: 11, year: 2026, days: [{ day: 2, codes: ['F1'], confidence: 0.4 }, { day: 3, codes: ['S1'], confidence: 0.4 }, { day: 4, codes: ['-'], confidence: 0.4 }],
+    warnings: ['Esta hoja parece de otra persona: no veo «Mauricio» en el nombre. Revisa antes de guardar.'],
+  });
+  await p4.waitForSelector('.review-list');
+  await snap(p4, '30-revision-otra-hoja', { theme });
+  return p4;
+});
+
 scenario('avisos-fijos', async (ctx, theme) => {
   const st = demoState();
   st.schema = 99;

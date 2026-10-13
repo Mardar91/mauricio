@@ -1,11 +1,13 @@
 // Conectar el calendario del teléfono: enlace de configuración (#setup=…), «Tengo un enlace» (pegar),
 // último paso para suscribirse (iPhone: webcal; Android: ICSx⁵) y «Usar este dispositivo». Todo pasa
 // por la cola única (ctx.syncQueue).
-import { calendarName, calendarUrls, parseSetupLink, publicName } from '../core/index.js';
+import {
+  calendarName, calendarUrls, dataTargetOf, parseSetupLink, publicName, saveBeforeImport, syncTargetId, undoImport,
+} from '../core/index.js';
 import { copyText, dateTime, h, safeStorage, setChildren } from './dom.js';
 import { icon } from './icons.js';
 import { installSteps } from './install.js';
-import { inSafariTab } from './banners.js';
+import { inSafariTab, savedToast } from './banners.js';
 import { alertDialog, busyDialog, confirmDialog, openSheet, sheetsOpen } from './sheet.js';
 import {
   TRANSIENT, calendarReady, isConfigured, isSubscribed, markSubscribed, subscribedInfo, webcalUrl,
@@ -70,8 +72,9 @@ export function ownLinkLabel(state) {
 // Confirmar → comprobar (lee y descifra con una copia; si falla no cambia nada) → guardar → publicar
 // o solo leer → paso «Suscribirme en el iPhone» (o iPad; solo si hace falta). opts.confirm: false en el
 // formulario avanzado.
-// helper: se conecta desde «Opciones avanzadas» (normalmente quien ayuda): no se adueña del
-// calendario ni pide suscribirse; lleva a «Crear enlace…»
+// helper: se conecta desde «Opciones avanzadas» (normalmente quien ayuda): no pide suscribirse ni
+// «¿Usar este dispositivo?» y lleva a «Crear enlace…». En un repo vacío este dispositivo publica primero
+// (rev 1, sin turnos); el teléfono de la persona toma el relevo al abrir el enlace («¿Usar este iPhone?»).
 export async function runSetup(ctx, cfg, { confirm = true, helper = false } = {}) {
   if (confirm) {
     const cal = calendarPhrase();
@@ -89,20 +92,31 @@ export async function runSetup(ctx, cfg, { confirm = true, helper = false } = {}
   const prev = ctx.store.get().settings.sync;
   const prevUrl = prev.enabled && isConfigured(prev) ? webcalUrl(prev) : null;
   const prevWorked = Boolean(prevUrl && (prev.lastPushAt || prev.lastPullAt));
+  const prevName = publicName(ctx.store.get().settings.name || '');
 
-  const busy = busyDialog('Conectando con tu calendario…');
-  let t;
-  try {
-    t = await ctx.syncQueue.setup(cfg);
-  } catch (e) {
-    t = { ok: false, error: { message: e?.message || 'No se pudo conectar.' } };
-  } finally {
-    busy.close();
+  let t = await checkSetup(ctx, cfg);
+  // Calendario de otra persona (u otro destino): preguntar antes de cambiar este dispositivo
+  let switched = null;
+  if (!t.ok && SWITCH_CODES.includes(t.error?.code)) {
+    switched = await confirmSwitch(ctx, cfg, t);
+    if (!switched) return false;
+    t = switched.t;
   }
   if (!t.ok) {
     await alertDialog({ icon: '⚠️', title: 'No se pudo conectar', text: t.error?.message || 'No se pudo conectar.' });
     return false;
   }
+  // Tras cambiar de calendario: «Deshacer» al final (que no lo tapen los diálogos de abajo). Con el paso
+  // «Suscribirme» abierto va dentro de la hoja (un aviso abajo taparía su botón de cerrar).
+  const undoSwitch = switched?.key ? () => { const msg = restoreCopy(ctx, switched.key); if (msg) savedToast(ctx, msg); } : null;
+  const undoToast = () => {
+    if (!undoSwitch) return;
+    const name = publicName(ctx.store.get().settings.name || '');
+    ctx.toast(name ? `Este ${deviceWord()} usa ahora el calendario de ${name}.` : `Este ${deviceWord()} usa ahora otro calendario.`, {
+      type: 'ok', duration: 12000, action: { label: 'Deshacer', run: undoSwitch },
+    });
+  };
+  let waiting = false; // quien ayuda, sin internet: el enlace se podrá crear cuando conecte
   if (t.readOnly && helper) {
     // Ya publica otro dispositivo (p. ej. el teléfono de esa persona): quien ayuda solo lee
   } else if (t.readOnly) {
@@ -117,7 +131,14 @@ export async function runSetup(ctx, cfg, { confirm = true, helper = false } = {}
       if (!helper && await askUseThisDevice()) await becomePublisherNow(ctx);
     } else if (r && !r.ok && r.error && !r.error.retry) {
       await alertDialog({ icon: '⚠️', title: 'Falta un detalle', text: r.error.message });
+      // Quien ayuda no puede crear el enlace con este error: no se dice «Conectado»
+      if (helper) { undoToast(); return false; }
+    } else if (r && !r.ok && helper) {
+      waiting = true;
     }
+  } else if (helper) {
+    // Sin internet: quien ayuda nunca toma el relevo (no se pregunta luego «¿Usar este dispositivo?»)
+    waiting = true;
   } else {
     // Sin internet: todavía no se sabe si otro dispositivo publica. Se preguntará al conectar.
     rememberAskTakeover(ctx.store.get().settings.sync);
@@ -125,20 +146,107 @@ export async function runSetup(ctx, cfg, { confirm = true, helper = false } = {}
   if (helper) {
     ctx.go('ajustes', { section: 'github' });
     const label = ownLinkLabel(ctx.store.get());
-    await alertDialog({
+    await alertDialog(waiting ? {
+      icon: '☁️',
+      title: 'Guardado, sin conexión',
+      text: `Se conectará cuando haya internet; luego podrás crear el enlace («${label}»).`,
+    } : {
       icon: '✅',
       title: 'Conectado',
       text: `Ahora toca «${label}» y envía el enlace a la persona de este calendario (por ejemplo, por WhatsApp). En Android basta con abrirlo; en iPhone se pega en la app: Ajustes → «Tengo un enlace». Para otra persona de la familia, usa «Crear enlace para otra persona».`,
     });
     ctx.go('ajustes', { section: 'github' });
+    undoToast();
     return true;
   }
   ctx.go('ajustes', { section: 'calendar' });
   const url = webcalUrl(ctx.store.get().settings.sync);
   const same = url && ((prevWorked && url === prevUrl) || isSubscribed(ctx.store.get().settings.sync));
-  if (same) ctx.toast('Listo, tu calendario sigue funcionando.', { type: 'ok', duration: 6000 });
-  else openSubscribeSheet(ctx);
+  if (same) {
+    if (undoSwitch) undoToast();
+    else ctx.toast('Listo, tu calendario sigue funcionando.', { type: 'ok', duration: 6000 });
+  } else {
+    openSubscribeSheet(ctx, { switchedFrom: switched ? (prevName || null) : undefined, onUndo: undoSwitch });
+  }
   return true;
+}
+
+// Códigos del core para «esto es de otro calendario» (CORE-API §3.7)
+const SWITCH_CODES = ['OTHER_PERSON', 'OTHER_TARGET'];
+
+// Comprobar con la cola (lee y descifra con una copia: si falla, nada cambia)
+async function checkSetup(ctx, cfg, opts) {
+  const busy = busyDialog(opts?.switchPerson ? 'Cambiando de calendario…' : 'Conectando con tu calendario…');
+  try {
+    return await (opts ? ctx.syncQueue.setup(cfg, opts) : ctx.syncQueue.setup(cfg));
+  } catch (e) {
+    return { ok: false, error: { message: e?.message || 'No se pudo conectar.' } };
+  } finally {
+    busy.close();
+  }
+}
+
+// Texto de la pregunta: el mensaje del core (de quién es cada calendario) + qué pasa al cambiar
+export function switchQuestion(message) {
+  const base = String(message || '').replace(/\s*No se cambió nada\.?\s*$/, '').trim();
+  if (/¿/.test(base)) return base; // el core ya pregunta
+  return `${base ? `${base} ` : ''}¿Cambiar este dispositivo a ese calendario? Los turnos de ahora no pasan a ese calendario: se guardan como copia y puedes deshacerlo.`;
+}
+
+// «¿Cambiar este dispositivo a ese calendario?» → copia para deshacer → setup({ switchPerson: true }).
+// → null (cancelado) | { t, key }
+async function confirmSwitch(ctx, cfg, t) {
+  // Nombre del otro calendario (solo si no es el mismo nombre que el de ahora: otra carpeta del mismo)
+  const theirs = publicName(t.otherPerson?.name || cfg?.name || '');
+  const mine = publicName(t.otherPerson?.current?.name || ctx.store.get().settings.name || '');
+  const who = theirs && theirs.toLowerCase() !== mine.toLowerCase() ? theirs : '';
+  const ok = await confirmDialog({
+    icon: '👤',
+    title: who ? `¿Cambiar al calendario de ${who}?` : '¿Cambiar de calendario?',
+    text: switchQuestion(t.error?.message),
+    ok: 'Sí, cambiar', cancel: 'Cancelar',
+  });
+  if (!ok) return null;
+  const ls = safeStorage();
+  // personSwitch: marca la copia como «de otro calendario» (al recuperarla se vuelve a él entero)
+  const key = saveBeforeImport({ ...ctx.store.get(), personSwitch: { at: ctx.now().toISOString() } }, ls, { now: ctx.now() });
+  if (!key && !(await confirmDialog({
+    icon: '⚠️', title: 'No se podrá deshacer', danger: true,
+    text: 'No hay espacio para guardar una copia de lo de ahora: no se podrá deshacer. ¿Cambiar igualmente?',
+    ok: 'Cambiar', cancel: 'Cancelar',
+  }))) return null;
+  const t2 = await checkSetup(ctx, cfg, { switchPerson: true });
+  // No se cambió nada: la copia sobra
+  if (!t2.ok && key) { try { ls?.removeItem(key); } catch { /* nada */ } }
+  return { t: t2, key: t2.ok ? key : null };
+}
+
+// Calendario del que son los datos de un estado (como el core: el de sus datos o, si no, el conectado)
+function placeOf(sync) {
+  return dataTargetOf(sync) || (sync?.enabled && String(sync.token || '').trim() ? syncTargetId(sync) : '');
+}
+
+// Una copia guardada antes de importar, de borrar o de cambiar de calendario
+// → { otherTarget, switch, name } | null. otherTarget: es de otro calendario (otra persona u otro
+// destino): al recuperarla se vuelve a él entero; switch: se guardó al cambiar de calendario
+export function copyInfo(state, key) {
+  let raw = null;
+  try { raw = JSON.parse(safeStorage()?.getItem(key) || 'null'); } catch { raw = null; }
+  if (!raw || typeof raw !== 'object') return null;
+  const otherTarget = placeOf(raw.settings?.sync) !== placeOf(state?.settings?.sync);
+  return { otherTarget, switch: Boolean(raw.personSwitch), name: publicName(raw.settings?.name || '') || null };
+}
+
+// Volver a una copia (deshacer una importación o un cambio de calendario) con undoImport: si la copia es
+// de otro calendario, vuelve el estado anterior entero (con su conexión): sus turnos nunca se importan en
+// el de ahora (CORE-API §3.7). → texto para el aviso «Listo…» | null (la copia ya no existe)
+export function restoreCopy(ctx, key) {
+  const info = copyInfo(ctx.store.get(), key);
+  const prev = undoImport(safeStorage(), ctx.store.get(), { now: new Date(), key });
+  if (!prev) return null;
+  ctx.store.set(() => prev);
+  return info?.otherTarget && info.name && prev.settings.sync.enabled
+    ? `Listo: este ${deviceWord()} vuelve al calendario de ${info.name}.` : 'Listo: todo está como antes.';
 }
 
 function askUseThisDevice() {
@@ -271,8 +379,10 @@ export function offlineHint(sync) {
     h('span', {}, 'Sin conexión a internet: el botón se activará solo cuando vuelva. Puedes cerrar esto y volver luego a Ajustes.'));
 }
 
-// Último paso tras conectar: suscribirse en el calendario del teléfono (una sola vez)
-export function openSubscribeSheet(ctx) {
+// Último paso tras conectar: suscribirse en el calendario del teléfono (una sola vez).
+// switchedFrom: tras cambiar de calendario (otra persona), el nombre del anterior (o null); onUndo:
+// «Deshacer el cambio» (vuelve al calendario anterior)
+export function openSubscribeSheet(ctx, { switchedFrom, onUndo } = {}) {
   const plat = platform();
   const body = h('div', { class: 'subscribe-body', 'data-testid': 'subscribe-step' });
   const foot = h('div', { class: 'subscribe-btn-host' });
@@ -297,8 +407,18 @@ export function openSubscribeSheet(ctx) {
       setChildren(foot, h('button', { class: 'btn btn-primary btn-lg btn-block', type: 'button', 'data-testid': 'subscribe-close', on: { click: () => sheet?.close() } }, 'Listo'));
       return;
     }
+    const switchedNote = switchedFrom !== undefined ? h('div', { class: 'notice notice-info', 'data-testid': 'switched-note' }, icon('info'), h('p', {},
+      h('b', {}, `Este ${deviceWord()} usa ahora «${cal}». `),
+      switchedFrom
+        ? `Si antes te suscribiste al de ${switchedFrom}, puedes dejarlo (son sus turnos) o borrarlo del calendario.`
+        : 'Si antes te suscribiste a otro calendario, puedes dejarlo o borrarlo del calendario.',
+      onUndo ? h('button', {
+        class: 'link-btn link-small switched-undo', type: 'button', 'data-testid': 'switch-undo',
+        on: { click: () => { sheet?.close(); onUndo(); } },
+      }, switchedFrom ? `Deshacer: volver al calendario de ${switchedFrom}` : 'Deshacer el cambio') : null)) : null;
     setChildren(body,
-      moved ? h('div', { class: 'notice notice-info' }, icon('info'), h('p', {},
+      switchedNote,
+      moved && !switchedNote ? h('div', { class: 'notice notice-info' }, icon('info'), h('p', {},
         h('b', {}, 'Tu calendario tiene una dirección nueva. '),
         plat === 'android'
           ? `Suscríbete a la nueva y, en ICSx⁵, borra la suscripción antigua de «${cal}» para no ver los turnos dos veces.`
