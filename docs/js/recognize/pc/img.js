@@ -16,6 +16,9 @@ export function makeCanvas(w, h) {
 
 export function ctx2d(c) { return c.getContext('2d', { willReadFrequently: true }); }
 
+// Límite de lienzo de Safari iOS (16 777 216 px; getContext devuelve null por encima) y lado ≤ 4096
+export const fitsCanvas = (w, h) => Math.round(w) * Math.round(h) <= 16777216 && Math.max(Math.round(w), Math.round(h)) <= 4096;
+
 // Libera memoria del lienzo (importante en Safari iOS)
 export function freeCanvas(c) { if (c) { c.width = 1; c.height = 1; } }
 
@@ -41,7 +44,10 @@ export async function loadInput(input, maxSide = 2000) {
   // reducción por mitades (Safari filtra mal las reducciones grandes de un solo paso)
   let cur = src; let cw = w; let ch = h; const tmp = [];
   while (cw / 2 >= W * 1.05) {
-    const nw = Math.round(cw / 2); const nh = Math.round(ch / 2);
+    // paso de ½; si no cabe en un lienzo de iPhone (foto enorme), de ¼, ⅛…
+    let f = 2;
+    while (cw / (2 * f) >= W * 1.05 && !fitsCanvas(cw / f, ch / f)) f *= 2;
+    const nw = Math.round(cw / f); const nh = Math.round(ch / f);
     const c2 = makeCanvas(nw, nh); const g2 = ctx2d(c2); g2.imageSmoothingEnabled = true; g2.imageSmoothingQuality = 'high';
     g2.drawImage(cur, 0, 0, nw, nh); tmp.push(c2); cur = c2; cw = nw; ch = nh;
   }

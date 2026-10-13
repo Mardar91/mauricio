@@ -5,24 +5,35 @@
 //   pc      ("pc-grid"): tabla mensual impresa de euregon.
 // Días de A y B: unión; si los dos leen el mismo día distinto, ese día se omite (mejor un hueco que un error).
 // Diseño y medidas: test/lab/ensemble/NOTES.md.
-import { defaultPaths, disposePool, prewarm, setPoolSize } from './ocr-pool.js';
+import { defaultPaths, disposePool, poolEpoch, prewarm, setPoolSize, setStartTimeout, startErrorFor } from './ocr-pool.js';
 
 const DEFAULT_CODES = ['F1', 'F2', 'F3', 'F6', 'F8', 'S1', 'N1', 'Z1', 'F51', 'F52', 'F53', 'S51', 'S52', 'N51', 'S31', 'TS', 'W-', 'U', '-'];
+// Tipo de cada código por defecto (como docs/js/core/codes.js)
+const DEFAULT_KINDS = {
+  F1: 'shift', F2: 'shift', F3: 'shift', F6: 'shift', F8: 'shift', S1: 'shift', N1: 'shift', Z1: 'shift',
+  F51: 'place', F52: 'place', F53: 'place', S51: 'place', S52: 'place', N51: 'place', S31: 'place',
+  TS: 'event', 'W-': 'wish', U: 'vacation', '-': 'off',
+};
+// Tipos que hacen creíble un lugar ese día (trabajo: turno, evento u otro)
+const WORK_KINDS = new Set(['shift', 'event', 'other']);
 
 // B se ejecuta si A parece incompleto: avisos, sin mes/año o menos de minDaysA días (una foto muestra 10-11 filas).
 // Fusión: un día que solo lee un lector (habiendo leído los dos) se descarta si el otro vio esa fila y la
 // marcó como sospechosa (vetoWhy), si la vio sin poder leerla y la confianza es < contestedMinConf, o si
-// su confianza es < soloMinConf. placeNeedsShift: un lugar (F51, S31…) sin turno ese día no es creíble (la
-// insignia del turno se ha perdido: reflejo, dedo) → se omite. Valores elegidos con test/lab/ensemble/analyze.mjs.
+// su confianza es < soloMinConf. placeNeedsShift: un lugar (F51, S31…) sin turno ni evento ese día no es
+// creíble (la insignia del turno se ha perdido: reflejo, dedo) → se omite. Valores elegidos con
+// test/lab/ensemble/analyze.mjs.
 export const RULES = { minDaysA: 11, soloMinConf: 0, contestedMinConf: 0.55, vetoWhy: [], placeNeedsShift: true };
 
-const isShift = (c) => /^[FSNZ]\d$/.test(c);
-const isPlace = (c) => /^[A-Z]\d\d$/.test(c);
+export const OCR_FAILED = 'No se pudo iniciar el lector de texto. Comprueba la conexión a internet y vuelve a intentarlo.';
+const CANCELLED = 'Lectura cancelada.';
 
 const L_PHOTO = 'Leyendo la foto…';
 const L_DAYS = 'Buscando los días…';
 const L_SHIFTS = 'Leyendo los turnos…';
 const L_CHECK = 'Comprobando…';
+const L_DONE = 'Listo';
+const LABEL_RANK = { [L_PHOTO]: 0, [L_DAYS]: 1, [L_SHIFTS]: 2, [L_CHECK]: 3, [L_DONE]: 4 };
 
 const mods = {};
 // Carga perezosa de cada lector (B y la tabla del PC solo cuando hacen falta)
@@ -35,6 +46,7 @@ function load(name) {
 }
 
 const emptyResult = (warning) => ({ layout: 'unknown', month: null, year: null, days: [], warnings: [warning] });
+const ocrFailedResult = () => ({ ...emptyResult(OCR_FAILED), ocrFailed: true });
 
 export async function recognize(input, options = {}) {
   const opts = options || {};
@@ -44,18 +56,28 @@ export async function recognize(input, options = {}) {
     prog(0, L_PHOTO);
     if (!globalThis.Tesseract || !globalThis.Tesseract.createWorker) {
       console.warn('[recognize] Tesseract no está cargado');
-      return emptyResult('No se pudo abrir el lector de texto. Comprueba la conexión y vuelve a probar.');
+      return ocrFailedResult();
     }
     if (opts.ocrWorkers) setPoolSize(opts.ocrWorkers);
-    const tess = { ...defaultPaths() };
+    if (opts.ocrStartTimeoutMs) setStartTimeout(opts.ocrStartTimeoutMs);
+    // época del pool: si llega un dispose() a mitad, esta lectura no lanza más fases ni crea workers
+    const ep = poolEpoch();
+    const tess = { ...defaultPaths(), epoch: ep };
+    // solo workerPath, corePath y langPath (langPathLegacy y demás se ignoran)
     if (opts.tesseract) for (const k of ['workerPath', 'corePath', 'langPath']) if (opts.tesseract[k]) tess[k] = String(opts.tesseract[k]);
+    const stale = () => poolEpoch() !== ep;
+    const ocrDown = () => !!startErrorFor(tess);
+    const halt = () => stale() || ocrDown();
+    // el OCR no arrancó hace poco (otra foto de la misma tanda): no se vuelve a esperar
+    if (ocrDown()) return ocrFailedResult();
     prewarm(tess); // el OCR arranca mientras se decodifica la foto
     try { img = await decodeInput(input); } catch (e) {
       console.warn('[recognize] imagen', e);
       return emptyResult('No pude abrir la imagen. Prueba con otra foto.');
     }
+    if (stale()) return emptyResult(CANCELLED);
     prog(0.03, L_PHOTO);
-    const known = [...new Set([...(Array.isArray(opts.knownCodes) ? opts.knownCodes : []), ...DEFAULT_CODES])];
+    const { known, codeKinds } = knownAndKinds(opts);
     const sub = (from, to, label) => ({
       tesseract: tess, knownCodes: known, employeeName: opts.employeeName, debug: !!opts.debug, now: opts.now,
       onProgress: (f, l) => { const x = Math.min(1, Math.max(0, Number(f) || 0)); prog(from + (to - from) * x, label(x, l)); },
@@ -72,43 +94,50 @@ export async function recognize(input, options = {}) {
     };
     const landscape = img.w > 1.1 * img.h;
     const dbg = opts.debug ? { ran: [] } : null;
+    const end = (res, parts) => {
+      if (stale()) return cancelledResult(dbg);
+      const down = ocrDown() || Object.values(parts).some((r) => r && r.ocrFailed);
+      return finish(res, prog, dbg, parts, down);
+    };
 
     // 1) Lector A
-    const a = await run('a', sub(0.03, 0.55, stageLabel));
+    const a = await run('a', sub(0.03, 0.55, labelA));
     if (dbg) dbg.ran.push('a');
     // 2) ¿Tabla del PC?
     let pcTried = false;
-    if (a.layout === 'pc-grid' || (!a.days.length && landscape)) {
+    if (!halt() && (a.layout === 'pc-grid' || (!a.days.length && landscape))) {
       pcTried = true;
       const p = await run('pc', sub(0.55, 0.97, stageLabel));
       if (dbg) dbg.ran.push('pc');
-      if (p.layout === 'pc-grid') return finish(p, prog, dbg, { a, pc: p });
+      if (p.layout === 'pc-grid') return end(p, { a, pc: p });
     }
     // 3) Lector B si A parece incompleto
     const mode = opts.phoneB || 'auto';
     let b = null;
-    if (mode === 'always' || (mode !== 'never' && !a.ocrFailed && looksIncomplete(a))) {
+    if (!halt() && (mode === 'always' || (mode !== 'never' && !a.ocrFailed && looksIncomplete(a)))) {
       b = await run('b', sub(pcTried ? 0.75 : 0.55, 0.97, () => L_CHECK));
       if (dbg) dbg.ran.push('b');
     }
     prog(0.97, L_CHECK);
-    const res = mergePhone(a, b, known);
+    const res = mergePhone(a, b, known, RULES, codeKinds);
     // 4) Último recurso: ningún día → ¿tabla del PC? (si no hay tabla, este lector termina en < 0,3 s)
-    if (!res.days.length && !pcTried && !a.ocrFailed) {
+    if (!res.days.length && !pcTried && !a.ocrFailed && !halt()) {
       const p = await run('pc', sub(0.97, 0.99, () => L_CHECK));
       if (dbg) dbg.ran.push('pc');
-      if (p.layout === 'pc-grid') return finish(p, prog, dbg, { a, b, pc: p });
+      if (p.layout === 'pc-grid') return end(p, { a, b, pc: p });
     }
-    return finish(res, prog, dbg, { a, b });
+    return end(res, { a, b });
   } catch (e) {
     console.warn('[recognize]', e);
     return emptyResult('Algo falló al leer la foto. Prueba otra vez o rellena el plan a mano.');
   } finally {
     if (img) img.release();
+    prog(1, L_DONE);
   }
 }
 
-// Termina los workers de Tesseract (la UI lo llama tras cada tanda de fotos: libera memoria en iPhone)
+// Termina los workers de Tesseract (la UI lo llama tras cada tanda de fotos: libera memoria en iPhone).
+// Termina siempre en ≤ 2 s; una lectura en curso ya no lanza más fases y devuelve "Lectura cancelada.".
 export async function dispose() {
   try { await disposePool(); } catch (e) { console.warn('[recognize] dispose', e); }
 }
@@ -124,12 +153,37 @@ export function looksIncomplete(a, rules = RULES) {
   return a.days.length < rules.minDaysA;
 }
 
+// Códigos conocidos y sus tipos: knownCodes (textos, o { code, kind }) y codeKinds = { código: tipo }
+function knownAndKinds(opts) {
+  const kinds = {}; const codes = [];
+  for (const k of Array.isArray(opts.knownCodes) ? opts.knownCodes : []) {
+    if (typeof k === 'string' && k) codes.push(k);
+    else if (k && typeof k.code === 'string' && k.code) { codes.push(k.code); if (typeof k.kind === 'string' && k.kind) kinds[k.code] = k.kind; }
+  }
+  if (opts.codeKinds && typeof opts.codeKinds === 'object') {
+    for (const [c, v] of Object.entries(opts.codeKinds)) if (c && typeof v === 'string' && v) kinds[c] = v;
+  }
+  const known = [...new Set([...codes, ...Object.keys(kinds), ...DEFAULT_CODES])];
+  return { known, codeKinds: Object.keys(kinds).length ? kinds : null };
+}
+
+// Tipo de un código, como kindOf de core: codeKinds (los del usuario) → códigos por defecto → forma
+// (guessCode: letra + 1 dígito = turno; letra + 2 dígitos = lugar; otro → 'other').
+export function codeKind(code, codeKinds = null) {
+  if (codeKinds && typeof codeKinds[code] === 'string') return codeKinds[code];
+  if (DEFAULT_KINDS[code]) return DEFAULT_KINDS[code];
+  if (/^[A-Z]\d$/.test(code)) return 'shift';
+  if (/^[A-Z]\d\d$/.test(code)) return 'place';
+  return 'other';
+}
+
 const sameCodes = (x, y) => [...new Set(x)].sort().join('|') === [...new Set(y)].sort().join('|');
 
-// Une los resultados de A y B (B puede ser null)
-export function mergePhone(a, b, known = DEFAULT_CODES, rules = RULES) {
+// Une los resultados de A y B (B puede ser null). codeKinds: { código: tipo } (opcional).
+export function mergePhone(a, b, known = DEFAULT_CODES, rules = RULES, codeKinds = null) {
   const warnings = [];
   const parts = b ? [a, b] : [a];
+  const kind = (c) => codeKind(c, codeKinds);
   const pick = (k) => {
     const vals = parts.map((r) => r[k]).filter((v) => v != null);
     if (!vals.length) return { v: null, conflict: false };
@@ -152,7 +206,8 @@ export function mergePhone(a, b, known = DEFAULT_CODES, rules = RULES) {
     if (conflicts.includes(day)) continue;
     const da = byA.get(day); const db = byB.get(day);
     const codes = (da || db).codes;
-    if (rules.placeNeedsShift && codes.some(isPlace) && !codes.some(isShift)) { vetoed.push(day); continue; }
+    // un lugar sin turno ni evento: la insignia del turno se ha perdido
+    if (rules.placeNeedsShift && codes.some((c) => kind(c) === 'place') && !codes.some((c) => WORK_KINDS.has(kind(c)))) { vetoed.push(day); continue; }
     if (strict && !agreed.has(day)) { dropped.push(day); continue; }
     if (da && db) { days.push({ day, codes: [...da.codes], confidence: Math.max(da.confidence, db.confidence) }); continue; }
     const d = da || db;
@@ -171,6 +226,8 @@ export function mergePhone(a, b, known = DEFAULT_CODES, rules = RULES) {
   const res = { layout, month: m.v, year: y.v, days, warnings };
 
   // avisos (en español, sin repetir los de cada lector)
+  const ocrFailed = parts.some((r) => r.ocrFailed);
+  if (ocrFailed) warnings.push(OCR_FAILED);
   if (m.conflict) warnings.push('No estoy seguro del mes: elígelo tú.');
   else if (m.v == null && layout === 'phone-list') warnings.push('No pude leer el mes con seguridad: elígelo a mano.');
   if (y.conflict) warnings.push('No estoy seguro del año: elígelo tú.');
@@ -181,15 +238,31 @@ export function mergePhone(a, b, known = DEFAULT_CODES, rules = RULES) {
   if (unread.length) warnings.push(`No pude leer bien ${dayList(unread, false)}: ${unread.length === 1 ? 'revísalo' : 'revísalos'} a mano.`);
   const novel = [...new Set(days.flatMap((d) => d.codes).filter((c) => !known.includes(c)))];
   if (novel.length) warnings.push(`Código nuevo: ${novel.join(', ')} — confirma su horario.`);
-  if (parts.some((r) => r.ocrFailed)) warnings.push('No se pudo iniciar el lector de texto. Comprueba la conexión y vuelve a probar.');
   if (!days.length) {
     // por qué no hay días: el aviso más útil de cada lector (sin los de "solo leo la lista del móvil")
     const why = parts.flatMap((r) => r.warnings).filter((w) => !/solo (leo|lee) la lista|lector de texto|el mes|del año|Código nuevo|No pude leer bien \d/.test(w));
     warnings.push(...why);
-    if (!why.length && !unread.length && !unsure.length) warnings.push('No pude leer ningún día con seguridad.');
+    if (!why.length && !unread.length && !unsure.length && !ocrFailed) warnings.push('No pude leer ningún día con seguridad.');
   }
-  res.warnings = [...new Set(warnings)];
+  res.warnings = dedupeWarnings(warnings);
   return res;
+}
+
+// Avisos que dicen lo mismo con otras palabras (vienen de lectores distintos): se deja uno solo
+const SAME_WARNING = [
+  [/lector de texto/i, 'ocr', false],                                          // se queda el primero
+  [/no (encontré|encuentro) la lista|no reconozco la app/i, 'sin-lista', true], // se queda el más completo
+];
+export function dedupeWarnings(list) {
+  const out = []; const at = new Map();
+  for (const w0 of Array.isArray(list) ? list : []) {
+    if (typeof w0 !== 'string' || !w0.trim()) continue;
+    const w = w0.trim();
+    const hit = SAME_WARNING.find(([re]) => re.test(w));
+    const key = hit ? hit[1] : w.toLowerCase().replace(/[\s.…:;,!¡?¿]+/g, ' ').trim();
+    if (!at.has(key)) { at.set(key, out.length); out.push(w); } else if (hit && hit[2] && w.length > out[at.get(key)].length) out[at.get(key)] = w;
+  }
+  return out;
 }
 
 // "el día 12" / "los días 3, 4 y 12" (con mayúscula si empieza la frase)
@@ -229,9 +302,20 @@ function failed(name) {
   return { layout: 'unknown', month: null, year: null, days: [], warnings: [], failed: name };
 }
 
-async function finish(res, prog, dbg, parts) {
-  const out = { layout: res.layout, month: res.month, year: res.year, days: res.days, warnings: res.warnings };
+// Lectura interrumpida por dispose(): sin días (lo leído a medias no es fiable)
+function cancelledResult(dbg) {
+  const out = emptyResult(CANCELLED);
+  if (dbg) out.debug = { ran: dbg.ran, cancelled: true };
+  return out;
+}
+
+function finish(res, prog, dbg, parts, ocrDown) {
+  // OCR que no arrancó: el aviso va primero (también en la tabla del PC); sin días, es el único que importa
+  const warnings = !ocrDown ? dedupeWarnings(res.warnings)
+    : !res.days.length ? [OCR_FAILED] : dedupeWarnings([OCR_FAILED, ...res.warnings.filter((w) => !/lector de texto/.test(w))]);
+  const out = { layout: res.layout, month: res.month, year: res.year, days: res.days, warnings };
   if (!out.days.length && !out.warnings.length) out.warnings.push('No pude leer ningún día con seguridad.');
+  if (ocrDown) out.ocrFailed = true;
   if (dbg) {
     const pick = (r) => (r ? { layout: r.layout, month: r.month, year: r.year, days: r.days.length, warnings: r.warnings } : null);
     const ov = (r) => (r && r.debug && r.debug.overlay) || null;
@@ -241,7 +325,7 @@ async function finish(res, prog, dbg, parts) {
       ran: dbg.ran, a: pick(parts.a), b: pick(parts.b), pc: pick(parts.pc),
     };
   }
-  prog(1, 'Listo');
+  prog(1, L_DONE);
   return out;
 }
 
@@ -252,16 +336,20 @@ function stageLabel(f) {
   if (f < 0.92) return L_SHIFTS;
   return L_CHECK;
 }
+// A no llega a «Comprobando…» (después puede venir la tabla del PC, que vuelve a leer turnos)
+const labelA = (f) => (f < 0.92 ? stageLabel(f) : L_SHIFTS);
 
-// onProgress siempre creciente; nunca lanza
+// onProgress: fracción siempre creciente y etiquetas que nunca vuelven atrás; nunca lanza
 function progressReporter(cb) {
-  let last = -1; let lastLabel = '';
+  let last = -1; let lastLabel = ''; let rank = -1;
   return (f, label) => {
     if (typeof cb !== 'function') return;
-    const x = Math.round(Math.min(1, Math.max(0, f)) * 1000) / 1000;
-    if (x < last || (x === last && label === lastLabel)) return;
-    last = x; lastLabel = label;
-    try { cb(x, label); } catch (e) { /* nada */ }
+    const x = Math.round(Math.min(1, Math.max(0, Number(f) || 0)) * 1000) / 1000;
+    const r = LABEL_RANK[label];
+    const lab = r === undefined || r < rank ? (lastLabel || L_PHOTO) : label;
+    if (x < last || (x === last && lab === lastLabel)) return;
+    last = x; lastLabel = lab; rank = Math.max(rank, LABEL_RANK[lab]);
+    try { cb(x, lab); } catch (e) { /* nada */ }
   };
 }
 

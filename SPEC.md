@@ -244,6 +244,14 @@ Problema: en iOS Safari y la app instalada tienen almacenamientos distintos; una
 - Pestañas múltiples: escuchar el evento `storage` y recargar el estado; cada escritura parte del último estado guardado.
 - `importBackup` NO toca `settings.sync` ni `settings.ntfy` del dispositivo. Antes de importar o restaurar se guarda una copia local de seguridad (`turnos-mauricio:before-import:<ts>`, máx. 3) y se puede deshacer.
 
+### 9.1 Un solo dispositivo publica (decisión del propietario)
+
+- `backup.json` v3 lleva `meta.publisher` (deviceId) y `publisherSince`, autenticados con los datos cifrados.
+- Solo el *publisher* escribe `backup.json` y `turnos.ics`. Los demás dispositivos leen y fusionan en local (`readOnly: true`) y la UI muestra "Este dispositivo solo lee; el calendario lo actualiza tu otra app" con el botón **Usar este dispositivo** (confirmación → `becomePublisher`: leer + fusionar + publicar).
+- Sin `backup.json` remoto: publica el primer dispositivo que sincroniza, salvo que recuerde otro publisher, y nunca si está vacío mientras `turnos.ics` tiene eventos.
+- La clave y el deviceId se crean y guardan **antes** de la primera petición de red; un enlace con otra clave solo se aplica si descifra el backup.
+- Todas las llamadas de sync pasan por una única cola en la UI; un resultado viejo no debe deshacer uno nuevo.
+
 ## 10. Ajustes (estructura final, pensada para Mauricio)
 
 1. **Calendario del iPhone** (arriba del todo): estado claro (Conectado ✓ · última actualización / No configurado / Error con mensaje humano), botón grande "Suscribirme en el iPhone" (webcal), guía corta paso a paso (incluye desactivar «Eliminar alertas»); si no está configurado: "Pide el enlace de configuración a quien te ayuda" + botón "Tengo un enlace" (pegar desde el portapapeles con un toque).

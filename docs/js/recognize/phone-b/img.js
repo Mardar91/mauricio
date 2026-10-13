@@ -9,6 +9,10 @@ export function makeCanvas(w, h) {
 
 function ctx2d(c) { return c.getContext('2d', { willReadFrequently: true }); }
 
+// Límite de lienzo de Safari iOS (16 777 216 px; getContext devuelve null por encima) y lado ≤ 4096
+const fitsCanvas = (w, h) => Math.round(w) * Math.round(h) <= 16777216 && Math.max(Math.round(w), Math.round(h)) <= 4096;
+const free = (c) => { try { c.width = 1; c.height = 1; } catch { /* nada */ } };
+
 async function decode(input) {
   if (typeof Blob !== 'undefined' && input instanceof Blob) {
     if (typeof createImageBitmap === 'function') {
@@ -36,13 +40,17 @@ export async function loadRGBA(input, maxSide = 2000) {
   // reducción en pasos de ½ para evitar aliasing en factores grandes
   let cur = src, cw = W, ch = H;
   while (s < 0.5) {
-    const nw = Math.round(cw / 2), nh = Math.round(ch / 2);
+    // paso de ½; si no cabe en un lienzo de iPhone (foto enorme), de ¼, ⅛…
+    let f = 2;
+    while (s * f < 0.5 && !fitsCanvas(cw / f, ch / f)) f *= 2;
+    const nw = Math.round(cw / f), nh = Math.round(ch / f);
     const c = makeCanvas(nw, nh); const x = ctx2d(c); x.imageSmoothingEnabled = true; x.imageSmoothingQuality = 'high';
-    x.drawImage(cur, 0, 0, nw, nh); cur = c; cw = nw; ch = nh; s *= 2;
+    x.drawImage(cur, 0, 0, nw, nh); if (cur !== src) free(cur); cur = c; cw = nw; ch = nh; s *= f;
   }
   const w = Math.round(cw * s), h = Math.round(ch * s);
   const c = makeCanvas(w, h); const x = ctx2d(c); x.imageSmoothingEnabled = true; x.imageSmoothingQuality = 'high';
   x.drawImage(cur, 0, 0, w, h);
+  if (cur !== src) free(cur);
   const id = x.getImageData(0, 0, w, h);
   if (own && src.close) try { src.close(); } catch { /* nada */ }
   return { w, h, data: id.data, origW: W, origH: H };

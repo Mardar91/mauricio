@@ -1,7 +1,7 @@
 // Lector A del móvil ("color-first", copiado de test/lab/approaches/color-first): primero color y forma,
 // después OCR dirigido. Contrato: SPEC §5 → recognize(input, options) y dispose().
 // Extra para el conjunto (index.js): result.unread = días vistos pero no leídos con seguridad.
-import { hsv, makeCanvas, ctx2d, freeCanvas, tick, loadInput, scaledCopy, getPixels, estimateWhite, applyGains, classifyAll, classifyPx, localWhite,
+import { hsv, makeCanvas, ctx2d, fitsCanvas, freeCanvas, tick, loadInput, scaledCopy, getPixels, estimateWhite, applyGains, classifyAll, classifyPx, localWhite,
   labelComponents, shapeOf, C_Y, C_G, C_B, C_M, C_P, C_R, C_O, C_K, C_W, C_NONE, CLASS_NAMES } from './img.js';
 import { badgeCandidates, estimateBadgeSize, estimateTilt, toFrame, robustLine, median } from './geom.js';
 import { getWorker, dispose as disposeOcr, ocr, rotatedCrop, lumOf, maskToCanvas, maskComponents, otsuMask, topHat } from './ocr.js';
@@ -197,9 +197,11 @@ async function analyze(src, roi) {
 
 function cropScaled(src, r, k) {
   const w = Math.max(1, Math.round(r.w * k)), h = Math.max(1, Math.round(r.h * k));
-  if (k < 0.5) {
-    // reducción en dos pasos para no perder detalle
-    const mid = cropScaled(src, r, Math.min(1, k * 2));
+  const k2 = Math.min(1, k * 2);
+  // reducción en dos pasos para no perder detalle, salvo si el paso intermedio no cabe en un lienzo
+  // de iPhone (foto de 48 MP: 6048×8064 → el paso a escala ~1 sería de 48 MP; se reduce de golpe desde ~0,5)
+  if (k < 0.5 && fitsCanvas(r.w * k2, r.h * k2)) {
+    const mid = cropScaled(src, r, k2);
     const out = scaledCopy(mid.canvas, mid.w, mid.h, Math.max(w, h)); freeCanvas(mid.canvas);
     return { canvas: out.canvas, w: out.w, h: out.h };
   }

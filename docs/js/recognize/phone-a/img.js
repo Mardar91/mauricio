@@ -21,6 +21,10 @@ export function makeCanvas(w, h) {
   const c = document.createElement('canvas'); c.width = w; c.height = h; return c;
 }
 export const ctx2d = (c) => c.getContext('2d', { willReadFrequently: true });
+// Límite de lienzo de Safari iOS: 16 777 216 px de área (getContext devuelve null por encima); además ningún
+// lado > 4096 px en los lienzos intermedios
+export const MAX_CANVAS_AREA = 16777216, MAX_CANVAS_SIDE = 4096;
+export const fitsCanvas = (w, h) => Math.round(w) * Math.round(h) <= MAX_CANVAS_AREA && Math.max(Math.round(w), Math.round(h)) <= MAX_CANVAS_SIDE;
 export function freeCanvas(c) { try { c.width = 1; c.height = 1; } catch (e) { /* nada */ } }
 
 export const tick = () => new Promise((r) => setTimeout(r, 0));
