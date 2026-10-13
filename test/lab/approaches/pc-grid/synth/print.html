@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<title>Réplica impresión Dienstplan (sintético)</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #202020; }
+  #screen { position: relative; overflow: hidden; font-family: Arial, 'Liberation Sans', Helvetica, sans-serif; }
+  .app { position: absolute; background: #f0f0f0; }
+  .appbar { height: 34px; background: #2b2b2b; color: #eee; font-size: 15px; line-height: 34px; padding-left: 12px; }
+  .toolbar { height: 46px; background: #ededed; border-bottom: 1px solid #d0d0d0; }
+  .toolbar i { display: inline-block; width: 22px; height: 18px; border: 2px solid #888; margin: 12px 0 0 18px; border-radius: 3px; }
+  .viewer { position: absolute; left: 0; right: 0; top: 80px; bottom: 0; background: #c8c8c8; }
+  .page { position: absolute; background: #fff; box-shadow: 0 0 8px rgba(0,0,0,0.4); }
+  .title { position: absolute; font-weight: bold; color: #222; white-space: nowrap; }
+  .sub { position: absolute; color: #333; white-space: nowrap; }
+  .rule { position: absolute; height: 0; border-top: 1.5px solid #444; }
+  .meta { position: absolute; color: #222; white-space: nowrap; }
+  .logo { position: absolute; color: #c33; font-style: italic; font-weight: bold; opacity: 0.8; }
+  table.plan { position: absolute; border-collapse: collapse; border: 2px solid #111; table-layout: fixed; }
+  table.plan td { border: 1px solid #333; padding: 0; text-align: center; vertical-align: middle; overflow: hidden; white-space: nowrap; }
+  td.hd { background: var(--hd, #e4e4e4); color: #222; }
+  td.we { color: #7b1c2c; font-weight: bold; font-style: italic; }
+  td.name { text-align: left !important; vertical-align: top !important; padding: 2px 4px !important; background: var(--nm, #ececec); line-height: 1.15; border-bottom: 2px solid #111 !important; }
+  td.name .role { color: #8a8a8a; display: block; margin-top: 3px; }
+  td.sum { color: #555; vertical-align: top !important; padding-top: 4px !important; border-bottom: 2px solid #111 !important; background: var(--nm, #ececec); }
+  tr.hdr2 td { border-bottom: 2px solid #111; }
+  tr.last td { border-bottom: 2px solid #111; }
+  .badge { display: inline-block; border-radius: 50%; text-align: center; color: #222; }
+  .hex { display: inline-block; text-align: center; color: #fff; clip-path: polygon(25% 0, 75% 0, 100% 50%, 75% 100%, 25% 100%, 0 50%); }
+  .tag { display: inline-block; border-radius: 3px 10px 10px 3px; text-align: center; color: #a06a70; }
+  .dash { display: inline-block; background: #d21f1f; }
+  .u { color: #d21f1f; font-weight: bold; }
+  .other { position: absolute; background: #f4f4f4; border-left: 2px solid #555; }
+  .other .ob { position: absolute; border-radius: 50%; }
+  .other .ol { position: absolute; background: #999; }
+</style>
+</head>
+<body>
+<div id="screen"></div>
+<script type="module">
+  const COLORS = {
+    F: { bg: '#F2E500', fg: '#222' }, S: { bg: '#8DC47E', fg: '#222' }, N: { bg: '#3D63B8', fg: '#fff' }, Z: { bg: '#F3B9BF', fg: '#333' },
+    place: { bg: '#E31CE0', fg: '#3a0a3a' }, S31: { bg: '#E0281E', fg: '#fff' },
+  };
+  const WD = ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'];
+  const MONTHS = ['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni', 'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember'];
+  const el = (tag, cls, txt) => { const e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; };
+
+  function badge(code, s) {
+    const w = Math.round(s.cellW * s.badgeW); const h = Math.round(s.rowH * s.badgeH); const fs = Math.round(s.rowH * s.badgeFont);
+    if (code === 'TS') { const e = el('span', 'hex', 'TS'); Object.assign(e.style, { width: w + 'px', height: h + 'px', lineHeight: h + 'px', fontSize: fs + 'px', background: '#3D63B8' }); return e; }
+    if (code === 'W-') { const e = el('span', 'tag', 'W-'); Object.assign(e.style, { width: Math.round(w * 1.05) + 'px', height: Math.round(h * 0.9) + 'px', lineHeight: Math.round(h * 0.9) + 'px', fontSize: fs + 'px', background: '#F4C2C4' }); return e; }
+    if (code === 'U') { const e = el('span', 'u', 'U'); e.style.fontSize = Math.round(fs * 1.05) + 'px'; return e; }
+    if (code === '-') { const e = el('span', 'dash'); Object.assign(e.style, { width: Math.round(s.cellW * 0.32) + 'px', height: Math.max(1.5, s.rowH * 0.07) + 'px', verticalAlign: 'middle' }); return e; }
+    let c = COLORS[code[0]] || COLORS.F;
+    if (code.length === 3) c = code === 'S31' ? COLORS.S31 : COLORS.place;
+    const e = el('span', 'badge', code);
+    Object.assign(e.style, { width: w + 'px', height: h + 'px', lineHeight: h + 'px', fontSize: fs + 'px', background: c.bg, color: c.fg });
+    return e;
+  }
+
+  // Línea (0..2) de la sub-fila en la que va cada código
+  function lineOf(code, codes) {
+    if (code === '-' || code === 'W-' || code === 'U') return 0;
+    if (code.length === 3 || code === 'TS') return codes.some((c) => /^[FSNZ]\d$/.test(c)) ? 2 : 1;
+    return 1;
+  }
+
+  window.buildPrint = (spec) => {
+    const s = spec.style;
+    const scr = document.getElementById('screen');
+    scr.innerHTML = '';
+    Object.assign(scr.style, { width: spec.screenW + 'px', height: spec.screenH + 'px', background: '#1d1d1d' });
+    const app = el('div', 'app'); Object.assign(app.style, { left: '0px', top: '0px', width: spec.appW + 'px', height: spec.screenH + 'px' });
+    const bar = el('div', 'appbar', 'Dienstplan'); app.appendChild(bar);
+    const tb = el('div', 'toolbar'); for (let i = 0; i < 4; i++) tb.appendChild(el('i')); app.appendChild(tb);
+    const viewer = el('div', 'viewer'); app.appendChild(viewer);
+    const page = el('div', 'page'); Object.assign(page.style, { left: s.pageX + 'px', top: s.pageY + 'px', width: s.pageW + 'px', height: spec.screenH * 2 + 'px' });
+    viewer.appendChild(page);
+    scr.appendChild(app);
+    // cabecera del documento
+    const t = el('div', 'title', `Dienstplan  ${MONTHS[spec.month - 1]} ${spec.year}`); t.style.whiteSpace = 'pre';
+    Object.assign(t.style, { left: s.marginX + 'px', top: s.titleY + 'px', fontSize: s.titleSize + 'px' }); page.appendChild(t);
+    const rule = el('div', 'rule'); Object.assign(rule.style, { left: s.marginX - 8 + 'px', top: s.titleY + s.titleSize * 1.25 + 'px', width: s.tableW + 30 + 'px' }); page.appendChild(rule);
+    const sub = el('div', 'sub', 'Unionhilfswerk Ambulante Dienste gGmbH Pflegedienst Neukölln'); Object.assign(sub.style, { left: s.marginX + 'px', top: s.titleY + s.titleSize * 1.32 + 'px', fontSize: s.subSize + 'px' }); page.appendChild(sub);
+    const metaX = s.marginX + s.tableW * 0.55;
+    const m1 = el('div', 'meta', 'Datum der Erstellung:'); Object.assign(m1.style, { left: metaX + 'px', top: s.titleY + 4 + 'px', fontSize: s.metaSize + 'px' }); page.appendChild(m1);
+    const m2 = el('div', 'meta', 'Datum des Aushangs:   ' + spec.aushang); m2.style.whiteSpace = 'pre'; Object.assign(m2.style, { left: metaX + 'px', top: s.titleY + 4 + s.metaSize * 1.5 + 'px', fontSize: s.metaSize + 'px' }); page.appendChild(m2);
+    for (let i = 0; i < 2; i++) { const u = el('div', 'meta', 'Unterschrift:'); Object.assign(u.style, { left: metaX + s.tableW * 0.27 + 'px', top: s.titleY + 14 + i * s.metaSize * 1.5 + 'px', fontSize: s.metaSize * 0.95 + 'px', color: '#555' }); page.appendChild(u); }
+    const logo = el('div', 'logo', 'euregon'); Object.assign(logo.style, { left: s.marginX + s.tableW - 50 + 'px', top: s.titleY + s.titleSize * 1.6 + 'px', fontSize: s.metaSize + 'px' }); page.appendChild(logo);
+    // tabla
+    const nd = new Date(Date.UTC(spec.year, spec.month, 0)).getUTCDate();
+    const tbl = el('table', 'plan'); Object.assign(tbl.style, { left: s.marginX - 8 + 'px', top: s.tableY + 'px', fontSize: s.headFont + 'px' });
+    tbl.style.setProperty('--hd', s.headBg); tbl.style.setProperty('--nm', s.nameBg);
+    const cg = el('colgroup'); const addCol = (w) => { const c = el('col'); c.style.width = w + 'px'; cg.appendChild(c); };
+    addCol(s.nameW); for (let d = 1; d <= nd; d++) addCol(s.cellW); addCol(s.sumW); addCol(s.sumW); tbl.appendChild(cg);
+    tbl.style.width = s.nameW + nd * s.cellW + 2 * s.sumW + 'px'; // table-layout: fixed necesita ancho explícito
+    const wd = (d) => (new Date(Date.UTC(spec.year, spec.month - 1, d)).getUTCDay() + 6) % 7;
+    const r1 = el('tr'); const r2 = el('tr', 'hdr2');
+    const mit = el('td', 'hd', 'Mitarbeiter'); mit.rowSpan = 2; mit.style.textAlign = 'left'; mit.style.verticalAlign = 'top'; mit.style.padding = '3px 4px'; r1.appendChild(mit);
+    for (let d = 1; d <= nd; d++) {
+      const we = wd(d) >= 5;
+      const a = el('td', 'hd' + (we ? ' we' : ''), WD[wd(d)]); a.style.height = s.rowH + 'px'; r1.appendChild(a);
+      const b = el('td', 'hd' + (we ? ' we' : ''), String(d).padStart(2, '0')); b.style.height = s.rowH + 'px'; r2.appendChild(b);
+    }
+    for (const n of ['Soll', 'Ist']) { const c = el('td', 'hd', n); c.rowSpan = 2; c.style.color = '#666'; r1.appendChild(c); }
+    tbl.appendChild(r1); tbl.appendChild(r2);
+    const cellRects = {};
+    spec.employees.forEach((emp, ei) => {
+      const rows = [el('tr'), el('tr'), el('tr', ei === spec.employees.length - 1 ? 'last' : '')];
+      const nm = el('td', 'name'); nm.rowSpan = 3; nm.style.fontSize = s.nameFont + 'px';
+      for (const part of emp.name.split(' ')) { nm.appendChild(document.createTextNode(part)); nm.appendChild(el('br')); }
+      const role = el('span', 'role', emp.role); role.style.fontSize = s.nameFont * 0.82 + 'px'; nm.appendChild(role);
+      rows[0].appendChild(nm);
+      const cells = [];
+      for (let d = 1; d <= nd; d++) {
+        const codes = emp.days[d] || [];
+        for (let li = 0; li < 3; li++) {
+          const c = el('td'); c.style.height = s.rowH + 'px';
+          if (li === 2) c.style.borderBottom = ei === spec.employees.length - 1 ? '2px solid #111' : '2px solid #111';
+          for (const code of codes) if (lineOf(code, codes) === li) c.appendChild(badge(code, s));
+          rows[li].appendChild(c);
+          if (ei === spec.target) cells.push({ d, li, c });
+        }
+      }
+      for (const [k, v] of [['sum', emp.soll], ['sum', emp.ist]]) { const c = el('td', k, v); c.rowSpan = 3; c.style.fontSize = s.headFont * 0.9 + 'px'; rows[0].appendChild(c); }
+      rows.forEach((r) => tbl.appendChild(r));
+      if (ei === spec.target) emp._cells = cells;
+    });
+    page.appendChild(tbl);
+    // otra ventana a la derecha (distractor)
+    if (spec.other) {
+      const o = el('div', 'other'); Object.assign(o.style, { left: spec.appW + 6 + 'px', top: '40px', width: spec.screenW - spec.appW - 6 + 'px', height: spec.screenH + 'px' });
+      for (const ob of spec.other) {
+        const b = el('div', ob.kind === 'line' ? 'ol' : 'ob');
+        Object.assign(b.style, { left: ob.x + 'px', top: ob.y + 'px', width: ob.w + 'px', height: ob.h + 'px', background: ob.color });
+        if (ob.text) { b.textContent = ob.text; b.style.fontSize = '10px'; b.style.textAlign = 'center'; b.style.lineHeight = ob.h + 'px'; }
+        o.appendChild(b);
+      }
+      scr.appendChild(o);
+    }
+    // rectángulos (en px de pantalla) de las celdas del empleado buscado
+    const sr = scr.getBoundingClientRect();
+    const emp = spec.employees[spec.target];
+    for (const { d, c } of emp._cells) {
+      const r = c.getBoundingClientRect();
+      const q = cellRects[d] || { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity };
+      q.x0 = Math.min(q.x0, r.left - sr.left); q.y0 = Math.min(q.y0, r.top - sr.top); q.x1 = Math.max(q.x1, r.right - sr.left); q.y1 = Math.max(q.y1, r.bottom - sr.top);
+      cellRects[d] = q;
+    }
+    const tr = tbl.getBoundingClientRect(); const ti = t.getBoundingClientRect();
+    return { cellRects, table: { x0: tr.left - sr.left, y0: tr.top - sr.top, x1: tr.right - sr.left, y1: tr.bottom - sr.top },
+      title: { x0: ti.left - sr.left, y0: ti.top - sr.top, x1: ti.right - sr.left, y1: ti.bottom - sr.top } };
+  };
+</script>
+</body>
+</html>

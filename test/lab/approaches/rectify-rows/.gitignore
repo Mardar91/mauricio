@@ -1,0 +1,3 @@
+# Datos sintéticos generados por tools/ (se regeneran con augment.py / gen-screens.mjs)
+synth/
+tools/__pycache__/

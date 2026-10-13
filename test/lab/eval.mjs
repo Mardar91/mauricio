@@ -8,6 +8,7 @@
 // --debug   pasa debug:true; si result.debug.overlay es un dataURL PNG/JPEG se guarda en test/lab/out/<impl>/<foto>.png
 // --verbose imprime los días de cada foto
 // --json    escribe el informe completo en este archivo
+// --gt      otro archivo de verdad (rutas de foto con '/' = relativas a la raíz del repo)
 // --set     dev (por defecto) | holdout | all. Las fotos 'holdout' NO se usan durante el desarrollo.
 import fs from 'node:fs';
 import path from 'node:path';
@@ -25,9 +26,10 @@ const verbose = !!opt('verbose', false);
 const jsonOut = opt('json', '');
 const set = opt('set', 'dev'); // dev | holdout | all
 
-const GT = JSON.parse(fs.readFileSync(path.join(ROOT, 'test/lab/ground-truth.json'), 'utf8'));
+const gtFile = opt('gt', 'test/lab/ground-truth.json');
+const GT = JSON.parse(fs.readFileSync(path.resolve(ROOT, gtFile), 'utf8'));
 const KNOWN = ['F1','F2','F3','F6','F8','S1','N1','Z1','F51','F52','F53','S51','S52','N51','S31','TS','W-','U','-'];
-const photos = GT.photos.filter((p) => (set === 'all' || p.set === set) && (!only || String(only).split(',').some((s) => p.file.includes(s))));
+const photos = GT.photos.filter((p) => (set === 'all' || p.set === set || (gtFile !== 'test/lab/ground-truth.json' && set === 'dev')) && (!only || String(only).split(',').some((s) => p.file.includes(s))));
 
 const sameSet = (a, b) => { const A = [...new Set(a)].sort().join('|'); const B = [...new Set(b)].sort().join('|'); return A === B; };
 
@@ -72,18 +74,18 @@ for (const p of photos) {
   let rep;
   try {
     const { result, ms } = await page.evaluate(([i, f, d, k]) => window.runRecognizer(i, f, { debug: d, knownCodes: k }),
-      [server.url + '/' + impl, server.url + '/test/fotos/' + p.file, debug, KNOWN]);
+      [server.url + '/' + impl, server.url + '/' + (p.file.includes('/') ? p.file : 'test/fotos/' + p.file), debug, KNOWN]);
     rep = score(p, result); rep.ms = Math.round(ms); rep.warnings = result.warnings || [];
     if (debug && result.debug && typeof result.debug.overlay === 'string' && result.debug.overlay.startsWith('data:image')) {
       const b64 = result.debug.overlay.split(',')[1];
-      fs.writeFileSync(path.join(outDir, p.file.replace(/\.jpg$/, '.png')), Buffer.from(b64, 'base64'));
+      fs.writeFileSync(path.join(outDir, path.basename(p.file).replace(/\.(jpe?g|png)$/, '.png')), Buffer.from(b64, 'base64'));
     }
   } catch (e) {
     rep = { file: p.file, error: String(e.message || e).slice(0, 500), correct: [], wrong: [], missed: Object.entries(p.days).map(([d, c]) => ({ day: +d, expected: c })), extra: [], optionalOk: [], optionalWrong: [] };
   }
   reports.push(rep);
   const req = Object.keys(p.days).length;
-  console.log(`${p.file.padEnd(22)} ${rep.error ? 'ERROR ' + rep.error : `layout:${rep.layoutOk ? 'ok' : 'NO(' + rep.got.layout + ')'} mes:${rep.monthOk ? 'ok' : 'NO(' + rep.got.month + '/' + rep.got.year + ')'} ok ${rep.correct.length}/${req}  mal ${rep.wrong.length}  extra ${rep.extra.length}  falta ${rep.missed.length}  opt-mal ${rep.optionalWrong.length}  ${rep.ms}ms`}`);
+  console.log(`${path.basename(p.file).padEnd(34)} ${rep.error ? 'ERROR ' + rep.error : `layout:${rep.layoutOk ? 'ok' : 'NO(' + rep.got.layout + ')'} mes:${rep.monthOk ? 'ok' : 'NO(' + rep.got.month + '/' + rep.got.year + ')'} ok ${rep.correct.length}/${req}  mal ${rep.wrong.length}  extra ${rep.extra.length}  falta ${rep.missed.length}  opt-mal ${rep.optionalWrong.length}  ${rep.ms}ms`}`);
   if (verbose || rep.wrong.length || rep.extra.length || rep.optionalWrong.length) {
     for (const w of rep.wrong) console.log(`    MAL   día ${w.day}: esperado ${JSON.stringify(w.expected)} obtenido ${JSON.stringify(w.got)}${w.why ? ' ' + w.why : ''}`);
     for (const w of rep.optionalWrong) console.log(`    OPT   día ${w.day}: esperado ${JSON.stringify(w.expected)} obtenido ${JSON.stringify(w.got)}`);

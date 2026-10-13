@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "serve": "node test/tools/serve.mjs",
-    "test": "node --test test/unit/",
+    "test": "TZ=Europe/Berlin node --test test/unit/*.test.mjs",
     "eval": "node test/lab/eval.mjs",
     "e2e": "node test/e2e/run.mjs"
   },

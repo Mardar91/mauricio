@@ -2,3 +2,7 @@ node_modules/
 .DS_Store
 test/lab/out/
 test/e2e/out/
+test/lab/approaches/*/synth/aug*/
+test/lab/approaches/*/synth/screens*/
+test/lab/approaches/*/synth/*.json
+test/lab/approaches/*/synth/out/
