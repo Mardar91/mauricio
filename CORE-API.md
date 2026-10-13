@@ -269,10 +269,13 @@ async function runSync({ manual = false, force = false } = {}) {
   if (isIOS() && !isStandalone() && !manual) return null;   // Safari sin instalar: nunca automático
   const res = await syncQueue.sync(force ? { force: true } : undefined);
   if (manual) toast(res.ok ? (res.readOnly ? 'Datos al día (este dispositivo solo lee).' : 'Calendario actualizado.') : res.error.message);
+  if (res.keyRestored) toast('La clave nueva no servía para tus turnos guardados: se sigue usando la anterior.');
   if (!res.ok && res.error.retry) scheduleRetry();           // 1 min, 5 min, 30 min…
   return res;
 }
 ```
+
+- `res.keyRestored` solo ocurre si alguien cambió la clave sin `trySetupConfig` (código viejo o a mano) y la nueva no descifra la copia. Conviene avisarlo, porque quien ayuda puede creer que la clave cambió.
 
 - **Cuándo:** al abrir la app; en `visibilitychange → visible` (después de `store.refresh()`); en `online`; cada 30 min con la app visible; y tras cada cambio de datos con un retardo de unos 4 s.
 - **Clave de cambios (`dataKey`):** `days`, `tombstones`, `codes`, `codeTombstones`, `reminders`, y de `sync`: `enabled`, `owner`, `repo`, `branch`, `token`, `key` y `publishPlaces`.
