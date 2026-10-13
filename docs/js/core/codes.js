@@ -15,7 +15,7 @@ export function baseCode(code) {
   return {
     code, kind: 'other', name: code, start: null, end: null, breakMin: 0,
     countsHours: false, creditHours: null, color: COLORS.other, textColor: COLORS.white,
-    shape: 'circle', place: '', confirmed: true, builtin: false,
+    shape: 'circle', place: '', confirmed: true, builtin: false, updatedAt: null,
   };
 }
 
@@ -63,14 +63,17 @@ export function cleanCode(code) {
 export function guessCode(code) {
   const c = cleanCode(code);
   if (DEFAULT_CODES[c]) return { ...DEFAULT_CODES[c] };
-  const m = /^([FSNZ])(\d)$/.exec(c);
+  const m = /^([A-Z])(\d)$/.exec(c);
   if (m) {
+    // Letra + 1 dígito → turno; F/S/N/Z copian el horario de F1/S1/N1/Z1 (sin confirmar)
     const base = DEFAULT_CODES[`${m[1]}1`];
-    return { ...base, code: c, confirmed: false, builtin: false };
+    if (base && base.kind === 'shift') return { ...base, code: c, confirmed: false, builtin: false };
+    return { ...baseCode(c), kind: 'shift', name: `Turno ${c}`, countsHours: true, breakMin: 30, confirmed: false };
   }
   if (/^[A-Z]\d{2}$/.test(c)) {
     return { ...baseCode(c), kind: 'place', name: `Lugar ${c}`, color: COLORS.place, textColor: COLORS.white };
   }
+  // Otro código desconocido: sin horario hasta que se confirme
   return { ...baseCode(c), confirmed: false };
 }
 
@@ -111,18 +114,40 @@ export function shiftInterval(state, dayKey, code) {
   return { start, end };
 }
 
-// ¿El código cuenta como trabajo con horas? (turnos y eventos activados con horario)
-export function countsAsWork(def) {
-  if (!def || !hasTime(def)) return false;
-  if (def.kind === 'shift') return def.countsHours !== false;
-  if (def.kind === 'event') return def.countsHours === true;
-  return false;
+// Intervalo para avisos y calendario: como shiftInterval, pero si solo hay hora de inicio
+// dura 1 h (startOnly: true). null si no tiene hora de inicio.
+export function timedInterval(state, dayKey, code) {
+  const def = getCode(state, code);
+  const s = parseHHMM(def.start);
+  if (s === null) return null;
+  if (parseHHMM(def.end) !== null) return { ...shiftInterval(state, dayKey, code), startOnly: false };
+  const d = fromKey(dayKey);
+  const start = new Date(d.getFullYear(), d.getMonth(), d.getDate(), Math.floor(s / 60), s % 60);
+  return { start, end: new Date(start.getTime() + 3600 * 1000), startOnly: true };
 }
 
-// Turno de noche: termina al día siguiente
+const CREDIT_KINDS = ['vacation', 'sick'];
+
+// ¿Cuenta horas? Turnos con horario (salvo countsHours:false) y cualquier otro tipo con horario
+// completo y countsHours:true (evento, 'other'…). Vacaciones/baja se acreditan aparte.
+export function countsAsWork(def) {
+  if (!def || !hasTime(def) || CREDIT_KINDS.includes(def.kind)) return false;
+  if (def.kind === 'shift') return def.countsHours !== false;
+  return def.countsHours === true;
+}
+
+// ¿Genera aviso y evento en el calendario? Turnos, eventos y 'other' con hora de inicio,
+// o cualquier tipo con hora de inicio que cuente horas.
+export function isTimedCode(def) {
+  if (!def || parseHHMM(def.start) === null || CREDIT_KINDS.includes(def.kind)) return false;
+  return ['shift', 'event', 'other'].includes(def.kind) || def.countsHours === true;
+}
+
+// Turno de noche: trabajo que termina al día siguiente
 export function isNightCode(def) {
   const s = parseHHMM(def?.start), e = parseHHMM(def?.end);
-  return def?.kind === 'shift' && s !== null && e !== null && e <= s;
+  if (s === null || e === null || e > s) return false;
+  return def.kind === 'shift' || countsAsWork(def);
 }
 
 const RANK = { shift: 0, event: 1, place: 3 };

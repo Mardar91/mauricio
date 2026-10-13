@@ -4,6 +4,12 @@ export function isPlainObject(v) {
   return v !== null && typeof v === 'object' && !Array.isArray(v);
 }
 
+// Claves peligrosas en mezclas profundas (contaminación de prototipos)
+const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+export function isSafeKey(k) {
+  return typeof k === 'string' && !UNSAFE_KEYS.has(k);
+}
+
 // Copia profunda de datos JSON (el estado solo contiene datos JSON).
 export function clone(v) {
   if (v === undefined) return undefined;
@@ -73,6 +79,27 @@ export function base64UrlDecode(str) {
   let s = String(str || '').replace(/-/g, '+').replace(/_/g, '/');
   while (s.length % 4) s += '=';
   return base64ToUtf8(s);
+}
+
+// Bytes ↔ base64url (sin relleno)
+export function bytesToBase64Url(bytes) {
+  const b64 = typeof globalThis.btoa === 'function'
+    ? globalThis.btoa(bytesToBinary(bytes))
+    : globalThis.Buffer.from(bytes).toString('base64');
+  return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+export function base64UrlToBytes(str) {
+  let s = String(str || '').replace(/-/g, '+').replace(/_/g, '/');
+  if (/[^A-Za-z0-9+/]/.test(s)) throw new Error('base64 no válido');
+  while (s.length % 4) s += '=';
+  if (typeof globalThis.atob === 'function') {
+    const bin = globalThis.atob(s);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+  return new Uint8Array(globalThis.Buffer.from(s, 'base64'));
 }
 
 // fetch por defecto enlazado a globalThis (evita "Illegal invocation" en navegadores).

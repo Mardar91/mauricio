@@ -17,7 +17,7 @@ import { createBackground } from './ui/background.js';
 import { attentionCount } from './ui/attention.js';
 
 // Debe coincidir con VERSION en sw.js
-export const APP_VERSION = '1.0.0';
+export const APP_VERSION = '1.1.0';
 
 const TABS = [
   { id: 'hoy', label: 'Hoy', icon: 'today' },

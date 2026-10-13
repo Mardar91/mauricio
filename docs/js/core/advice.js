@@ -1,5 +1,5 @@
 // Consejos para la pantalla "Hoy" y "Horas": descanso, carga de trabajo, datos que faltan…
-import { countsAsWork, getCode, isNightCode, shiftInterval } from './codes.js';
+import { countsAsWork, getCode, isNightCode, isTimedCode, shiftInterval } from './codes.js';
 import { addDays, diffDays, formatHours, formatLong, formatShort, formatSignedHours, formatTime, monthName, toKey, weekStart } from './dates.js';
 import { monthSummary, weekSummary } from './hours.js';
 
@@ -7,7 +7,7 @@ import { monthSummary, weekSummary } from './hours.js';
 const LEVEL = { alert: 3, warn: 2, info: 1 };
 const MIN_REST_MS = 11 * 3600 * 1000;
 
-// Turnos con horario que cuentan como trabajo, ordenados por inicio
+// Trabajo con horario (turnos y otros códigos que cuentan horas; no reuniones), ordenado por inicio
 function workIntervals(state, from, to) {
   const out = [];
   for (let key = from; key <= to; key = addDays(key, 1)) {
@@ -15,7 +15,7 @@ function workIntervals(state, from, to) {
     if (!entry) continue;
     for (const code of entry.codes) {
       const def = getCode(state, code);
-      if (def.kind !== 'shift' || !countsAsWork(def)) continue;
+      if (def.kind === 'event' || !countsAsWork(def)) continue;
       const iv = shiftInterval(state, key, code);
       if (iv) out.push({ key, code, def, ...iv });
     }
@@ -23,11 +23,19 @@ function workIntervals(state, from, to) {
   return out.sort((a, b) => a.start - b.start);
 }
 
+// Día de trabajo (para las rachas): algún turno o algo con hora (reunión, código con horario…)
 const worksOn = (state, key) => (state?.days?.[key]?.codes || [])
-  .some((c) => { const d = getCode(state, c); return d.kind === 'shift' && countsAsWork(d); });
+  .some((c) => { const d = getCode(state, c); return d.kind === 'shift' || isTimedCode(d) || countsAsWork(d); });
 
-// Día libre: hay plan y no hay turno (incluye '-', 'W-', vacaciones y plan vacío)
-const freeOn = (state, key) => Boolean(state?.days?.[key]) && !worksOn(state, key);
+// Día libre: hay plan y solo tiene '-', 'W-', vacaciones/baja (o está vacío). Un evento o un código
+// desconocido NO es un día libre.
+const FREE_KINDS = ['off', 'wish', 'vacation', 'sick'];
+const freeOn = (state, key) => {
+  const entry = state?.days?.[key];
+  return Boolean(entry) && (entry.codes || []).every((c) => FREE_KINDS.includes(getCode(state, c).kind));
+};
+
+const tsOf = (v) => { const t = Date.parse(v); return Number.isFinite(t) ? t : 0; };
 
 const hasKind = (state, key, kinds) => (state?.days?.[key]?.codes || []).some((c) => kinds.includes(getCode(state, c).kind));
 
@@ -124,11 +132,17 @@ function nightRule(state, now, today, out) {
     while (state.days[addDays(first, -1)]?.codes.some((c) => isNightCode(getCode(state, c)))) first = addDays(first, -1);
     let n = 0;
     for (let k = first; state.days[k]?.codes.some((c) => isNightCode(getCode(state, c))); k = addDays(k, 1)) n++;
+    // ¿Ya empezó la primera noche? (antes de las 22:00 del primer día todavía "se acerca")
+    const firstNight = state.days[first].codes.map((c) => getCode(state, c)).find((d) => isNightCode(d));
+    const started = shiftInterval(state, first, firstNight.code).start <= now;
+    let intro;
+    if (n > 1) intro = `${started ? 'Estás en' : 'Se acerca'} un bloque de noches (desde el ${formatLong(first)}).`;
+    else if (started) intro = 'Estás en un turno de noche.';
+    else intro = first === today ? 'Esta noche trabajas.' : `Se acerca un turno de noche (el ${formatLong(first)}).`;
     out.push({
       id: `nights-${first}`, prio: 0, level: 'info', icon: '🌙', key: first,
       title: n > 1 ? `${n} noches seguidas` : 'Turno de noche',
-      text: `${first <= today ? 'Estás en' : 'Se acerca'} ${n > 1 ? 'un bloque de noches' : 'una noche'} (desde el ${formatLong(first)}). `
-        + 'Duerme un rato antes, bebe agua, come ligero y no conduzcas si tienes sueño.',
+      text: `${intro} Duerme un rato antes, bebe agua, come ligero y no conduzcas si tienes sueño.`,
     });
     return;
   }
@@ -184,6 +198,27 @@ function missingDataRule(state, today, out) {
   }
 }
 
+// Huecos sin plan en los próximos 7 días (antes del último día cargado): sin plan no hay avisos
+function gapsRule(state, today, out) {
+  const future = Object.keys(state?.days || {}).filter((k) => k >= today).sort();
+  if (!future.length) return; // ya lo cubre 'missing-data'
+  const last = future[future.length - 1];
+  const end = [addDays(today, 6), addDays(last, -1)].sort()[0];
+  const missing = [];
+  for (let k = today; k <= end; k = addDays(k, 1)) if (!state.days[k]) missing.push(k);
+  if (!missing.length) return;
+  const a = missing[0], b = missing[missing.length - 1];
+  out.push({
+    id: `gaps-${a}`, prio: 1, level: 'info', icon: '🧩', key: a,
+    title: 'Faltan días en el plan',
+    text: (missing.length === 1
+      ? `No tienes plan para el ${formatShort(a)}.`
+      : `No tienes plan para ${missing.length} días entre el ${formatShort(a)} y el ${formatShort(b)}.`)
+      + ' Sin plan no hay avisos: haz una foto de esos días o añádelos a mano.',
+    action: { tab: 'escanear', label: 'Escanear' },
+  });
+}
+
 function freeDaysRule(state, today, out) {
   const end = addDays(today, 7);
   for (let key = today; key <= end; key = addDays(key, 1)) {
@@ -211,8 +246,40 @@ function remindersRule(state, out) {
   out.push({
     id: 'reminders-off', prio: 2, level: 'info', icon: '🔔',
     title: 'Activa los recordatorios',
-    text: 'Así tu iPhone te avisa la víspera y antes de cada turno. Se activa en Ajustes en un par de minutos.',
-    action: { tab: 'ajustes', label: 'Ir a Ajustes' },
+    text: 'Para que el iPhone te avise la víspera y antes de cada turno, pide el enlace de configuración a quien te ayuda con la app.',
+    action: { tab: 'ajustes', section: 'calendario', label: 'Ver cómo' },
+  });
+}
+
+const TRANSIENT = ['NETWORK', 'SERVER', 'RATE_LIMIT', 'CONFLICT'];
+
+// El calendario no se actualiza (token caducado, clave distinta…): avisar en Hoy
+function syncRule(state, now, out) {
+  const s = state?.settings?.sync || {};
+  if (!s.enabled || !s.lastError) return;
+  const transient = TRANSIENT.includes(s.lastErrorCode);
+  if (transient) {
+    // Fallos pasajeros (sin red…): solo si duran más de un día
+    const last = Math.max(tsOf(s.lastPushAt), tsOf(s.lastPullAt));
+    if (last && now.getTime() - last < 24 * 3600 * 1000) return;
+  }
+  out.push({
+    id: 'sync-error', prio: 0, level: transient ? 'warn' : 'alert', icon: '⚠️',
+    title: 'Tu calendario no se está actualizando',
+    text: transient
+      ? 'Hace tiempo que tus turnos no llegan al Calendario del iPhone. Abre la app con internet; si sigue igual, pide ayuda a quien te configuró la app.'
+      : 'Los turnos nuevos o cambiados no llegan al Calendario del iPhone y no tendrán aviso. Pide ayuda a quien te configuró la app.',
+    action: { tab: 'ajustes', section: 'calendario', label: 'Ver en Ajustes' },
+  });
+}
+
+// Datos guardados por una versión más nueva de la app
+function newerSchemaRule(state, out) {
+  if (!state?.__newerSchema) return;
+  out.push({
+    id: 'newer-schema', prio: 0, level: 'alert', icon: '⬆️',
+    title: 'Actualiza la app',
+    text: 'Tus datos son de una versión más nueva de la app. Ciérrala del todo y vuelve a abrirla para actualizarla antes de cambiar nada.',
   });
 }
 
@@ -226,8 +293,11 @@ export function getAdvice(state, now = new Date()) {
   nightRule(state, now, today, out);
   unconfirmedRule(state, today, out);
   missingDataRule(state, today, out);
+  gapsRule(state, today, out);
   freeDaysRule(state, today, out);
   remindersRule(state, out);
+  syncRule(state, now, out);
+  newerSchemaRule(state, out);
   return out
     .sort((a, b) => LEVEL[b.level] - LEVEL[a.level] || a.prio - b.prio || String(a.key ?? '').localeCompare(String(b.key ?? '')))
     .map(({ prio, ...rest }) => rest);

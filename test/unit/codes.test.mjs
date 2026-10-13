@@ -8,7 +8,7 @@ import {
 import { upsertCode } from '../../docs/js/core/store.js';
 
 const FIELDS = ['code', 'kind', 'name', 'start', 'end', 'breakMin', 'countsHours', 'creditHours', 'color',
-  'textColor', 'shape', 'place', 'confirmed', 'builtin'];
+  'textColor', 'shape', 'place', 'confirmed', 'builtin', 'updatedAt'];
 
 test('DEFAULT_CODES tiene todos los códigos del plan con todos los campos', () => {
   const expected = ['F1', 'F2', 'F3', 'F6', 'F8', 'S1', 'N1', 'Z1', 'F51', 'F52', 'F53', 'S51', 'S52', 'N51',

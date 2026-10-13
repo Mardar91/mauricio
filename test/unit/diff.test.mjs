@@ -94,3 +94,28 @@ test('mergeScans: fotos de otro mes se excluyen; sin mes se supone el mayoritari
   assert.ok(m.warnings.some((w) => w.includes('no se vio el mes')));
   assert.deepEqual(mergeScans([]), { layout: 'unknown', month: null, year: null, days: [], warnings: [] });
 });
+
+test('C1: una foto con mes leído pero sin año no se mezcla si es de otro mes', () => {
+  const a = { layout: 'phone-list', month: 10, year: 2026, days: [{ day: 20, codes: ['F1'], confidence: 0.9 }, { day: 21, codes: ['S1'], confidence: 0.9 }] };
+  const b = { layout: 'phone-list', month: 11, year: null, days: [{ day: 20, codes: ['N1'], confidence: 0.95 }, { day: 22, codes: ['-'], confidence: 0.9 }] };
+  const m = mergeScans([a, b]);
+  assert.equal(m.month, 10);
+  assert.equal(m.year, 2026);
+  assert.deepEqual(m.excluded, [1]);
+  assert.deepEqual(m.days.map((d) => [d.day, d.codes.join()]), [[20, 'F1'], [21, 'S1']]);
+  assert.ok(m.warnings.includes('La foto 2 es de noviembre: escanéala aparte.'));
+  assert.ok(!m.warnings.some((w) => w.includes('no se vio el mes')));
+  // Sin año en ninguna: se elige el mes y se excluye el otro
+  const m2 = mergeScans([{ ...a, year: null }, b]);
+  assert.equal(m2.month, 10);
+  assert.equal(m2.year, null);
+  assert.deepEqual(m2.excluded, [1]);
+  // Mismo mes sin año: se une sin el aviso falso
+  const c = { month: 10, year: null, days: [{ day: 23, codes: ['F1'], confidence: 0.9 }] };
+  const m3 = mergeScans([a, c]);
+  assert.deepEqual(m3.days.map((d) => d.day), [20, 21, 23]);
+  assert.equal(m3.excluded, undefined);
+  assert.ok(!m3.warnings.some((w) => w.includes('no se vio el mes')));
+  // Mismo mes de otro año: fuera
+  assert.deepEqual(mergeScans([a, { ...c, year: 2025 }]).excluded, [1]);
+});

@@ -1,22 +1,23 @@
 // Recordatorios: la víspera a una hora fija y X minutos antes del inicio.
-import { getCode, shiftInterval, codeEmoji } from './codes.js';
+import { getCode, isTimedCode, timedInterval, codeEmoji } from './codes.js';
 import { addDays, atTime, formatHours, formatLong, formatTime, parseHHMM, toKey } from './dates.js';
 
 const DEFAULT_HORIZON = 7 * 24 * 3600 * 1000;
 
-// Turnos/eventos con horario de un día, con su lugar
+// Turnos/eventos con hora de un día, con su lugar. Incluye cualquier código con hora de inicio
+// (turno, evento, 'other' o que cuente horas). Si solo tiene inicio dura 1 h (startOnly: true).
 export function dayTimedItems(state, key) {
   const entry = state?.days?.[key];
   if (!entry) return [];
-  const defs = entry.codes.map((c) => getCode(state, c));
+  const defs = (entry.codes || []).map((c) => getCode(state, c));
   const places = defs.filter((d) => d.kind === 'place');
   const placeText = places.map((p) => (p.place ? `${p.code} (${p.place})` : p.code)).join(', ');
   const out = [];
   for (const def of defs) {
-    if (def.kind !== 'shift' && def.kind !== 'event') continue;
-    const iv = shiftInterval(state, key, def.code);
+    if (!isTimedCode(def)) continue;
+    const iv = timedInterval(state, key, def.code);
     if (!iv) continue;
-    out.push({ key, code: def.code, def, start: iv.start, end: iv.end, places, placeText });
+    out.push({ key, code: def.code, def, start: iv.start, end: iv.end, startOnly: iv.startOnly, places, placeText });
   }
   return out;
 }
@@ -27,10 +28,12 @@ function inText(minutes) {
 }
 
 function describe(item) {
-  const time = `${formatTime(item.start)}–${formatTime(item.end)}`;
+  const time = item.startOnly ? formatTime(item.start) : `${formatTime(item.start)}–${formatTime(item.end)}`;
   const where = item.placeText ? ` · 📍 ${item.placeText}` : '';
   const label = `${codeEmoji(item.def)} ${item.def.name} ${item.code}`;
-  return { time, where, label, isShift: item.def.kind === 'shift' };
+  // Se habla de "turno" si es un turno o si cuenta horas como tal
+  const isShift = item.def.kind === 'shift' || item.def.countsHours === true;
+  return { time, where, label, isShift };
 }
 
 export function upcomingReminders(state, now = new Date(), horizonMs = DEFAULT_HORIZON) {

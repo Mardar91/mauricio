@@ -113,11 +113,14 @@ test('reunión sin horario → día completo; con horario → evento con alarmas
   assert.deepEqual(triggers(ts), ['-PT19H', '-PT1H']);
 });
 
-test('rango por defecto: desde hace 60 días; from/to explícitos', () => {
-  const s = stateWith({ '2026-08-01': ['F1'], '2026-08-20': ['F1'], '2027-03-01': ['S1'] });
+test('rango por defecto: desde el día 1 del mes de hace 2 meses; from/to explícitos', () => {
+  const s = stateWith({ '2026-07-31': ['F1'], '2026-08-01': ['F1'], '2026-08-20': ['F1'], '2027-03-01': ['S1'] });
   const uids = (ics) => events(ics).map((ev) => prop(ev, 'UID').slice(4, 14));
-  assert.deepEqual(uids(buildICS(s, { now: NOW })), ['2026-08-20', '2027-03-01']);
-  assert.deepEqual(uids(buildICS(s, { from: '2026-01-01', to: '2026-12-31', now: NOW })), ['2026-08-01', '2026-08-20']);
+  assert.deepEqual(uids(buildICS(s, { now: NOW })), ['2026-08-01', '2026-08-20', '2027-03-01']);
+  // Todo octubre da el mismo rango (y el mismo contenido)
+  assert.equal(buildICS(s, { now: new Date(2026, 9, 31, 23, 0) }), buildICS(s, { now: new Date(2026, 9, 1, 0, 30) }));
+  assert.deepEqual(uids(buildICS(s, { now: new Date(2026, 10, 1, 9, 0) })), ['2027-03-01']); // desde el 1 sept
+  assert.deepEqual(uids(buildICS(s, { from: '2026-01-01', to: '2026-12-31', now: NOW })), ['2026-07-31', '2026-08-01', '2026-08-20']);
 });
 
 test('escape de texto y notas con caracteres especiales', () => {
@@ -125,15 +128,17 @@ test('escape de texto y notas con caracteres especiales', () => {
   let s = stateWith({ '2026-10-12': ['F1', 'F52'] });
   s = setDay(s, '2026-10-12', ['F1', 'F52'], { note: 'Llaves; código 1,2\nllamar' });
   s = upsertCode(s, { code: 'F52', place: 'Hermannstr. 5, Neukölln' });
-  const f1 = byUid(buildICS(s, { now: NOW }), '2026-10-12-F1@turnos-mauricio');
+  const f1 = byUid(buildICS(s, { now: NOW, notes: true }), '2026-10-12-F1@turnos-mauricio');
   assert.equal(prop(f1, 'LOCATION'), 'LOCATION:F52 (Hermannstr. 5\\, Neukölln)');
   assert.match(prop(f1, 'DESCRIPTION'), /Nota: Llaves\\; código 1\\,2\\nllamar/);
+  // Por defecto las notas no van al calendario
+  assert.ok(!buildICS(s, { now: NOW }).includes('Llaves'));
 });
 
 test('plegado de líneas a 75 octetos sin partir caracteres UTF-8', () => {
   let s = stateWith({ '2026-10-12': ['F1', 'F52'] });
   s = setDay(s, '2026-10-12', ['F1', 'F52'], { note: 'ñ🌅é'.repeat(40) });
-  const ics = buildICS(s, { now: NOW });
+  const ics = buildICS(s, { now: NOW, notes: true });
   for (const physical of ics.split('\r\n')) {
     assert.ok(enc.encode(physical).length <= 75, `línea de ${enc.encode(physical).length} octetos`);
     assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?:^|[^\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(physical), 'emoji partido');

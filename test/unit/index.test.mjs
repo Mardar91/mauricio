@@ -22,10 +22,16 @@ test('index.js se importa sin DOM y re-exporta la API del SPEC §4', async () =>
     // sync, ntfy
     'testConnection', 'ensureBranch', 'pushData', 'pullBackup', 'calendarUrls', 'parseSetupLink', 'buildSetupLink',
     'randomTopic', 'syncNtfy', 'testNtfy',
+    // §9 sincronización segura y cambios de la revisión
+    'syncNow', 'pullOnly', 'restoreFromRemote', 'applySyncResult', 'fetchRemoteBackup', 'encryptBackup', 'decryptBackup',
+    'normalizeSyncConfig', 'syncConfigPatch', 'isValidBranch', 'SyncError', 'SYNC_MESSAGES',
+    'mergeStates', 'pruneTombstones', 'saveBeforeImport', 'listBeforeImport', 'undoImport', 'syncPayload', 'dataFingerprint',
+    'generateSyncKey', 'isSyncKey', 'timedInterval', 'isTimedCode', 'defaultIcsFrom', 'isAppleMobile', 'safeColor',
   ];
   for (const name of api) assert.ok(name in core, `falta ${name}`);
   // Sin localStorage el store funciona en memoria
   const store = core.createStore();
   store.set((d) => { d.settings.name = 'X'; });
   assert.equal(store.get().settings.name, 'X');
+  assert.equal(store.saveOk(), true); // sin almacenamiento no hay error que avisar
 });

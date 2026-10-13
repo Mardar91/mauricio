@@ -40,8 +40,17 @@ export function topicUrl(ntfy) {
   return `${serverOf(ntfy)}/${encodeURIComponent(ntfy?.topic || '')}`;
 }
 
+// En iPhone/iPad un enlace de notificación abre Safari (otra copia de la app, con otros datos),
+// nunca la app de la pantalla de inicio: allí no se añade enlace.
+export function isAppleMobile(nav = globalThis.navigator) {
+  if (!nav) return false;
+  const ua = String(nav.userAgent || '');
+  return /iPhone|iPad|iPod/.test(ua) || (nav.platform === 'MacIntel' && Number(nav.maxTouchPoints) > 1);
+}
+
 function defaultAppUrl() {
   const loc = globalThis.location;
+  if (isAppleMobile()) return undefined;
   return loc && /^https?:/.test(loc.protocol) ? `${loc.origin}${loc.pathname}` : undefined;
 }
 
@@ -176,12 +185,12 @@ export async function syncNtfy(state, now = new Date(), fetchImpl = defaultFetch
     const keep = prev && prev.topic === topic && new Date(prev.at).getTime() - t > KEEPALIVE_KEEP_MS;
     if (!keep) {
       const at = keepAliveTime(now);
+      // Sin enlace: tocar el aviso abriría Safari, no la app instalada (que es la que programa)
       const payload = {
-        topic, sequence_id: KEEPALIVE_ID, title: 'Abre Turnos',
-        message: 'Abre Turnos para mantener los recordatorios de tus próximos turnos.',
+        topic, sequence_id: KEEPALIVE_ID, title: 'Abre la app Turnos',
+        message: 'Abre Turnos desde su icono en la pantalla de inicio (no desde este aviso) para seguir recibiendo los avisos de tus turnos.',
         tags: ['bell'], priority: 3, delay: unix(at),
       };
-      if (appUrl) payload.click = appUrl;
       try {
         await publish(fetchImpl, server, payload);
         next[KEEPALIVE_ID] = { at: at.toISOString(), hash: hashString(stableStringify({ server, ...payload })), topic, server };

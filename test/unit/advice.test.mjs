@@ -146,3 +146,76 @@ test('orden: alert > warn > info', () => {
   for (let i = 1; i < levels.length; i++) assert.ok(rank[levels[i - 1]] >= rank[levels[i]], levels.join());
   assert.equal(levels[0], 'alert');
 });
+
+test('C5: una reunión o un código desconocido no es día libre; un evento con hora cuenta para la racha', () => {
+  const s = stateWith({ '2026-10-13': ['F1'], '2026-10-14': ['TS'], '2026-10-15': ['-'], '2026-10-16': ['F1'] });
+  assert.equal(find(getAdvice(s, NOW), 'free-'), undefined);
+  const unknown = stateWith({ '2026-10-13': ['FB'], '2026-10-14': ['-'], '2026-10-15': ['F1'] });
+  assert.equal(find(getAdvice(unknown, NOW), 'free-'), undefined);
+  // Racha: 5 turnos + una reunión con hora = 6 días seguidos
+  let streak = {};
+  for (let d = 12; d <= 17; d++) streak[`2026-10-${d}`] = d === 14 ? ['TS'] : ['F1'];
+  let st = upsertCode(stateWith(streak), { code: 'TS', start: '14:00', end: '15:00' });
+  assert.match(find(getAdvice(st, NOW), 'streak-').title, /6 días seguidos/);
+  // Sin hora la reunión no cuenta como día trabajado
+  assert.equal(find(getAdvice(stateWith(streak), NOW), 'streak-'), undefined);
+});
+
+test('C7: huecos sin plan en los próximos 7 días → "Faltan días en el plan"', () => {
+  const days = { '2026-10-12': ['F1'], '2026-10-13': ['S1'] };
+  for (let d = 17; d <= 31; d++) days[`2026-10-${d}`] = ['F1'];
+  const a = find(getAdvice(stateWith(days), NOW), 'gaps-');
+  assert.ok(a);
+  assert.equal(a.id, 'gaps-2026-10-14');
+  assert.equal(a.level, 'info');
+  assert.equal(a.title, 'Faltan días en el plan');
+  assert.match(a.text, /3 días entre el mié 14 oct y el vie 16 oct/);
+  assert.equal(a.action.tab, 'escanear');
+  // Plan completo: sin aviso
+  const full = {};
+  for (let d = 12; d <= 31; d++) full[`2026-10-${d}`] = ['F1'];
+  assert.equal(find(getAdvice(stateWith(full), NOW), 'gaps-'), undefined);
+  // Un solo día
+  const one = { ...full };
+  delete one['2026-10-15'];
+  assert.match(find(getAdvice(stateWith(one), NOW), 'gaps-').text, /No tienes plan para el jue 15 oct\./);
+});
+
+test('C11: antes de la primera noche "Se acerca un bloque de noches"; después "Estás en"', () => {
+  const s = stateWith({ '2026-10-13': ['N1'], '2026-10-14': ['N1'] });
+  const before = find(getAdvice(s, new Date(2026, 9, 13, 9, 0)), 'nights-');
+  assert.match(before.text, /^Se acerca un bloque de noches/);
+  const during = find(getAdvice(s, new Date(2026, 9, 13, 23, 0)), 'nights-');
+  assert.match(during.text, /^Estás en un bloque de noches/);
+  const single = stateWith({ '2026-10-13': ['N1'] });
+  assert.match(find(getAdvice(single, new Date(2026, 9, 13, 9, 0)), 'nights-').text, /^Esta noche trabajas/);
+  assert.match(find(getAdvice(single, NOW), 'nights-').text, /^Se acerca un turno de noche/);
+});
+
+test('U13: el consejo de recordatorios no promete minutos y lleva a la sección del calendario', () => {
+  const a = find(getAdvice(stateWith(REAL_WEEK), NOW), 'reminders-off');
+  assert.doesNotMatch(a.text, /minuto/);
+  assert.match(a.text, /enlace de configuración/);
+  assert.deepEqual({ tab: a.action.tab, section: a.action.section }, { tab: 'ajustes', section: 'calendario' });
+});
+
+test('U4: si el calendario no se actualiza, aviso en Hoy (pasajeros solo si duran)', () => {
+  const base = stateWith(REAL_WEEK);
+  const auth = updateSettings(base, { sync: { enabled: true, lastError: 'La conexión del calendario ha caducado.', lastErrorCode: 'AUTH', lastPushAt: NOW.toISOString() } });
+  const a = find(getAdvice(auth, NOW), 'sync-error');
+  assert.equal(a.level, 'alert');
+  assert.equal(a.title, 'Tu calendario no se está actualizando');
+  assert.doesNotMatch(a.text, /token/i);
+  assert.deepEqual([a.action.tab, a.action.section], ['ajustes', 'calendario']);
+  assert.equal(getAdvice(auth, NOW)[0].id, 'sync-error');
+  const recent = updateSettings(base, { sync: { enabled: true, lastError: 'Sin conexión', lastErrorCode: 'NETWORK', lastPushAt: new Date(NOW.getTime() - 3600e3).toISOString() } });
+  assert.equal(find(getAdvice(recent, NOW), 'sync-error'), undefined);
+  const old = updateSettings(recent, { sync: { lastPushAt: new Date(NOW.getTime() - 3 * 24 * 3600e3).toISOString() } });
+  assert.equal(find(getAdvice(old, NOW), 'sync-error').level, 'warn');
+  assert.equal(find(getAdvice(updateSettings(auth, { sync: { enabled: false } }), NOW), 'sync-error'), undefined);
+});
+
+test('datos de una versión más nueva → "Actualiza la app"', () => {
+  const s = { ...stateWith(REAL_WEEK), __newerSchema: true };
+  assert.equal(find(getAdvice(s, NOW), 'newer-schema').level, 'alert');
+});

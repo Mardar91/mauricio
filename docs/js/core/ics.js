@@ -1,6 +1,6 @@
 // Calendario iCalendar (RFC 5545) para suscribirse desde el iPhone.
 import { codeEmoji, getCode, nominalMinutes } from './codes.js';
-import { addDays, atTime, formatHours, parseHHMM, toKey } from './dates.js';
+import { addDays, atTime, formatHHMM, formatHours, parseHHMM, toKey } from './dates.js';
 import { dayTimedItems } from './reminders.js';
 
 const CRLF = '\r\n';
@@ -81,10 +81,21 @@ export function triggerDuration(ms) {
   return `-PT${h ? `${h}H` : ''}${m || !h ? `${m}M` : ''}`;
 }
 
-function stampFor(entry, now) {
-  const d = entry?.updatedAt ? new Date(entry.updatedAt) : null;
-  return utcStamp(d && !Number.isNaN(d.getTime()) ? d : now);
+// Sello estable del evento: lo más reciente entre el día, sus códigos y los ajustes del calendario.
+// Nunca "ahora": el mismo contenido da siempre el mismo ICS (y el mismo hash para publicar).
+function stampFor(state, key, entry) {
+  let best = 0;
+  const vals = [entry?.updatedAt, state?.settings?.calendarUpdatedAt, ...(entry?.codes || []).map((c) => getCode(state, c).updatedAt)];
+  for (const v of vals) {
+    const t = Date.parse(v);
+    if (Number.isFinite(t) && t > best) best = t;
+  }
+  return best ? new Date(best) : new Date(`${key}T00:00:00Z`);
 }
+
+// SEQUENCE monotónica: minutos desde 2024 del sello; sube cuando cambian horario, código o avisos
+const SEQ_EPOCH = Date.UTC(2024, 0, 1);
+const sequenceOf = (stamp) => Math.max(0, Math.floor((stamp.getTime() - SEQ_EPOCH) / 60000));
 
 function alarm(description, ms) {
   return ['BEGIN:VALARM', 'ACTION:DISPLAY', `DESCRIPTION:${escapeText(description)}`,
@@ -96,9 +107,25 @@ function lastDayKey(state) {
   return keys.length ? keys[keys.length - 1] : null;
 }
 
-export function buildICS(state, { from, to, now = new Date() } = {}) {
+// Inicio por defecto: día 1 del mes de hace 2 meses (no cambia cada día → contenido estable)
+export function defaultIcsFrom(now = new Date()) {
+  return toKey(new Date(now.getFullYear(), now.getMonth() - 2, 1));
+}
+
+// Fin del evento en hora de pared: el fin del código, o 1 h después si solo tiene inicio
+function endWall(key, def, startOnly) {
+  if (!startOnly) {
+    const endKey = parseHHMM(def.end) <= parseHHMM(def.start) ? addDays(key, 1) : key;
+    return wallTime(endKey, def.end);
+  }
+  const m = parseHHMM(def.start) + 60;
+  return m >= 1440 ? wallTime(addDays(key, 1), formatHHMM(m - 1440)) : wallTime(key, formatHHMM(m));
+}
+
+// options: { from, to, now, notes (false: sin notas), places (true: lugar en SUMMARY/LOCATION) }
+export function buildICS(state, { from, to, now = new Date(), notes = false, places = true } = {}) {
   const r = state?.settings?.reminders || {};
-  const start = from ?? addDays(toKey(now), -60);
+  const start = from ?? defaultIcsFrom(now);
   const end = to ?? lastDayKey(state);
   const lines = [
     'BEGIN:VCALENDAR',
@@ -116,28 +143,33 @@ export function buildICS(state, { from, to, now = new Date() } = {}) {
   const keys = Object.keys(state?.days || {}).filter((k) => k >= start && (!end || k <= end)).sort();
   for (const key of keys) {
     const entry = state.days[key];
-    const stamp = stampFor(entry, now);
+    const when = stampFor(state, key, entry);
+    const stamp = utcStamp(when);
+    const seq = sequenceOf(when);
     const timed = dayTimedItems(state, key);
     for (const item of timed) {
       const def = item.def;
+      const placeCodes = places && item.places.length ? ` · ${item.places.map((p) => p.code).join(', ')}` : '';
+      const summary = `${codeEmoji(def)} ${def.code} ${def.name}${placeCodes}`;
+      const desc = [item.startOnly ? `Hora: ${def.start}` : `Horario: ${def.start}–${def.end}`];
       const nominal = nominalMinutes(def);
-      const endKey = parseHHMM(def.end) <= parseHHMM(def.start) ? addDays(key, 1) : key;
-      const summary = `${codeEmoji(def)} ${def.code} ${def.name}${item.places.length ? ` · ${item.places.map((p) => p.code).join(', ')}` : ''}`;
-      const desc = [`Horario: ${def.start}–${def.end}`];
-      if (def.breakMin) desc.push(`Pausa: ${def.breakMin} min (${formatHours(Math.max(0, nominal - def.breakMin))} de trabajo)`);
-      if (item.placeText) desc.push(`Lugar: ${item.placeText}`);
+      if (!item.startOnly && def.breakMin && nominal !== null) {
+        desc.push(`Pausa: ${def.breakMin} min (${formatHours(Math.max(0, nominal - def.breakMin))} de trabajo)`);
+      }
+      if (places && item.placeText) desc.push(`Lugar: ${item.placeText}`);
       if (def.confirmed === false) desc.push('Horario sin confirmar');
-      if (entry.note) desc.push(`Nota: ${entry.note}`);
+      if (notes && entry.note) desc.push(`Nota: ${entry.note}`);
       lines.push(
         'BEGIN:VEVENT',
         `UID:${key}-${def.code}@turnos-mauricio`,
         `DTSTAMP:${stamp}`,
         `LAST-MODIFIED:${stamp}`,
+        `SEQUENCE:${seq}`,
         `DTSTART;TZID=Europe/Berlin:${wallTime(key, def.start)}`,
-        `DTEND;TZID=Europe/Berlin:${wallTime(endKey, def.end)}`,
+        `DTEND;TZID=Europe/Berlin:${endWall(key, def, item.startOnly)}`,
         `SUMMARY:${escapeText(summary)}`,
       );
-      if (item.placeText) lines.push(`LOCATION:${escapeText(item.placeText)}`);
+      if (places && item.placeText) lines.push(`LOCATION:${escapeText(item.placeText)}`);
       lines.push(`DESCRIPTION:${escapeText(desc.join('\n'))}`, 'TRANSP:OPAQUE');
       if (r.eveningBefore !== false && parseHHMM(r.eveningTime) !== null) {
         const eve = atTime(addDays(key, -1), r.eveningTime);
@@ -151,7 +183,7 @@ export function buildICS(state, { from, to, now = new Date() } = {}) {
       }
       lines.push('END:VEVENT');
     }
-    // Vacaciones, enfermedad y eventos sin horario: día completo, sin alarma
+    // Vacaciones, enfermedad y eventos sin hora: día completo, sin alarma
     const timedCodes = new Set(timed.map((t) => t.code));
     for (const code of entry.codes) {
       const def = getCode(state, code);
@@ -162,11 +194,12 @@ export function buildICS(state, { from, to, now = new Date() } = {}) {
         `UID:${key}-${def.code}@turnos-mauricio`,
         `DTSTAMP:${stamp}`,
         `LAST-MODIFIED:${stamp}`,
+        `SEQUENCE:${seq}`,
         `DTSTART;VALUE=DATE:${dateValue(key)}`,
         `DTEND;VALUE=DATE:${dateValue(addDays(key, 1))}`,
         `SUMMARY:${escapeText(`${codeEmoji(def)} ${def.name}${def.kind === 'event' ? ` (${def.code})` : ''}`)}`,
       );
-      if (entry.note) lines.push(`DESCRIPTION:${escapeText(`Nota: ${entry.note}`)}`);
+      if (notes && entry.note) lines.push(`DESCRIPTION:${escapeText(`Nota: ${entry.note}`)}`);
       lines.push('TRANSP:TRANSPARENT', 'END:VEVENT');
     }
   }

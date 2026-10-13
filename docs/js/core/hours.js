@@ -2,6 +2,8 @@
 import { countsAsWork, getCode, isNightCode, shiftInterval } from './codes.js';
 import { addDays, isHoliday, isWeekend, monthKeys, weekStart, weekdayIndex } from './dates.js';
 
+const FREE_KINDS = ['off', 'wish'];
+
 // Soll diario en minutos = horas semanales / días laborables
 export function dailySollMinutes(state) {
   const s = state?.settings || {};
@@ -92,16 +94,18 @@ export function monthSummary(state, year, month1) {
     if (!d.known) continue;
     const defs = d.codes.map((c) => getCode(state, c));
     const work = defs.filter(countsAsWork);
-    shifts += work.filter((def) => def.kind === 'shift').length;
-    for (const def of work) if (def.kind === 'shift') shiftCounts[def.code] = (shiftCounts[def.code] || 0) + 1;
+    // Turnos: todo lo que cuenta horas salvo los eventos (reuniones)
+    const shiftLike = work.filter((def) => def.kind !== 'event');
+    shifts += shiftLike.length;
+    for (const def of shiftLike) shiftCounts[def.code] = (shiftCounts[def.code] || 0) + 1;
     if (work.some(isNightCode)) nights++;
-    const onVacation = defs.some((def) => def.kind === 'vacation' || def.kind === 'sick');
     if (defs.some((def) => def.kind === 'vacation')) vacationDays++;
     if (work.length && d.weekend) {
       weekendDaysWorked++;
       weekendsWorked.add(weekStart(d.key));
     }
-    if (!work.length && !onVacation) freeDays++;
+    // Libre: solo '-' o 'W-' (o plan vacío); eventos y códigos desconocidos no son días libres
+    if (defs.every((def) => FREE_KINDS.includes(def.kind))) freeDays++;
   }
   const weeks = [];
   for (let k = weekStart(keys[0]); k <= keys[keys.length - 1]; k = addDays(k, 7)) weeks.push(weekSummary(state, k));

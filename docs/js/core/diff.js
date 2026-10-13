@@ -1,6 +1,6 @@
 // Comparación de escaneos con el plan guardado y unión de varias fotos del mismo mes.
 import { cleanCode, normalizeDayCodes } from './codes.js';
-import { daysInMonth, formatMonth, isKey, makeKey } from './dates.js';
+import { daysInMonth, formatMonth, isKey, makeKey, monthName } from './dates.js';
 
 function cleanList(codes) {
   const out = [];
@@ -64,20 +64,20 @@ function mostCommon(values) {
 export function mergeScans(results) {
   const list = (results || []).filter(Boolean);
   if (!list.length) return { layout: 'unknown', month: null, year: null, days: [], warnings: [] };
-  const known = list.filter((r) => r.month && r.year).map((r) => `${r.year}-${r.month}`);
-  const target = mostCommon(known);
-  const [ty, tm] = target ? target.split('-').map(Number) : [null, null];
+  // Mes objetivo: el más repetido entre las fotos con mes (aunque no se leyera el año)
+  const tm = mostCommon(list.map((r) => r.month).filter(Boolean)) ?? null;
+  const ty = tm ? mostCommon(list.filter((r) => r.month === tm && r.year).map((r) => r.year)) ?? null : null;
+  const label = (y, m) => (y ? formatMonth(y, m) : monthName(m));
   const warnings = [];
   const excluded = [];
   const used = [];
   list.forEach((r, i) => {
-    if (target && r.month && r.year && `${r.year}-${r.month}` !== target) {
+    // Una foto con otro mes (o con el mismo mes de otro año) nunca se mezcla
+    if (tm && r.month && (r.month !== tm || (ty && r.year && r.year !== ty))) {
       excluded.push(i);
-      warnings.push(`La foto ${i + 1} es de ${formatMonth(r.year, r.month)}: escanéala aparte.`);
+      warnings.push(`La foto ${i + 1} es de ${label(r.year, r.month)}: escanéala aparte.`);
     } else {
-      if (target && !(r.month && r.year) && (r.days || []).length) {
-        warnings.push(`En la foto ${i + 1} no se vio el mes; se ha supuesto ${formatMonth(ty, tm)}.`);
-      }
+      if (tm && !r.month && (r.days || []).length) warnings.push(`En la foto ${i + 1} no se vio el mes; se ha supuesto ${label(ty, tm)}.`);
       used.push(r);
     }
   });

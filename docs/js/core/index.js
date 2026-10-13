@@ -9,4 +9,5 @@ export * from './reminders.js';
 export * from './ics.js';
 export * from './sync.js';
 export * from './ntfy.js';
+export * from './cipher.js';
 export { clone, hashString, utf8ToBase64, base64ToUtf8 } from './util.js';

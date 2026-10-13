@@ -1,7 +1,7 @@
 import { stateWith, mockFetch } from './helpers.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { randomTopic, sequenceId, syncNtfy, testNtfy, topicUrl, KEEPALIVE_ID } from '../../docs/js/core/ntfy.js';
+import { randomTopic, sequenceId, syncNtfy, testNtfy, topicUrl, KEEPALIVE_ID, isAppleMobile } from '../../docs/js/core/ntfy.js';
 import { updateSettings, setDay, upsertCode, clearDay } from '../../docs/js/core/store.js';
 
 const TOPIC = 'turnos-mauricio-abcdef123456';
@@ -206,4 +206,21 @@ test('testNtfy', async () => {
   const bad = await testNtfy({ topic: TOPIC }, mockFetch(() => ({ status: 429 })));
   assert.equal(bad.ok, false);
   assert.match(bad.message, /demasiados/);
+});
+
+test('IOS-2: el aviso "abre la app" es honesto y no lleva enlace (abriría Safari)', async () => {
+  const { r, f } = await run(ntfyState());
+  const keep = posts(f).find((p) => p.sequence_id === KEEPALIVE_ID);
+  assert.equal(keep.click, undefined);
+  assert.match(keep.message, /desde su icono en la pantalla de inicio/);
+  assert.match(keep.message, /no desde este aviso/);
+  assert.ok(r.scheduled[KEEPALIVE_ID]);
+  // En iPhone/iPad no se pone enlace por defecto
+  assert.equal(isAppleMobile({ userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X)' }), true);
+  assert.equal(isAppleMobile({ userAgent: 'Mozilla/5.0 (Macintosh)', platform: 'MacIntel', maxTouchPoints: 5 }), true);
+  assert.equal(isAppleMobile({ userAgent: 'Mozilla/5.0 (Linux; Android 14)' }), false);
+  assert.equal(isAppleMobile(null), false);
+  // ntfy viene desactivado por defecto
+  const { createDefaultState } = await import('../../docs/js/core/store.js');
+  assert.equal(createDefaultState().settings.ntfy.enabled, false);
 });

@@ -10,13 +10,20 @@ import { DEFAULT_CODES } from '../../docs/js/core/codes.js';
 test('createDefaultState: forma del estado (§3)', () => {
   const s = createDefaultState();
   assert.equal(s.schema, 1);
-  assert.deepEqual(Object.keys(s).sort(), ['changes', 'codes', 'days', 'scans', 'schema', 'settings']);
+  assert.deepEqual(Object.keys(s).sort(), ['changes', 'codeTombstones', 'codes', 'days', 'scans', 'schema', 'settings', 'tombstones']);
+  assert.deepEqual(s.tombstones, {});
+  assert.deepEqual(s.codeTombstones, {});
   assert.equal(s.settings.name, 'Mauricio');
   assert.equal(s.settings.weeklyHours, 35);
   assert.equal(s.settings.workDaysPerWeek, 5);
   assert.equal(s.settings.holidaysReduceSoll, true);
   assert.deepEqual(s.settings.reminders, { eveningBefore: true, eveningTime: '20:00', beforeStart: true, minutesBefore: 60 });
-  assert.deepEqual(s.settings.sync, { enabled: false, owner: 'Mardar91', repo: 'mauricio', branch: 'datos', token: '', lastPushAt: null, lastPushHash: null, lastError: null });
+  assert.deepEqual(s.settings.sync, {
+    enabled: false, owner: 'Mardar91', repo: 'mauricio-datos', branch: '', token: '', key: '', deviceId: '', baseRev: 0,
+    lastPushAt: null, lastPushHash: null, lastIcsHash: null, lastPullAt: null, lastError: null, lastErrorCode: null,
+    lastErrorDetail: null, publishPlaces: false,
+  });
+  assert.equal(s.settings.calendarUpdatedAt, null);
   assert.deepEqual(s.settings.ntfy, { enabled: false, server: 'https://ntfy.sh', topic: '', scheduled: {}, lastRunAt: null, lastError: null });
   assert.equal(s.settings.onboardingDone, false);
   assert.deepEqual(Object.keys(s.codes).sort(), Object.keys(DEFAULT_CODES).sort());
@@ -46,7 +53,8 @@ test('loadState: rellena campos que faltan y conserva lo del usuario', () => {
   assert.equal(s.settings.reminders.minutesBefore, 30);
   assert.equal(s.settings.reminders.eveningTime, '20:00');
   assert.equal(s.settings.sync.token, 'abc');
-  assert.equal(s.settings.sync.branch, 'datos');
+  assert.equal(s.settings.sync.branch, '');
+  assert.equal(s.settings.sync.repo, 'mauricio-datos');
   assert.deepEqual(s.settings.ntfy.scheduled, {});
   assert.equal(s.codes.F6.start, '07:00');
   assert.equal(s.codes.F6.confirmed, true);
@@ -208,25 +216,33 @@ test('updateSettings: mezcla profunda; el mapa de ntfy se reemplaza entero', () 
   assert.equal(t.settings.name, 'M');
 });
 
-test('exportBackup no incluye el token; importBackup restaura y conserva el token local', () => {
+test('exportBackup no incluye token, clave ni ajustes del dispositivo; importBackup restaura', () => {
   let s = stateWith({ '2026-10-12': ['F1', 'F52'], '2026-10-13': ['S1'] });
-  s = updateSettings(s, { sync: { enabled: true, token: 'github_pat_SECRETO123', lastPushHash: 'h' }, ntfy: { topic: 'turnos-mauricio-abc' } });
+  s = updateSettings(s, { name: 'Mauri', sync: { enabled: true, token: 'github_pat_SECRETO123', key: 'K'.repeat(43), lastPushHash: 'h' }, ntfy: { topic: 'turnos-mauricio-abc' } });
   const json = exportBackup(s, { now: T0 });
   assert.ok(!json.includes('github_pat_SECRETO123'));
+  assert.ok(!json.includes('K'.repeat(43)));
+  assert.ok(!json.includes('turnos-mauricio-abc'));
   const data = JSON.parse(json);
   assert.equal(data.app, 'turnos-mauricio');
   assert.equal(data.exportedAt, T0.toISOString());
-  assert.equal(data.settings.sync.token, '');
-  assert.equal(data.settings.ntfy.topic, 'turnos-mauricio-abc');
-  assert.ok(!exportBackup(s, { publicCopy: true }).includes('turnos-mauricio-abc'));
+  assert.equal(data.settings.sync, undefined);
+  assert.equal(data.settings.ntfy, undefined);
+  assert.equal(data.settings.name, 'Mauri');
+  assert.deepEqual(data.tombstones, {});
 
   let phone = updateSettings(createDefaultState(), { sync: { token: 'OTRO_TOKEN' } });
-  phone = setDay(phone, '2026-10-20', ['N1']);
-  const restored = importBackup(phone, json, { now: T0 });
+  phone = setDay(phone, '2026-10-20', ['N1'], { now: T0 });
+  const NOW = new Date('2026-10-14T10:00:00Z');
+  const restored = importBackup(phone, json, { now: NOW });
   assert.deepEqual(restored.days['2026-10-12'].codes, ['F1', 'F52']);
+  assert.equal(restored.days['2026-10-12'].updatedAt, NOW.toISOString()); // lo importado es lo más nuevo
+  assert.equal(restored.days['2026-10-12'].source, 'import');
   assert.equal(restored.days['2026-10-20'], undefined);
+  assert.equal(restored.tombstones['2026-10-20'], NOW.toISOString()); // el borrado llegará a otros dispositivos
+  assert.equal(restored.settings.name, 'Mauri');
   assert.equal(restored.settings.sync.token, 'OTRO_TOKEN');
-  assert.equal(restored.settings.sync.enabled, true);
+  assert.equal(restored.settings.sync.enabled, false); // la sync de este teléfono no cambia
   assert.ok(restored.changes.some((c) => c.source === 'import' && c.dayKey === '2026-10-20'));
 });
 
