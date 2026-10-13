@@ -7,6 +7,8 @@
 // local, pero nunca escriben (readOnly). Para cambiar de editor: becomePublisher (tras confirmarlo).
 // Siempre se lee, se descifra y se fusiona por día antes de publicar. Nunca se publica una copia
 // vacía encima de una con datos (ni encima de un turnos.ics con eventos si backup.json desapareció).
+// Sin backup.json, solo el dispositivo que escribió el turnos.ics publicado la vuelve a crear solo;
+// los demás quedan en solo lectura (publisher '?') hasta «Usar este dispositivo».
 // La UI hace TODAS las llamadas (syncNow, pullOnly, becomePublisher, trySetupConfig) desde una única
 // cola (createSyncQueue) y aplica cada resultado con applySyncResult, que descarta los resultados viejos.
 import { decryptText, encryptText, generateSyncKey, isSyncKey, randomId } from './cipher.js';
@@ -26,24 +28,24 @@ export const BACKUP_VERSION = 3;          // v3: meta.publisher (v2 se sigue ley
 const MAX_ATTEMPTS = 3;
 
 const HELP = 'Pide ayuda a quien te configuró la app.';
-// Mensajes para Mauricio (sin jerga). El detalle técnico va aparte (error.detail / lastErrorDetail).
+// Mensajes para Mauricio (español neutro, sin jerga). El detalle técnico va aparte (error.detail / lastErrorDetail).
 export const SYNC_MESSAGES = Object.freeze({
-  CONFIG: `El calendario no está configurado del todo. ${HELP}`,
-  NO_KEY: `Falta la clave para leer tus turnos guardados. No se ha enviado nada. ${HELP}`,
-  AUTH: `La conexión del calendario ha caducado. ${HELP}`,
+  CONFIG: `Falta terminar de configurar el calendario. ${HELP}`,
+  NO_KEY: `Falta la clave para leer tus turnos guardados en internet. No se envió nada. ${HELP}`,
+  AUTH: 'La conexión del calendario ya no funciona. Pide un enlace nuevo a quien te configuró la app.',
   FORBIDDEN: `No se pudo actualizar el calendario. ${HELP}`,
   NOT_FOUND: `No se pudo actualizar el calendario. ${HELP}`,
   INVALID: `No se pudo actualizar el calendario. ${HELP}`,
   UNKNOWN: `No se pudo actualizar el calendario. ${HELP}`,
-  RATE_LIMIT: 'El servicio del calendario está ocupado ahora mismo. Se volverá a intentar en un rato.',
-  SERVER: 'El servicio del calendario no responde ahora mismo. Se volverá a intentar más tarde.',
+  RATE_LIMIT: 'El calendario está ocupado en este momento. Se volverá a intentar en un rato.',
+  SERVER: 'El calendario no responde en este momento. Se volverá a intentar más tarde.',
   NETWORK: 'Sin conexión a internet. El calendario se actualizará cuando vuelva la conexión.',
-  CONFLICT: 'Otro dispositivo estaba guardando a la vez. Se volverá a intentar en un momento.',
-  DECRYPT: `No se pudieron leer tus turnos guardados en internet (la clave no coincide). No se ha enviado nada. ${HELP}`,
-  BAD_REMOTE: `Los turnos guardados en internet están dañados. No se ha enviado nada. ${HELP}`,
+  CONFLICT: 'Otro dispositivo estaba guardando al mismo tiempo. Se volverá a intentar en un momento.',
+  DECRYPT: `No se pudieron leer tus turnos guardados en internet (la clave no coincide). No se envió nada. ${HELP}`,
+  BAD_REMOTE: `Los turnos guardados en internet están dañados. No se envió nada. ${HELP}`,
   NEWER_REMOTE: 'Tus turnos guardados en internet son de una versión más nueva de la app. Actualiza la app: ciérrala del todo y vuelve a abrirla.',
-  NEWER_LOCAL: 'Esta copia de la app está desactualizada. Ciérrala del todo y vuelve a abrirla para actualizarla.',
-  EMPTY_LOCAL: 'Este teléfono no tiene turnos y en internet sí. No se ha enviado nada para no borrarlos.',
+  NEWER_LOCAL: 'Esta app está desactualizada. Ciérrala del todo y vuelve a abrirla para actualizarla.',
+  EMPTY_LOCAL: 'Aquí no hay turnos guardados, pero en internet sí. No se envió nada para no borrarlos.',
   NO_REMOTE: 'Todavía no hay ninguna copia guardada en internet.',
   RETRY: 'Preparando el calendario. Se volverá a intentar en un momento.',
 });
@@ -115,12 +117,15 @@ export function syncConfigPatch(cfg, current = null) {
   const branch = String(cfg.branch ?? '').trim();
   const patch = {
     owner: cfg.owner, repo: cfg.repo, branch, token: cfg.token, enabled: true,
-    baseRev: 0, lastPushAt: null, lastPushHash: null, lastIcsHash: null, lastPullAt: null,
+    baseRev: 0, lastPushAt: null, lastPushHash: null, lastPullAt: null,
     lastError: null, lastErrorCode: null, lastErrorDetail: null, lastErrorSince: null, unpublished: 0,
   };
   const same = Boolean(cur) && String(cur.owner || '').trim() === String(cfg.owner).trim()
     && String(cur.repo || '').trim() === String(cfg.repo).trim() && branchName(cur) === branch;
   if (!same) Object.assign(patch, { publisher: null, publisherSince: null });
+  // Con el mismo destino se recuerda qué calendario publicó este dispositivo (si backup.json
+  // desaparece, solo quien escribió el turnos.ics publicado lo vuelve a crear sin preguntar)
+  if (cur && !same) patch.lastIcsHash = null;
   if (cfg.key) {
     patch.key = cfg.key;
     if (isSyncKey(cur?.key) && cur.key !== cfg.key) patch.prevKey = cur.key;
@@ -130,6 +135,8 @@ export function syncConfigPatch(cfg, current = null) {
 
 // Sello mínimo: los lugares que sugiere un enlace pierden ante cualquier decisión real (con fecha)
 export const LINK_PLACES_AT = '1970-01-01T00:00:00.001Z';
+// Publisher desconocido: no hay backup.json y el turnos.ics publicado lo escribió otro dispositivo
+export const UNKNOWN_PUBLISHER = '?';
 
 // Crea lo que falte de la identidad (deviceId y clave) ANTES de la primera petición de red. Puro: para
 // usarlo dentro de store.set al configurar. Devuelve el mismo estado si no falta nada.
@@ -155,6 +162,8 @@ export function applySyncConfig(state, cfg, { now, getRandomValues, deviceId, ke
   if (typeof c.publishPlaces === 'boolean' && neverChose) {
     patch.sync.publishPlaces = c.publishPlaces;
     patch.placesUpdatedAt = LINK_PLACES_AT;
+    // Una sugerencia no cambia el sello del calendario (si no, la SEQUENCE saltaría al publicar)
+    patch.calendarUpdatedAt = st.calendarUpdatedAt ?? null;
   }
   return ensureSyncIdentity(updateSettings(state, patch, { now }), { getRandomValues, deviceId, key });
 }
@@ -177,7 +186,7 @@ function httpError(status, sync, data, headers, what = '') {
   const gh = data?.message ? ` (${String(data.message).slice(0, 200)})` : '';
   const at = what ? ` en ${what}` : '';
   if (status === 401) {
-    return syncError('AUTH', `GitHub 401${gh}${at}: el token no es válido o ha caducado. Crea un token fine-grained nuevo (Contents: Read and write solo en ${repo}) y envía un enlace de configuración nuevo.`, status);
+    return syncError('AUTH', `GitHub 401${gh}${at}: el token no es válido o caducó. Crea un token fine-grained nuevo (Contents: Read and write solo en ${repo}) y envía un enlace de configuración nuevo.`, status);
   }
   if (status === 403 || status === 429) {
     const remaining = headers?.get?.('x-ratelimit-remaining');
@@ -443,12 +452,12 @@ function publishHash(state) {
   return hashString(dataFingerprint(state) + '\u0000' + stableStringify(shared));
 }
 
-// Lo que un dispositivo que solo lee tiene distinto de lo publicado: días (códigos y nota),
+// Lo que un dispositivo que solo lee tiene distinto de lo publicado: días (códigos, nota y horario especial),
 // definiciones de códigos y ajustes del calendario (avisos, lugares)
 function unpublishedOf(a, b) {
   const differing = (map, content) => [...new Set([...Object.keys(a?.[map] || {}), ...Object.keys(b?.[map] || {})])]
     .filter((k) => content(a?.[map]?.[k]) !== content(b?.[map]?.[k])).sort();
-  const days = differing('days', (d) => (d ? stableStringify({ codes: d.codes, note: d.note ?? '' }) : null));
+  const days = differing('days', (d) => (d ? stableStringify({ codes: d.codes, note: d.note ?? '', times: d.times ?? null }) : null));
   const codes = differing('codes', (c) => (c ? stableStringify({ ...c, updatedAt: null }) : null));
   const cal = (s) => stableStringify([s?.settings?.reminders ?? null, s?.settings?.sync?.publishPlaces === true]);
   return { days, codes, settings: cal(a) !== cal(b) };
@@ -459,6 +468,18 @@ const keyTag = (key) => (key ? hashString(`turnos-key|${key}`).slice(0, 8) : '')
 
 const isoOr = (v, fallback) => (typeof v === 'string' && Number.isFinite(Date.parse(v)) ? v : fallback);
 const errorInfo = (err) => ({ code: err.code, message: err.message, detail: err.detail || '', status: err.status ?? 0, retry: err.retry });
+
+// Resultado vacío (nada leído ni escrito) con el formato de syncNow
+function newResult(state, now, patch = {}) {
+  const sync = state?.settings?.sync || {};
+  return {
+    ok: false, readOnly: false, publisher: null, tookOver: false, keyRestored: false,
+    state, merged: false, pulled: false, pushed: false, icsPushed: false, conflictCount: 0, pulledDays: [],
+    unpublishedDays: [], unpublishedCodes: [], unpublishedSettings: false,
+    rev: null, remote: null, sync: patch, error: null, startedAt: now.toISOString(),
+    target: { owner: String(sync.owner || '').trim(), repo: String(sync.repo || '').trim(), branch: branchName(sync), keyTag: keyTag(sync.key) },
+  };
+}
 
 // Sincroniza: lee el remoto, lo descifra y fusiona, y, SOLO si este dispositivo es el que publica,
 // publica backup.json (rev+1, si hay algo nuevo) y turnos.ics (si difiere del publicado).
@@ -479,14 +500,9 @@ export async function syncNow(state, fetchArg) {
   const { fetchImpl, now = new Date(), force = false, allowEmpty = false, pullOnly: onlyPull = false, takeover = false, getRandomValues } = o;
   const sync = { ...(state?.settings?.sync || {}) };
   const patch = {};
-  const res = {
-    ok: false, readOnly: false, publisher: null, tookOver: false, keyRestored: false,
-    state, merged: false, pulled: false, pushed: false, icsPushed: false, conflictCount: 0, pulledDays: [],
-    unpublishedDays: [], unpublishedCodes: [], unpublishedSettings: false,
-    rev: null, remote: null, sync: patch, error: null, startedAt: now.toISOString(),
-    target: { owner: String(sync.owner || '').trim(), repo: String(sync.repo || '').trim(), branch: branchName(sync), keyTag: keyTag(sync.key) },
-  };
+  const res = newResult(state, now, patch);
   let fresh = false; // deviceId o clave creados en esta llamada
+  let claimSent = false; // se envió un backup.json que cambia quién publica y aún no hay respuesta
   try {
     checkConfig(sync);
     // Datos de una versión más nueva: publicarlos desde aquí los recortaría
@@ -527,7 +543,13 @@ export async function syncNow(state, fetchArg) {
       }
       // 2) ¿Quién publica? Solo un dispositivo escribe; los demás solo leen
       // Sin copia (borrada): si otro publicaba, sigue publicando él (aquí solo se lee)
-      const pub = remote?.publisher ?? remembered;
+      let pub = remote?.publisher ?? remembered;
+      // Sin copia pero con un turnos.ics que este dispositivo no escribió (otro publicó después, o este
+      // nunca publicó): no se adueña solo; hace falta «Usar este dispositivo»
+      if (!remote && !pub && !takeover && !ctx.missing) {
+        const f = await getFile(ctx, ICS_FILE);
+        if (f && hashString(await fileText(ctx, f)) !== sync.lastIcsHash) pub = { deviceId: UNKNOWN_PUBLISHER, since: null };
+      }
       const mine = !pub || pub.deviceId === sync.deviceId;
       res.publisher = pub ? { ...pub } : null;
       res.readOnly = !mine;
@@ -554,7 +576,10 @@ export async function syncNow(state, fetchArg) {
       const oldFormat = Boolean(remote && !remote.legacy && Number(remote.doc.v) < BACKUP_VERSION);
       const needBackup = force || claim || oldFormat || !remote || remote.legacy || localHash !== remoteHash;
       const remoteDays = remoteState ? daysIn(remoteState) : 0;
-      if (needBackup && daysIn(merged) === 0 && remoteDays > 0 && !allowEmpty) {
+      // 0 días encima de una copia con días: solo si cada día de la copia lo borró aquí alguien a
+      // propósito (tombstone más nueva, que ganó al fusionar); si no, es una copia vacía
+      const deliberate = remoteDays > 0 && Object.keys(remoteState.days).every((k) => merged.tombstones?.[k]);
+      if (needBackup && daysIn(merged) === 0 && remoteDays > 0 && !allowEmpty && !deliberate) {
         throw syncError('EMPTY_LOCAL', `Publicar dejaría 0 días encima de ${remoteDays} días (rev ${remote.rev}).`);
       }
       // Sin copia pero con calendario publicado: una copia vacía no lo vacía
@@ -571,7 +596,9 @@ export async function syncNow(state, fetchArg) {
         const doc = await encryptBackup(merged, {
           rev, now, deviceId: sync.deviceId, key: sync.key, publisher: sync.deviceId, publisherSince: since, getRandomValues,
         });
+        claimSent = claim;
         const put = await putContents(ctx, BACKUP_FILE, JSON.stringify(doc), `Turnos: copia cifrada (rev ${rev})`, remote && !remote.legacy ? remote.sha : null);
+        claimSent = false;
         if (put.conflict) {
           // Otro escribió entre medias: volver a leer y fusionar (si ya no publicamos, solo se lee)
           if (attempt >= MAX_ATTEMPTS) throw syncError('CONFLICT', `${BACKUP_FILE} cambió ${attempt} veces mientras se guardaba.`, 409);
@@ -607,8 +634,9 @@ export async function syncNow(state, fetchArg) {
   } catch (e) {
     const err = e instanceof SyncError ? e : syncError('UNKNOWN', String(e?.message || e));
     res.error = errorInfo(err);
-    // Conflicto: otro escribió entre medias; quién publica lo dirá la próxima lectura (no se presupone)
-    if (err.code === 'CONFLICT') for (const k of ['publisher', 'publisherSince', 'unpublished']) delete patch[k];
+    // Conflicto (otro escribió entre medias) o una toma cuya respuesta se perdió (la escritura pudo
+    // llegar): quién publica lo dirá la próxima lectura (no se presupone)
+    if (err.code === 'CONFLICT' || claimSent) for (const k of ['publisher', 'publisherSince', 'unpublished']) delete patch[k];
     // RETRY no es un fallo (solo hay que guardar la identidad y repetir): no se anota como error
     if (err.code !== 'RETRY') {
       Object.assign(patch, {
@@ -665,14 +693,18 @@ export function applySyncResult(current, res, { now } = {}) {
   const started = Date.parse(res.startedAt), last = Date.parse(s.lastSyncStartedAt);
   // (una marca en el futuro, de un reloj que se adelantó, no cuenta: si no, todo parecería viejo)
   const nowTs = (now instanceof Date ? now : new Date()).getTime();
-  const stale = Number.isFinite(started) && Number.isFinite(last) && started < last && last <= nowTs + 60000;
+  const older = Number.isFinite(started) && Number.isFinite(last) && started < last && last <= nowTs + 60000;
+  // Empezó antes, pero publicó una rev más nueva que la guardada (p. ej. «Usar este dispositivo»
+  // mientras otra pestaña leía la copia anterior): lo suyo es lo último, no es viejo
+  const wrote = Boolean(res.pushed || res.tookOver) && Number(res.rev) > (Number(s.baseRev) || 0);
+  const stale = older && !wrote;
   if (p.deviceId && s.deviceId) delete p.deviceId;
   if (p.key && s.key && (stale || !sameKey || !res.keyRestored)) delete p.key;
   // Sincronización que empezó con otra clave (otra pestaña u otro enlace ya guardó una): sus errores
   // y su prevKey no valen
   if (!sameKey) for (const k of ['lastError', 'lastErrorCode', 'lastErrorDetail', 'lastErrorSince', 'prevKey']) delete p[k];
   if (stale) for (const k of STALE_FIELDS) delete p[k];
-  else if (Number.isFinite(started)) p.lastSyncStartedAt = res.startedAt;
+  else if (Number.isFinite(started) && !older) p.lastSyncStartedAt = res.startedAt; // nunca hacia atrás
   return updateSettings(next, { sync: p }, { now });
 }
 
@@ -708,26 +740,48 @@ export async function trySetupConfig(state, cfg, options) {
 }
 
 // Cola única para TODAS las llamadas de sincronización de la UI: una cada vez, y cada resultado se
-// aplica al store en cuanto llega (applySyncResult). Un RETRY (identidad recién creada) se repite solo.
-// store: { get, set } (createStore). options: { fetchImpl, clock: () => Date }
+// aplica al store en cuanto llega (applySyncResult). Un RETRY (identidad recién creada) se repite solo,
+// salvo que la identidad no se haya podido guardar (almacenamiento lleno): mientras no se guarde, la
+// cola no escribe en GitHub (una copia cifrada con una clave que solo está en memoria se perdería con
+// ella) y devuelve RETRY sin conectarse. Leer (pull) sí se puede.
+// store: { get, set, saveOk? } (createStore). options: { fetchImpl, clock: () => Date }
 // → { sync(opts), pull(opts), becomePublisher(opts), setup(cfg, opts), idle() }  (promesas del resultado)
 export function createSyncQueue(store, { fetchImpl, clock = () => new Date() } = {}) {
   let tail = Promise.resolve();
   let last = null;    // último trabajo encolado
   let waiting = null; // syncNow normal aún sin empezar: si es el último encolado, se reutiliza
+  let unsaved = false; // identidad (deviceId/clave) en memoria que no se pudo guardar
   const enqueue = (job) => {
     const p = tail.then(job, job);
     tail = p.catch(() => {});
     last = p;
     return p;
   };
-  const call = (fn, extra = {}) => async () => {
+  const failed = () => store.saveOk?.() === false;
+  const identityOf = (st) => `${st?.settings?.sync?.deviceId || ''}|${st?.settings?.sync?.key || ''}`;
+  // store.set + ¿quedó sin guardar una identidad nueva?
+  const save = (fn) => {
+    const before = identityOf(store.get());
+    store.set(fn);
+    if (!failed()) unsaved = false;
+    else if (identityOf(store.get()) !== before) unsaved = true;
+  };
+  // ¿Se puede escribir en GitHub? Con la identidad sin guardar, se intenta guardar otra vez
+  const identitySaved = () => {
+    if (unsaved && failed()) store.set((st) => st);
+    if (unsaved && !failed()) unsaved = false;
+    return !unsaved;
+  };
+  const call = (fn, extra = {}, writes = true) => async () => {
     let res;
     for (let i = 0; i < 3; i++) {
       const now = clock();
+      if (writes && !identitySaved()) {
+        return res ?? { ...newResult(store.get(), now), error: errorInfo(syncError('RETRY', 'No se pudo guardar el deviceId o la clave en este dispositivo: no se publica hasta poder guardarlos.')) };
+      }
       res = await fn(store.get(), { ...extra, fetchImpl: extra.fetchImpl ?? fetchImpl, now });
-      store.set((cur) => applySyncResult(cur, res, { now }));
-      if (res.error?.code !== 'RETRY') break;
+      save((cur) => applySyncResult(cur, res, { now }));
+      if (res.error?.code !== 'RETRY' || unsaved) break;
     }
     return res;
   };
@@ -739,11 +793,11 @@ export function createSyncQueue(store, { fetchImpl, clock = () => new Date() } =
       if (!extra) waiting = p;
       return p;
     },
-    pull: (extra) => enqueue(call(pullOnly, extra)),
+    pull: (extra) => enqueue(call(pullOnly, extra, false)),
     becomePublisher: (extra) => enqueue(call(becomePublisher, extra)),
     setup: (cfg, extra = {}) => enqueue(async () => {
       const t = await trySetupConfig(store.get(), cfg, { ...extra, fetchImpl: extra.fetchImpl ?? fetchImpl, now: clock() });
-      if (t.ok) store.set((s) => t.apply(s));
+      if (t.ok) save((s) => t.apply(s));
       return t;
     }),
     idle: () => tail,

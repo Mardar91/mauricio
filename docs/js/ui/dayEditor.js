@@ -1,14 +1,21 @@
-// Hoja inferior "Editar día": insignias del día, paleta de códigos, nota e historial.
+// Hoja inferior "Editar día": insignias del día, horario de ese día (también «solo este día»),
+// paleta de códigos, nota e historial.
+import * as core from '../core/index.js';
 import {
-  clearDay, dayMinutes, formatHours, formatLong, formatShort, getCode, hasTime, holidayName, isReadOnlyDevice, isoWeek,
-  normalizeDayCodes, setDay,
+  clearDay, dayMinutes, formatHours, formatLong, formatShort, getCode, holidayName, isReadOnlyDevice, isoWeek,
+  normalizeDayCodes, parseHHMM, setDay,
 } from '../core/index.js';
 import { badge, badgeFromDef, displayName, groupCodes, timeRange } from './badge.js';
-import { cap, dateTime, h, setChildren } from './dom.js';
+import { append, cap, dateTime, h, nextId, setChildren } from './dom.js';
 import { icon } from './icons.js';
 import { confirmDialog, openSheet } from './sheet.js';
+import { saveFailedToast, savedToast } from './banners.js';
+import {
+  BREAK_OPTIONS, dayTimes, dayTimesSupported, nominalOf, normalTimes, overnight, rangeText, sameTimes, workTextOf,
+} from './times.js';
 
 const FREE = ['off', 'wish', 'vacation', 'sick'];
+const TIMELESS = ['place', 'off', 'wish', 'vacation', 'sick'];
 // Siempre a mano en la paleta (el resto, si no se usa, en «Más códigos»)
 const CORE = ['F1', 'S1', 'N1', 'Z1', '-', 'W-', 'U', 'TS'];
 
@@ -34,6 +41,15 @@ function codesText(list) {
 
 const sameList = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
 
+// ¿Se le puede poner un horario solo para un día? (turnos, reuniones y otros; no lugares ni libres)
+function allowsSpecial(def) {
+  if (typeof core.allowsSpecialTimes === 'function') return core.allowsSpecialTimes(def);
+  return !TIMELESS.includes(def.kind);
+}
+
+// ¿Cuenta horas de trabajo con este horario? (para mostrar «X h de trabajo» y la pausa)
+const countsWork = (def) => def.kind === 'shift' || def.countsHours === true;
+
 // Grupos de la paleta: Turnos, Libre y otros, Lugares. Los poco usados quedan en «Más códigos».
 export function paletteGroups(state, selected = [], showAll = false) {
   const used = new Set(Object.values(state.days || {}).flatMap((d) => (Array.isArray(d?.codes) ? d.codes : [])));
@@ -57,28 +73,187 @@ export function openDayEditor(ctx, key, opts = {}) {
   const initial = store.get().days[key];
   const initialCodes = draftMode ? [...(opts.draft.codes || [])] : [...(initial?.codes || [])];
   const initialNote = draftMode ? '' : (initial?.note || '');
+  // Horario especial de este día por código ({ start, end, breakMin }); solo fuera de la revisión
+  const special = !draftMode && dayTimesSupported();
+  const initialTimes = {};
+  if (special) {
+    // Se parte del horario efectivo (si el guardado no trae pausa, vale la del código, como en el núcleo)
+    for (const c of Object.keys(initial?.times || {})) {
+      if (!initialCodes.includes(c)) continue;
+      const e = dayTimes(store.get(), key, c);
+      if (e.special && e.start && e.end) initialTimes[c] = { start: e.start, end: e.end, breakMin: e.breakMin };
+    }
+  }
   let codes = [...initialCodes];
+  let times = Object.fromEntries(Object.entries(initialTimes).map(([c, t]) => [c, { ...t }]));
+  const editing = new Set();     // códigos con el panel «solo este día» abierto
+  const breakTouched = new Set(); // pausa elegida a mano (si no, se ajusta sola)
   let showAll = false;
   const holiday = holidayName(key);
 
   const selected = h('div', { class: 'de-selected' });
   const palette = h('div', { class: 'de-palette' });
+  const err = h('p', { class: 'form-error', role: 'alert', hidden: true });
   const noteInput = h('textarea', {
     class: 'input textarea', rows: '2', placeholder: 'Ej.: llevar llaves', maxlength: '300',
     'aria-label': 'Nota del día', value: initialNote,
   });
 
+  const showError = (msg) => { err.textContent = msg || ''; err.hidden = !msg; if (msg) err.scrollIntoView?.({ block: 'nearest' }); };
+
+  // Horarios especiales listos para guardar: solo los de códigos del día y distintos del normal.
+  // → objeto, o { error } si falta una hora
+  function cleanTimes() {
+    const state = store.get();
+    const out = {};
+    for (const c of codes) {
+      const t = times[c];
+      if (!t) continue;
+      if (parseHHMM(t.start) === null || parseHHMM(t.end) === null) {
+        return { error: `Pon la hora de inicio y la de fin de ${c}, o toca «Volver al horario normal».` };
+      }
+      if (t.start === t.end) return { error: `La hora de fin de ${c} no puede ser la misma que la de inicio.` };
+      if (sameTimes(t, normalTimes(getCode(state, c)))) continue;
+      out[c] = { start: t.start, end: t.end, breakMin: Number(t.breakMin) || 0 };
+    }
+    return out;
+  }
+
   function tempState() {
     const s = store.get();
-    return { ...s, days: { ...s.days, [key]: { codes, note: '', source: 'manual', updatedAt: null } } };
+    const entry = { codes, note: '', source: 'manual', updatedAt: null };
+    if (special) {
+      const t = cleanTimes();
+      if (!t.error && Object.keys(t).length) entry.times = t;
+    } else if (s.days[key]?.times) entry.times = s.days[key].times;
+    return { ...s, days: { ...s.days, [key]: entry } };
   }
 
   const isDirty = () => !sameList(normalizeDayCodes(store.get(), codes), normalizeDayCodes(store.get(), initialCodes))
-    || (!draftMode && noteInput.value.trim() !== initialNote.trim());
+    || (!draftMode && noteInput.value.trim() !== initialNote.trim())
+    || (special && JSON.stringify(cleanTimes()) !== JSON.stringify(initialTimes));
+
+  // Horario que se ve ahora para un código: el que se está escribiendo, o el de ese día
+  function shownTimes(c) {
+    if (times[c]) return { ...times[c], special: !sameTimes(times[c], normalTimes(getCode(store.get(), c))) };
+    if (special) return normalTimes(getCode(store.get(), c));
+    return dayTimes(store.get(), key, c);
+  }
+
+  // Pausa por defecto de un horario especial: la del código, salvo días de 6 h o menos con la pausa
+  // estándar (30 min), que no llevan pausa (como en el core)
+  function autoBreak(def, t) {
+    const nom = nominalOf(t);
+    const base = Number(def.breakMin) || 0;
+    return nom !== null && nom <= 360 && base === 30 && !sameTimes({ ...t, breakMin: base }, normalTimes(def)) ? 0 : base;
+  }
+
+  const summaryEl = h('p', { class: 'de-summary', 'aria-live': 'polite' });
+  function updateSummary(cards) {
+    const m = codes.length ? dayMinutes(tempState(), key) : null;
+    const n = cards ?? selected.querySelectorAll('.de-time').length;
+    const show = codes.length && (n !== 1 || (m && m.credited));
+    summaryEl.hidden = !show;
+    if (show) {
+      setChildren(summaryEl, n > 1 ? 'Total del día: ' : '', h('b', {}, m && m.total ? formatHours(m.total) : '0 h'),
+        m && m.credited ? ' acreditadas' : ' de trabajo');
+    }
+  }
+
+  // Tarjeta del horario de un código ese día
+  function timeCard(c) {
+    const state = store.get();
+    const def = getCode(state, c);
+    const normal = normalTimes(def);
+    const canEdit = special && allowsSpecial(def);
+    const open = canEdit && (editing.has(c) || Boolean(times[c]));
+    const fid = nextId('dt');
+
+    const timeEl = h('span', { class: 'de-time-range' });
+    const pill = h('span', { class: 'pill pill-special', hidden: true }, 'horario especial');
+    const workEl = h('span', { class: 'de-time-work' });
+    const nightEl = h('p', { class: 'hint de-time-night', hidden: true }, '🌙 Termina al día siguiente.');
+    const card = h('div', { class: 'de-time', dataset: { code: c }, 'data-testid': 'day-time' });
+
+    const update = () => {
+      const t = shownTimes(c);
+      timeEl.textContent = rangeText(t) || 'Sin hora';
+      card.classList.toggle('is-special', Boolean(t.special));
+      pill.hidden = !t.special;
+      const work = countsWork(def) ? workTextOf(t) : '';
+      workEl.textContent = work;
+      workEl.hidden = !work;
+      nightEl.hidden = !(open && overnight(t));
+      updateSummary();
+    };
+
+    const head = h('div', { class: 'de-time-head' },
+      badge(state, c, { size: 'sm', title: false }),
+      h('span', { class: 'de-time-main' },
+        h('span', { class: 'de-time-line' }, timeEl, pill),
+        workEl));
+
+    let panel = null;
+    if (open) {
+      const cur = times[c] || { start: normal.start || '', end: normal.end || '', breakMin: normal.breakMin };
+      const startIn = h('input', { class: 'input input-time', type: 'time', id: `${fid}-s`, value: cur.start || '', 'data-testid': 'day-time-start' });
+      const endIn = h('input', { class: 'input input-time', type: 'time', id: `${fid}-e`, value: cur.end || '', 'data-testid': 'day-time-end' });
+      const breaks = [...new Set([...BREAK_OPTIONS, Number(cur.breakMin) || 0])].sort((a, b) => a - b);
+      const breakSel = h('select', { class: 'input select', id: `${fid}-b`, value: String(Number(cur.breakMin) || 0), 'data-testid': 'day-time-break' },
+        breaks.map((m) => h('option', { value: String(m) }, m ? `${m} min` : 'Sin pausa')));
+      const read = () => {
+        const t = { start: startIn.value, end: endIn.value, breakMin: Number(breakSel.value) || 0 };
+        if (!breakTouched.has(c) && parseHHMM(t.start) !== null && parseHHMM(t.end) !== null) {
+          t.breakMin = autoBreak(def, t);
+          if (!breaks.includes(t.breakMin)) t.breakMin = Number(breakSel.value) || 0;
+          breakSel.value = String(t.breakMin);
+        }
+        times[c] = t;
+        showError('');
+        update();
+      };
+      startIn.addEventListener('input', read);
+      endIn.addEventListener('input', read);
+      breakSel.addEventListener('change', () => { breakTouched.add(c); read(); });
+      const field = (label, input) => h('div', { class: 'field' }, h('label', { class: 'label', for: input.id }, label), input);
+      panel = h('div', { class: 'de-time-panel' },
+        h('div', { class: 'field-row field-row-2' }, field('Empieza', startIn), field('Termina', endIn)),
+        countsWork(def) ? field('Pausa sin pagar', breakSel) : null,
+        nightEl,
+        h('p', { class: 'hint' }, normal.start
+          ? `Solo para este día. Los demás días, ${c} sigue ${rangeText(normal)}.`
+          : 'Solo para este día.'),
+        h('button', {
+          class: 'link-btn de-time-reset', type: 'button', 'data-testid': 'day-time-reset',
+          on: { click: () => { delete times[c]; editing.delete(c); breakTouched.delete(c); showError(''); refresh(); } },
+        }, icon('refresh'), normal.start ? 'Volver al horario normal' : 'Quitar la hora de este día'));
+    }
+
+    const actions = [];
+    if (canEdit && !open) {
+      actions.push(h('button', {
+        class: 'btn btn-tinted btn-sm de-time-edit', type: 'button', 'data-testid': 'day-time-edit',
+        on: { click: () => {
+          editing.add(c);
+          refresh();
+          selected.querySelector(`.de-time[data-code="${CSS.escape(c)}"] input[type="time"]`)?.focus({ preventScroll: true });
+        } },
+      }, icon('clock'), normal.start ? 'Cambiar la hora solo este día' : 'Poner la hora solo este día'));
+    }
+    // Lo de todos los días (con aviso en el editor de códigos)
+    if (['shift', 'event'].includes(def.kind) && def.confirmed !== false) {
+      actions.push(h('button', {
+        class: 'link-btn de-edit-time', type: 'button', 'data-testid': 'code-all-days',
+        on: { click: () => ctx.openCode(c, { onSaved: refresh, fromDay: key }) },
+      }, `Cambiar el horario de ${c} en todos los días`));
+    }
+    append(card, [head, panel, actions.length ? h('div', { class: 'de-time-actions' }, actions) : null]);
+    update();
+    return card;
+  }
 
   function renderSelected() {
     const state = store.get();
-    const m = codes.length ? dayMinutes(tempState(), key) : null;
     const chips = codes.map((c) => {
       const def = getCode(state, c);
       return h('span', { class: 'chip-code' },
@@ -90,23 +265,21 @@ export function openDayEditor(ctx, key, opts = {}) {
         }, h('span', { class: 'chip-remove-disc' }, icon('close'))));
     });
     const defs = codes.map((c) => getCode(state, c));
-    const work = defs.filter((d) => hasTime(d) && (d.kind === 'shift' || d.countsHours));
     const warn = defs.filter((d) => d.confirmed === false && ['shift', 'event', 'other'].includes(d.kind));
-    const editable = defs.filter((d) => ['shift', 'event'].includes(d.kind) && d.confirmed !== false);
+    // Tarjetas: códigos con hora (o a los que se les puede poner una solo este día)
+    const timed = defs.filter((d) => !TIMELESS.includes(d.kind) && (parseHHMM(d.start) !== null || (special && allowsSpecial(d)) || times[d.code]));
+    const cards = timed.map((d) => timeCard(d.code));
     setChildren(selected,
       codes.length ? h('div', { class: 'chip-row' }, chips)
         : h('p', { class: 'de-empty' }, draftMode ? 'Nada todavía. Elige abajo 👇' : 'Nada planificado. Elige un turno abajo 👇'),
-      codes.length ? h('p', { class: 'de-summary' },
-        work.length ? `${work.map((d) => timeRange(d)).join(' · ')} · ` : '',
-        h('b', {}, m && m.total ? formatHours(m.total) : '0 h'),
-        m && m.credited ? ' acreditadas' : ' de trabajo') : null,
-      ...editable.map((d) => h('button', {
-        class: 'link-btn de-edit-time', type: 'button', on: { click: () => ctx.openCode(d.code, { onSaved: refresh }) },
-      }, icon('clock'), `Cambiar el horario de ${d.code}`)),
+      cards.length ? h('div', { class: 'de-times' }, cards) : null,
+      summaryEl,
       ...warn.map((d) => h('div', { class: 'inline-warn' },
         h('span', {}, `⚠️ El horario de ${d.code} ${d.kind === 'other' ? 'no se conoce' : `es supuesto (${timeRange(d) || 'sin horario'})`}.`),
         h('button', { class: 'link-btn', type: 'button', on: { click: () => ctx.openCode(d.code, { onSaved: refresh }) } }, 'Confirmar'))),
+      err,
     );
+    updateSummary(cards.length);
   }
 
   function renderPalette() {
@@ -117,7 +290,7 @@ export function openDayEditor(ctx, key, opts = {}) {
       h('div', { class: ['tile-grid', `tiles-${g.id}`] }, g.codes.map((def) => {
         const on = codes.includes(def.code);
         const isPlace = def.kind === 'place';
-        const sub = def.kind === 'shift' || (def.kind === 'event' && hasTime(def)) ? (timeRange(def) || 'sin horario') : '';
+        const sub = def.kind === 'shift' || (def.kind === 'event' && def.start && def.end) ? (timeRange(def) || 'sin horario') : '';
         const name = isPlace ? (def.place || '') : def.name;
         return h('button', {
           class: ['tile', on && 'on', def.confirmed === false && 'unconfirmed', !name && !sub && 'tile-only', isPlace && 'tile-place'], type: 'button',
@@ -155,6 +328,9 @@ export function openDayEditor(ctx, key, opts = {}) {
   }
 
   function refresh() {
+    // Un código que se quita pierde su horario de este día
+    for (const c of Object.keys(times)) if (!codes.includes(c)) delete times[c];
+    for (const c of [...editing]) if (!codes.includes(c)) editing.delete(c);
     // Conserva el foco en la ficha pulsada (VoiceOver / teclado)
     const code = palette.contains(document.activeElement) ? document.activeElement.dataset.code : null;
     renderSelected();
@@ -182,16 +358,20 @@ export function openDayEditor(ctx, key, opts = {}) {
     }
     const before = store.get().days[key] ? { ...store.get().days[key] } : null;
     const note = noteInput.value.trim();
+    const t = special ? cleanTimes() : null;
+    if (t?.error) { showError(t.error); return; }
     if (!before && !codes.length && !note) { sheet.close(); return; }
-    const next = setDay(store.get(), key, codes, { note, source: 'manual' });
+    let next;
+    try {
+      next = setDay(store.get(), key, codes, { note, source: 'manual', ...(special ? { times: t } : {}) });
+    } catch (e) {
+      showError(e?.message || 'No se pudo guardar este día.');
+      return;
+    }
     if (next === store.get()) { sheet.close(); return; }
     store.set(() => next);
     sheet.close();
-    if (store.saveOk?.() === false) {
-      ctx.toast('No se pudo guardar en este teléfono. Mira el aviso rojo de arriba.', { type: 'error', duration: 8000 });
-      return;
-    }
-    ctx.toast(`Guardado: ${formatShort(key)}`, { type: 'ok', action: { label: 'Deshacer', run: () => restore(before) } });
+    savedToast(ctx, `Guardado: ${formatShort(key)}`, { action: { label: 'Deshacer', run: () => restore(before) } });
   }
 
   function next() {
@@ -200,7 +380,10 @@ export function openDayEditor(ctx, key, opts = {}) {
   }
 
   function restore(before) {
-    store.set((s) => (before ? setDay(s, key, before.codes, { note: before.note, source: before.source }) : clearDay(s, key)));
+    store.set((s) => (before
+      ? setDay(s, key, before.codes, { note: before.note, source: before.source, ...(special ? { times: before.times || {} } : {}) })
+      : clearDay(s, key)));
+    if (store.saveOk?.() === false) saveFailedToast(ctx);
   }
 
   async function remove() {
@@ -211,7 +394,7 @@ export function openDayEditor(ctx, key, opts = {}) {
     const before = { ...store.get().days[key] };
     store.set((s) => clearDay(s, key));
     sheet.close();
-    ctx.toast('Día borrado', { action: { label: 'Deshacer', run: () => restore(before) } });
+    savedToast(ctx, 'Día borrado', { action: { label: 'Deshacer', run: () => restore(before) } });
   }
 
   let footer;

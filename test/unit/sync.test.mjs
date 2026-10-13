@@ -41,7 +41,7 @@ test('cabeceras de la API de GitHub', async () => {
 test('testConnection: mensajes humanos (sin pedir tokens) y detalle técnico aparte', async () => {
   const withStatus = (status, headers) => mockFetch(() => ({ status, body: { message: 'x' }, headers }));
   const cases = [
-    [withStatus(401), 'AUTH', /caducado/, /token/],
+    [withStatus(401), 'AUTH', /ya no funciona/, /token/],
     [withStatus(403), 'FORBIDDEN', /No se pudo actualizar el calendario/, /Contents: Read and write/],
     [withStatus(403, { 'x-ratelimit-remaining': '0' }), 'RATE_LIMIT', /ocupado/, /límite/],
     [withStatus(404), 'NOT_FOUND', /Pide ayuda/, /no existe Mardar91\/mauricio-datos/],
@@ -259,7 +259,7 @@ test('clave equivocada o sin clave → no se publica nada y el error es claro', 
   assert.equal(res.ok, false);
   assert.equal(res.error.code, 'DECRYPT');
   assert.match(res.error.message, /clave no coincide/);
-  assert.match(res.error.message, /No se ha enviado nada/);
+  assert.match(res.error.message, /No se envió nada/);
   assert.equal(res.error.retry, false);
   assert.equal(res.sync.lastErrorCode, 'DECRYPT');
   assert.equal(res.sync.lastError, res.error.message);
@@ -276,19 +276,29 @@ test('clave equivocada o sin clave → no se publica nada y el error es claro', 
   assert.equal(tampered.error.code, 'DECRYPT');
 });
 
-test('nunca publica 0 días encima de una copia con días (salvo allowEmpty)', async () => {
+test('nunca publica 0 días encima de una copia con días (salvo allowEmpty o un borrado a propósito)', async () => {
   const gh = fakeGitHub();
   let { state: s } = await syncAndApply(device({ '2026-10-12': ['F1'], '2026-10-13': ['S1'] }), gh);
-  s = clearDay(clearDay(s, '2026-10-12', { now: at(DAY) }), '2026-10-13', { now: at(DAY) });
+  // Días que desaparecen sin un borrado más nuevo (aquí: tombstones viejísimas que se podan al fusionar)
+  const old = '2026-01-01T00:00:00.000Z';
+  const lost = { ...s, days: {}, tombstones: { '2026-10-12': old, '2026-10-13': old } };
+  const remote = await remoteData(gh);
+  for (const d of Object.values(remote.days)) d.updatedAt = '2025-12-01T00:00:00.000Z';
+  const doc = backupDoc(gh);
+  gh.write('backup.json', JSON.stringify(await encryptBackup(remote, { rev: doc.meta.rev, now: T0, deviceId: 'movil1', key: KEY, publisher: 'movil1', publisherSince: doc.meta.publisherSince })));
   const n = gh.fetch.calls.length;
-  const res = await run(s, gh, { now: at(DAY) });
-  assert.equal(res.error.code, 'EMPTY_LOCAL');
+  const res = await run(lost, gh, { now: at(DAY) });
+  assert.equal(res.error?.code, 'EMPTY_LOCAL');
   assert.equal(puts(gh, n).length, 0);
-  const ok = await run(s, gh, { now: at(DAY), allowEmpty: true });
+  // Borrar a propósito los últimos días en el que publica: el borrado sí se publica (y el calendario se vacía)
+  const del = clearDay(clearDay(s, '2026-10-12', { now: at(DAY) }), '2026-10-13', { now: at(DAY) });
+  const ok = await run(del, gh, { now: at(DAY) });
+  assert.equal(ok.ok, true, JSON.stringify(ok.error));
   assert.equal(ok.pushed, true);
   const data = await remoteData(gh);
   assert.deepEqual(data.days, {});
   assert.deepEqual(Object.keys(data.tombstones).sort(), ['2026-10-12', '2026-10-13']);
+  assert.equal((gh.text('turnos.ics').match(/BEGIN:VEVENT/g) || []).length, 0);
 });
 
 test('un borrado (tombstone) llega al otro dispositivo', async () => {

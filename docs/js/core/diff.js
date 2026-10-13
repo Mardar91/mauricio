@@ -77,7 +77,7 @@ export function mergeScans(results) {
       excluded.push(i);
       warnings.push(`La foto ${i + 1} es de ${label(r.year, r.month)}: escanéala aparte.`);
     } else {
-      if (tm && !r.month && (r.days || []).length) warnings.push(`En la foto ${i + 1} no se vio el mes; se ha supuesto ${label(ty, tm)}.`);
+      if (tm && !r.month && (r.days || []).length) warnings.push(`En la foto ${i + 1} no se vio el mes; se supuso ${label(ty, tm)}.`);
       used.push(r);
     }
   });

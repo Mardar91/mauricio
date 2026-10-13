@@ -64,6 +64,18 @@ const HARD_RESULT = {
   warnings: ['No pude leer el mes con seguridad: elígelo a mano.', 'No pude leer bien el día 5: revísalo a mano.'],
 };
 
+// Estado de demostración con un «horario especial» hoy (S1 de 15:00 a 20:00) y el 29 (S1 14:00–20:00)
+function specialState(extra = {}) {
+  let s = demoState(extra);
+  s = core.setDay(s, '2026-10-13', ['S1', 'S51'], { source: 'manual', times: { S1: { start: '15:00', end: '20:00', breakMin: 0 } }, now: new Date('2026-10-12T20:00:00+02:00') });
+  s = core.setDay(s, '2026-10-29', ['S1', 'S54'], { source: 'manual', times: { S1: { start: '14:00', end: '20:00', breakMin: 0 } }, now: new Date('2026-10-12T20:00:00+02:00') });
+  return s;
+}
+const SUBSCRIBED = `webcal://raw.githubusercontent.com/${OWNER}/${REPO}/HEAD/turnos.ics`;
+async function markSubscribed(page) {
+  await page.addInitScript((url) => localStorage.setItem('turnos-mauricio:subscribed', JSON.stringify({ url, at: '2026-10-02T18:00:00.000Z' })), SUBSCRIBED);
+}
+
 const scenarios = [];
 const scenario = (name, fn, opts = {}) => scenarios.push({ name, fn, opts });
 
@@ -196,6 +208,34 @@ scenario('editar-dia', async (ctx, theme) => {
   return page;
 });
 
+scenario('especial', async (ctx, theme) => {
+  const page = await open(ctx, { state: specialState({ sync: true }) });
+  await snap(page, '25-hoy-horario-especial', { theme });
+  await tab(page, 'calendario');
+  await snap(page, '25-calendario-horario-especial', { theme });
+  await page.click('.day-row[data-key="2026-10-13"]');
+  await sheet(page);
+  await snap(page, '25-editar-dia-especial', { theme });
+  await closeSheet(page);
+  await page.click('.day-row[data-key="2026-10-14"]');
+  await sheet(page);
+  await page.click('.tile[data-code="S1"]');
+  await snap(page, '25-editar-dia-normal', { theme });
+  await page.click('[data-testid="day-time-edit"]');
+  await page.fill('[data-testid="day-time-start"]', '16:00');
+  await page.fill('[data-testid="day-time-end"]', '21:30');
+  await page.waitForTimeout(200);
+  await snap(page, '25-editar-dia-solo-este-dia', { theme });
+  await page.click('[data-testid="code-all-days"]');
+  await sheet(page);
+  await snap(page, '25-codigo-todos-los-dias', { theme });
+  await page.fill('.sheet-code input[type="time"] >> nth=0', '14:00');
+  await page.click('[data-testid="code-save"]');
+  await page.waitForSelector('.dialog-wrap.open');
+  await snap(page, '25-codigo-confirmar-todos', { theme });
+  return page;
+});
+
 scenario('codigos', async (ctx, theme) => {
   const page = await open(ctx, { state: demoState() });
   await tab(page, 'ajustes');
@@ -206,10 +246,12 @@ scenario('codigos', async (ctx, theme) => {
   await page.evaluate(() => { const b = document.querySelector('.sheet-body'); b.scrollTop = b.scrollHeight; });
   await snap(page, '09-codigo-s1-mas-opciones', { theme });
   await closeSheet(page);
+  await page.click('[data-testid="places"] > summary');
   await page.click('.code-row[data-code="S51"]');
   await sheet(page);
   await snap(page, '09-codigo-lugar', { theme });
   await closeSheet(page);
+  await page.click('[data-testid="codes-all"]');
   await page.click('.code-row[data-code="F6"]');
   await sheet(page);
   await snap(page, '19-codigo-sin-confirmar', { theme });
@@ -265,7 +307,7 @@ scenario('ocr-fallo', async (ctx, theme) => {
 });
 
 scenario('revision', async (ctx, theme) => {
-  const page = await open(ctx, { state: demoState() });
+  const page = await open(ctx, { state: specialState() });
   await page.evaluate((r) => window.__turnosTest.injectScanResult(r), FAKE_RESULT);
   await page.waitForSelector('.review-list');
   await snap(page, '16-revision', { theme });
@@ -334,6 +376,47 @@ scenario('ajustes-conectado', async (ctx, theme) => {
   return page;
 });
 
+scenario('ajustes-suscrito', async (ctx, theme) => {
+  const errors = [];
+  const page = await preparePage(ctx, { state: connected(), now: NOW, errors, standalone: true });
+  await markSubscribed(page);
+  await mockNetwork(page);
+  page.__errors = errors;
+  await page.goto(APP);
+  await page.waitForSelector('.tabbar', { state: 'attached' });
+  await tab(page, 'ajustes');
+  await page.waitForTimeout(300);
+  await snap(page, '18-ajustes-suscrito', { theme });
+  await page.click('[data-testid="subscribe-again"]');
+  await page.waitForSelector('.dialog-wrap.open');
+  await snap(page, '18-ajustes-suscribirme-otra-vez', { theme });
+  return page;
+});
+
+scenario('ajustes-safari', async (ctx, theme) => {
+  const page = await open(ctx, { state: demoState(), standalone: false });
+  await tab(page, 'ajustes');
+  await snap(page, '18-ajustes-safari', { theme });
+  await page.click('[data-testid="cal-install"]');
+  await sheet(page);
+  await snap(page, '02-guia-instalar-ios26', { theme });
+  return page;
+});
+
+scenario('ajustes-version', async (ctx, theme) => {
+  const gh = fakeGitHub();
+  await seedRemote(gh, demoState(), { deviceId: 'iphone1' });
+  const doc = gh.json('backup.json');
+  doc.v = 9;
+  gh.write('backup.json', JSON.stringify(doc));
+  const page = await open(ctx, { state: core.updateSettings(demoState(), { sync: { ...SYNC, deviceId: 'iphone1' } }), gh });
+  await page.waitForFunction(() => JSON.parse(localStorage.getItem('turnos-mauricio:v1')).settings.sync.lastErrorCode === 'NEWER_REMOTE', null, { timeout: 10000 });
+  await snap(page, '05-hoy-actualizar-app', { theme });
+  await tab(page, 'ajustes');
+  await snap(page, '18-ajustes-error-version', { theme });
+  return page;
+});
+
 scenario('ajustes-solo-lectura', async (ctx, theme) => {
   const gh = fakeGitHub();
   await seedRemote(gh, demoState(), { deviceId: 'navegador' });
@@ -365,6 +448,28 @@ scenario('setup', async (ctx, theme) => {
   await page.waitForSelector('[data-testid="subscribe-step"]', { timeout: 15000 });
   await page.waitForSelector('.sheet-subscribe [data-testid="webcal"][aria-disabled="false"]');
   await snap(page, '22-suscribirme', { theme });
+  await page.evaluate(() => document.addEventListener('click', (e) => { if (e.target.closest?.('a[href^="webcal:"]')) e.preventDefault(); }));
+  await page.click('.sheet-subscribe [data-testid="webcal"]');
+  await page.waitForSelector('[data-testid="subscribe-done"]');
+  await snap(page, '22-suscribirme-hecho', { theme });
+  return page;
+});
+
+scenario('setup-sin-internet', async (ctx, theme) => {
+  const page = await open(ctx, { state: demoState(), hash: setupHash() });
+  await page.route('https://api.github.com/**', (r) => r.abort('internetdisconnected'));
+  await page.waitForSelector('.dialog-wrap.open');
+  await page.click('.dialog-wrap.open .btn-primary');
+  await page.waitForSelector('[data-testid="offline-hint"]', { timeout: 15000 });
+  await snap(page, '22-suscribirme-sin-internet', { theme });
+  return page;
+});
+
+scenario('setup-safari-nuevo', async (ctx, theme) => {
+  const page = await open(ctx, { state: null, hash: setupHash(), standalone: false });
+  await page.waitForSelector('[data-testid="setup-safari"]');
+  await page.waitForTimeout(500);
+  await snap(page, '21-enlace-en-safari-primera-vez', { theme });
   return page;
 });
 

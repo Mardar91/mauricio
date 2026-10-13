@@ -2,6 +2,7 @@
 // la cola única ctx.syncQueue) y programar los avisos de ntfy (opcional) tras cada cambio.
 import { syncNtfy, updateSettings } from '../core/index.js';
 import { isIOS, isStandalone } from './dom.js';
+import { maybeAskTakeover } from './setup.js';
 
 const SYNC_DELAY = 1500;       // espera corta tras un cambio (junta varios toques seguidos)
 const NTFY_DELAY = 1500;
@@ -65,6 +66,8 @@ export function createBackground(ctx) {
         { type: res.ok ? 'ok' : 'error', duration: res.ok ? undefined : 7000 });
     }
     if (res.keyRestored) ctx.toast('La clave nueva no servía para tus turnos guardados: se sigue usando la anterior.', { type: 'info', duration: 7000 });
+    // Conectado sin internet: ahora que se sabe quién publica, quizá haya que preguntar «¿Usar este iPhone?»
+    maybeAskTakeover(ctx, res).catch((e) => console.error(e));
     if (res.ok) {
       retryStep = 0;
       clearTimeout(retryTimer); retryTimer = null;

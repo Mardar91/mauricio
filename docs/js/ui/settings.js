@@ -1,9 +1,9 @@
 // Pestaña "Ajustes" (SPEC §10): 1) Calendario del iPhone, 2) Mis turnos y horarios, 3) Horas de contrato
 // y Recordatorios, 4) Copia de seguridad, 5) Instalar, 6) Opciones avanzadas (plegadas), 7) Acerca de.
 import {
-  buildICS, buildSetupLink, calendarUrls, createDefaultState, exportBackup, fetchRemoteBackup, formatHours, hasTime, importBackup,
-  isReadOnlyDevice, isSyncKey, listBeforeImport, normalizeSyncConfig, randomTopic, saveBeforeImport, testConnection, testNtfy,
-  toKey, undoImport, updateSettings,
+  UNKNOWN_PUBLISHER, addDays, buildICS, buildSetupLink, calendarUrls, createDefaultState, exportBackup, fetchRemoteBackup,
+  formatHours, generateSyncKey, hasTime, importBackup, isReadOnlyDevice, isSyncKey, listBeforeImport, normalizeSyncConfig,
+  randomTopic, saveBeforeImport, testConnection, testNtfy, toKey, undoImport, updateSettings,
 } from '../core/index.js';
 import { badgeFromDef, displayName, groupCodes, timeRange } from './badge.js';
 import {
@@ -13,14 +13,17 @@ import { icon } from './icons.js';
 import { confirmDialog } from './sheet.js';
 import { unconfirmedInUse } from './attention.js';
 import { showOnboarding } from './onboarding.js';
-import { alertsNotice, openPasteSetup, runSetup, subscribeButton, subscribeSteps, takeOver } from './setup.js';
-import { banners } from './banners.js';
-import { installSteps } from './install.js';
-import { isConfigured, syncState } from './syncStatus.js';
+import {
+  alertsNotice, openPasteSetup, runSetup, subscribeButton, subscribeSteps, subscribedBlock, takeOver,
+} from './setup.js';
+import { banners, inSafariTab, saveFailedToast, savedToast } from './banners.js';
+import { installSteps, openInstallSheet } from './install.js';
+import { calendarReady, isConfigured, isSubscribed, markSubscribed, syncState, webcalUrl } from './syncStatus.js';
 import { DRAFT_KEY } from './scan.js';
 
 const MINUTES = [15, 30, 45, 60, 90, 120];
 const CORE_SHIFTS = ['F1', 'S1', 'N1', 'Z1'];
+const SOON_DAYS = 60; // «Mis turnos»: los turnos que se usan en los próximos ~2 meses
 
 export function createSettings(ctx) {
   const { store } = ctx;
@@ -88,24 +91,56 @@ export function createSettings(ctx) {
         st.text ? h('span', { class: 'cal-status-text' }, st.text) : null));
 
     const blocks = [status];
-    if (st.kind === 'readonly') {
-      blocks.push(h('div', { class: 'set-actions' },
-        h('button', { class: 'btn btn-secondary btn-block', type: 'button', 'data-testid': 'takeover', on: { click: () => takeOver(ctx) } }, icon('phone'), 'Usar este dispositivo')));
-    }
-    if (st.kind === 'error') {
-      blocks.push(h('div', { class: 'set-actions' },
-        h('button', { class: 'btn btn-primary btn-block', type: 'button', 'data-testid': 'setup-paste-open', on: { click: () => openPasteSetup(ctx, { renew: true }) } }, icon('link'), 'Tengo un enlace nuevo')));
-    }
+    const linkBtn = (primary) => h('button', {
+      class: primary ? 'btn btn-primary btn-block' : 'link-btn link-center', type: 'button',
+      'data-testid': primary ? 'setup-paste-open' : 'setup-paste-renew', on: { click: () => openPasteSetup(ctx, { renew: true }) },
+    }, primary ? icon('link') : null, 'Tengo un enlace nuevo');
+    // Suscripción: «Suscrito ✓» si ya se hizo en este dispositivo; si no, el botón (secundario si hay error)
+    const subscription = (secondary) => (isSubscribed(s)
+      ? subscribedBlock(ctx, s, { onChange: refresh })
+      : [
+        secondary ? null : alertsNotice(),
+        subscribeButton(ctx, s, { secondary, onTap: () => setTimeout(refresh, 400) }),
+        secondary ? null : subscribeSteps(),
+        // Quien se suscribió con una versión anterior (sin recordarlo): para no invitar a repetirlo
+        calendarReady(s) ? h('button', {
+          class: 'link-btn link-center link-small', type: 'button', 'data-testid': 'already-subscribed',
+          on: { click: () => { markSubscribed(webcalUrl(s), ctx.now()); refresh(); } },
+        }, 'Ya me suscribí antes') : null,
+      ]);
+
     if (!configured) {
-      blocks.push(h('div', { class: 'set-actions' },
-        h('p', { class: 'set-hint' }, 'Quien te ayuda con la app te envía un enlace de configuración (por WhatsApp o correo). Cuando lo tengas, toca aquí:'),
-        h('button', { class: 'btn btn-primary btn-lg btn-block', type: 'button', 'data-testid': 'setup-paste-open', on: { click: () => openPasteSetup(ctx) } }, icon('link'), 'Tengo un enlace')));
+      if (inSafariTab()) {
+        // En Safari el enlace no sirve (se guardaría aquí, no en la app): primero instalar
+        blocks.push(h('div', { class: 'set-actions' },
+          h('p', { class: 'set-hint' }, 'Primero pon la app en tu pantalla de inicio. El enlace que te envíen se pega dentro de la app, no aquí en Safari.'),
+          h('button', { class: 'btn btn-primary btn-lg btn-block', type: 'button', 'data-testid': 'cal-install', on: { click: () => openInstallSheet(ctx) } }, icon('phone'), 'Primero instala la app')));
+      } else {
+        blocks.push(h('div', { class: 'set-actions' },
+          h('p', { class: 'set-hint' }, 'Quien te ayuda con la app te envía un enlace de configuración (por WhatsApp o correo). Cuando lo tengas, toca aquí:'),
+          h('button', { class: 'btn btn-primary btn-lg btn-block', type: 'button', 'data-testid': 'setup-paste-open', on: { click: () => openPasteSetup(ctx) } }, icon('link'), 'Tengo un enlace')));
+      }
+    } else if (st.kind === 'error') {
+      // Una sola acción principal, la que arregla este error
+      let fix;
+      if (st.remedy === 'update') {
+        fix = h('button', { class: 'btn btn-primary btn-block', type: 'button', 'data-testid': 'update-app', on: { click: () => ctx.updateApp?.() } }, icon('refresh'), 'Actualizar la app');
+      } else if (st.remedy === 'pull') {
+        fix = actionButton('pullfix', 'Traer mis turnos de internet', 'cloud', async () => {
+          const r = await ctx.syncQueue.pull();
+          if (r.ok) savedToast(ctx, r.pulledDays?.length ? `Listo: llegaron ${plural(r.pulledDays.length, 'día', 'días')}.` : 'Listo.');
+          else ctx.toast(r.error.message, { type: 'error', duration: 7000 });
+        }, 'btn-primary btn-block');
+      } else {
+        fix = linkBtn(true);
+      }
+      // Suscribirse queda en segundo plano (y solo si el calendario ya existe)
+      blocks.push(h('div', { class: 'set-actions set-subscribe' }, fix, calendarReady(s) || isSubscribed(s) ? subscription(true) : null));
     } else {
       blocks.push(h('div', { class: 'set-actions set-subscribe' },
-        alertsNotice(),
-        subscribeButton(ctx, s),
-        subscribeSteps(),
-        st.kind !== 'error' ? h('button', { class: 'link-btn link-center', type: 'button', 'data-testid': 'setup-paste-renew', on: { click: () => openPasteSetup(ctx, { renew: true }) } }, 'Tengo un enlace nuevo') : null));
+        st.kind === 'readonly' ? h('button', { class: 'btn btn-secondary btn-block', type: 'button', 'data-testid': 'takeover', on: { click: () => takeOver(ctx) } }, icon('phone'), 'Usar este dispositivo') : null,
+        subscription(false),
+        linkBtn(false)));
     }
     return h('section', { class: 'set-group', id: 'set-calendar' },
       h('h2', { class: 'set-title' }, 'Calendario del iPhone'),
@@ -115,7 +150,7 @@ export function createSettings(ctx) {
           ' del iPhone (en algunos se llama «Configuración») → Calendario → Cuentas → «Agregar cuenta» (o «Añadir cuenta») → Otra → «Agregar calendario suscrito», y pega este enlace:'),
         urls ? h('div', { class: 'copy-line' },
           h('code', {}, urls.https),
-          h('button', { class: 'btn btn-tinted btn-sm', type: 'button', on: { click: async () => ctx.toast(await copyText(urls.https) ? 'Enlace copiado' : 'No se pudo copiar', { type: 'ok' }) } }, icon('copy'), 'Copiar')) : null,
+          h('button', { class: 'btn btn-tinted btn-sm', type: 'button', on: { click: async () => { const ok = await copyText(urls.https); ctx.toast(ok ? 'Enlace copiado' : 'No se pudo copiar', { type: ok ? 'ok' : 'error' }); } } }, icon('copy'), 'Copiar')) : null,
         h('p', { class: 'hint' }, 'En iOS 18 el camino es: Ajustes → Apps → Calendario → Cuentas de calendario.'),
         h('p', { class: 'hint' }, h('b', {}, 'Para que se actualice más a menudo: '), 'Ajustes → Calendario → Cuentas → «Obtener datos» → en «Calendarios suscritos» elige «Cada 15 minutos» o «Cada hora».'),
         h('p', { class: 'hint' }, 'Si cambias un turno de mañana, abre un momento la app Calendario para que lo recoja.')) : null);
@@ -123,11 +158,21 @@ export function createSettings(ctx) {
 
   // ---------- 2. Mis turnos y horarios ----------
   function codes(state) {
-    const unconf = unconfirmedInUse(state, ctx.now());
-    const used = new Set(Object.values(state.days || {}).flatMap((d) => (Array.isArray(d?.codes) ? d.codes : [])));
+    const now = ctx.now();
+    const today = toKey(now), until = addDays(today, SOON_DAYS);
+    const unconf = unconfirmedInUse(state, now);
+    const used = new Set(), soon = new Set();
+    for (const [k, d] of Object.entries(state.days || {})) {
+      for (const c of Array.isArray(d?.codes) ? d.codes : []) { used.add(c); if (k >= today && k <= until) soon.add(c); }
+    }
     const all = groupCodes(state).flatMap((g) => g.codes);
-    const primary = all.filter((d) => used.has(d.code) || CORE_SHIFTS.includes(d.code));
-    const rest = all.filter((d) => !primary.includes(d));
+    const timedKind = (d) => ['shift', 'event', 'other'].includes(d.kind);
+    // A la vista: F1/S1/N1/Z1, los turnos de los próximos ~2 meses y los que hay que confirmar.
+    // Los lugares usados, juntos en «Lugares (N)»; el resto, en «Ver todos los códigos».
+    const primary = all.filter((d) => d.kind !== 'place'
+      && (CORE_SHIFTS.includes(d.code) || (timedKind(d) && soon.has(d.code)) || unconf.get(d.code)?.next));
+    const places = all.filter((d) => d.kind === 'place' && used.has(d.code));
+    const rest = all.filter((d) => !primary.includes(d) && !places.includes(d));
 
     const codeRow = (def) => {
       const u = unconf.get(def.code); // sin confirmar y usado
@@ -148,6 +193,7 @@ export function createSettings(ctx) {
       h('span', { class: 'row-chevron', 'aria-hidden': 'true' }, icon('chevronRight')));
     };
     const pending = [...unconf.values()].filter((v) => v.next).map((v) => v.def);
+    const noAddress = places.filter((d) => !d.place).length;
     return h('section', { class: 'set-group', id: 'set-codes' },
       h('h2', { class: 'set-title' }, 'Mis turnos y horarios'),
       pending.length ? h('div', { class: 'notice notice-warn' }, icon('warning'), h('p', {},
@@ -155,6 +201,14 @@ export function createSettings(ctx) {
         'La app los supuso; tócalos para revisarlos.')) : null,
       h('div', { class: 'card set-card codes-card' },
         primary.map(codeRow),
+        places.length ? h('details', { class: 'places-group', dataset: { fkey: 'places' }, 'data-testid': 'places' },
+          h('summary', { class: 'set-row' },
+            h('span', { class: 'code-badge places-badges', 'aria-hidden': 'true' }, places.slice(0, 2).map((d) => badgeFromDef(d, { size: 'sm', title: false }))),
+            h('span', { class: 'set-row-main' },
+              h('span', { class: 'set-label' }, `Lugares (${places.length})`),
+              h('span', { class: 'set-sub' }, noAddress === places.length ? 'Toca para poner sus direcciones' : places.map((d) => d.code).join(', '))),
+            icon('chevronDown', 'icon chev')),
+          h('div', { class: 'places-body' }, places.map(codeRow))) : null,
         showAllCodes && rest.length ? [h('h3', { class: 'set-subtitle' }, 'Otros códigos'), ...rest.map(codeRow)] : null),
       h('div', { class: 'btn-stack' },
         rest.length ? h('button', {
@@ -162,7 +216,7 @@ export function createSettings(ctx) {
           on: { click: () => { showAllCodes = !showAllCodes; refresh(); } },
         }, showAllCodes ? 'Ver menos códigos' : `Ver todos los códigos (${rest.length} más)`) : null,
         h('button', { class: 'btn btn-secondary btn-block', type: 'button', 'data-testid': 'code-add', on: { click: () => ctx.openCode(null) } }, icon('plus'), 'Añadir código')),
-      h('p', { class: 'set-footer' }, 'Toca un código para cambiar su horario, pausa o lugar. La pausa se descuenta de las horas; los lugares no suman horas.'));
+      h('p', { class: 'set-footer' }, 'Toca un código para cambiar su horario de todos los días, su pausa o su lugar. Para un solo día, tócalo en el Calendario.'));
   }
 
   // ---------- 3. Horas de contrato y recordatorios ----------
@@ -178,7 +232,7 @@ export function createSettings(ctx) {
         const n = parseNum(e.target.value);
         if (!(n > 0 && n <= 60)) { ctx.toast('Escribe un número de horas entre 1 y 60.', { type: 'error' }); e.target.value = fmtNum(Number(s.weeklyHours) || 35); return; }
         set({ weeklyHours: Math.round(n * 100) / 100 });
-        ctx.toast(`Contrato: ${fmtNum(n)} h por semana`, { type: 'ok' });
+        savedToast(ctx, `Contrato: ${fmtNum(n)} h por semana`);
       } },
     });
     const daily = (Number(s.weeklyHours) || 35) / (Number(s.workDaysPerWeek) || 5);
@@ -266,7 +320,7 @@ export function createSettings(ctx) {
     const localNewer = Boolean(at && newestLocal && newestLocal > at);
     const ok = await confirmDialog({
       icon: '📥', title: '¿Reemplazar con esta copia?', danger: true,
-      text: `La copia ${from}${at ? ` (del ${dateTime(at)})` : ''} tiene ${plural(n, 'día', 'días')} con turnos; este teléfono tiene ${local}. `
+      text: `La copia ${from}${at ? ` (del ${dateTime(at)})` : ''} tiene ${plural(n, 'día', 'días')} con turnos; este teléfono tiene ${plural(local, 'día', 'días')}. `
         + `Los datos de este teléfono se reemplazarán.${localNewer ? ' Ojo: aquí hay cambios más nuevos que la copia.' : ''}`,
       ok: 'Reemplazar', cancel: 'Cancelar',
     });
@@ -282,8 +336,8 @@ export function createSettings(ctx) {
       ctx.toast(e.message || 'No se pudo importar la copia.', { type: 'error' });
       return;
     }
-    ctx.toast(`Copia restaurada: ${plural(n, 'día', 'días')}`, {
-      type: 'ok', duration: 10000,
+    savedToast(ctx, `Copia restaurada: ${plural(n, 'día', 'días')}`, {
+      duration: 10000,
       action: backupKey ? { label: 'Deshacer', run: () => undo(backupKey) } : undefined,
     });
   }
@@ -292,7 +346,7 @@ export function createSettings(ctx) {
     const prev = undoImport(ls, store.get(), { now: new Date(), key });
     if (!prev) return; // segundo toque: ya no hay copia
     store.set(() => prev);
-    ctx.toast('Listo: todo está como antes', { type: 'ok' });
+    savedToast(ctx, 'Listo: todo está como antes');
   }
 
   // ---------- 5. Instalar ----------
@@ -325,7 +379,8 @@ export function createSettings(ctx) {
 
     const tech = s.enabled ? h('ul', { class: 'tech-list' },
       h('li', {}, h('span', {}, 'Este dispositivo'), h('code', {}, s.deviceId || '—')),
-      h('li', {}, h('span', {}, 'Publica'), h('span', {}, !s.publisher ? '—' : s.publisher === s.deviceId ? 'este dispositivo' : `otro (${s.publisher})`)),
+      h('li', {}, h('span', {}, 'Publica'), h('span', {}, !s.publisher ? '—' : s.publisher === s.deviceId ? 'este dispositivo'
+        : s.publisher === UNKNOWN_PUBLISHER ? 'otro dispositivo (desconocido)' : `otro (${s.publisher})`)),
       h('li', {}, h('span', {}, 'Copia (rev)'), h('span', {}, String(s.baseRev || 0))),
       h('li', {}, h('span', {}, 'Último envío'), h('span', {}, s.lastPushAt ? dateTime(s.lastPushAt) : '—')),
       h('li', {}, h('span', {}, 'Última lectura'), h('span', {}, s.lastPullAt ? dateTime(s.lastPullAt) : '—')),
@@ -357,6 +412,19 @@ export function createSettings(ctx) {
       tech,
       s.enabled ? h('div', { class: 'btn-row' },
         actionButton('push', 'Actualizar el calendario ahora', 'upload', () => ctx.background.runSync({ manual: true, force: true }), 'btn-secondary btn-sm'),
+        // Cambiar la clave (CORE-API §4.2): solo en el que publica y con backup.json ya borrado
+        s.publisher === s.deviceId && isSyncKey(s.key) ? actionButton('rekey', 'Cambiar la clave', 'refresh', async () => {
+          const ok = await confirmDialog({
+            icon: '🔑', title: '¿Cambiar la clave?', danger: true,
+            text: 'Primero borra backup.json en el repositorio de datos (si sigue ahí, no se cambia nada). Después envía un enlace nuevo a los demás dispositivos: hasta entonces no podrán leer los turnos.',
+            ok: 'Cambiar la clave', cancel: 'Cancelar',
+          });
+          if (!ok) return;
+          const cur = store.get().settings.sync;
+          const cfg = normalizeSyncConfig({ owner: cur.owner, repo: cur.repo, branch: cur.branch || '', token: cur.token, key: generateSyncKey() });
+          if (!cfg) { ctx.toast('La conexión guardada no es válida: revisa usuario, repositorio y token.', { type: 'error' }); return; }
+          await runSetup(ctx, cfg, { confirm: false });
+        }, 'btn-secondary btn-sm') : null,
         canLink ? h('button', {
           class: 'btn btn-tinted btn-sm', type: 'button', 'data-testid': 'make-link',
           on: { click: async () => {
@@ -402,7 +470,7 @@ export function createSettings(ctx) {
       n.enabled || n.topic ? h('div', { class: 'set-block' },
         h('span', { class: 'label' }, 'Tema (como una contraseña: no lo compartas)'),
         h('div', { class: 'input-with-btn' }, topicInput,
-          h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Copiar tema', on: { click: async () => ctx.toast(await copyText(store.get().settings.ntfy.topic) ? 'Tema copiado' : 'No se pudo copiar', { type: 'ok' }) } }, icon('copy'))),
+          h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Copiar tema', on: { click: async () => { const ok = await copyText(store.get().settings.ntfy.topic); ctx.toast(ok ? 'Tema copiado' : 'No se pudo copiar', { type: ok ? 'ok' : 'error' }); } } }, icon('copy'))),
         h('div', { class: 'btn-row' },
           h('button', { class: 'btn btn-secondary btn-sm', type: 'button', on: { click: async () => {
             if (store.get().settings.ntfy.topic) {
@@ -467,18 +535,31 @@ export function createSettings(ctx) {
     if (!ok1) return;
     const ok2 = await confirmDialog({ title: '¿Seguro?', text: 'Este dispositivo se quedará vacío, como recién instalado.', ok: 'Sí, borrar todo', cancel: 'No, cancelar', danger: true });
     if (!ok2) return;
+    // Lo de antes, entero (también la conexión del calendario y ntfy), para «Deshacer»
+    const snapshot = store.get();
     // Avisos de ntfy ya programados: se cancelan antes (después ya no se sabría cuáles eran)
-    const n = store.get().settings.ntfy;
+    const n = snapshot.settings.ntfy;
     if (n.enabled || Object.keys(n.scheduled || {}).length) {
       set({ ntfy: { enabled: false } });
       try { await ctx.background?.ntfyNow(); } catch { /* sin red: no pasa nada */ }
     }
     const key = saveBeforeImport(store.get(), ls, { now: ctx.now() });
     try { ls?.removeItem(DRAFT_KEY); } catch { /* nada */ }
+    ctx.resetScan?.(); // la revisión a medias (en memoria) tampoco se queda
     form = null;
     store.set(() => updateSettings(createDefaultState(), { onboardingDone: true }));
-    ctx.toast('Datos borrados', { duration: 10000, action: key ? { label: 'Deshacer', run: () => undo(key) } : undefined });
     window.scrollTo(0, 0);
+    if (store.saveOk?.() === false) { saveFailedToast(ctx); return; }
+    ctx.toast('Datos borrados', { duration: 10000, action: { label: 'Deshacer', run: () => undoWipe(snapshot, key) } });
+  }
+
+  // Deshacer el borrado: todo como estaba, también el calendario conectado y ntfy (sus avisos se
+  // cancelaron, así que se vuelven a programar)
+  function undoWipe(snapshot, key) {
+    const restored = { ...snapshot, settings: { ...snapshot.settings, ntfy: { ...snapshot.settings.ntfy, scheduled: {} } } };
+    store.set(() => restored);
+    if (key) { try { ls?.removeItem(key); } catch { /* nada */ } }
+    savedToast(ctx, 'Listo: todo está como antes');
   }
 
   // ---------- 7. Acerca de ----------

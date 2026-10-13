@@ -39,6 +39,9 @@ const P = {
   heart: S('<path d="M12 20s-7.5-4.5-7.5-10A4.2 4.2 0 0 1 12 7.4 4.2 4.2 0 0 1 19.5 10c0 5.5-7.5 10-7.5 10z"/>'),
   eye: S('<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/>'),
   eyeOff: S('<path d="M3 3l18 18M10.6 6a9.6 9.6 0 0 1 1.4-.1C18 5.9 21.5 12 21.5 12a17 17 0 0 1-2.8 3.6M6.4 6.9C3.9 8.6 2.5 12 2.5 12S6 18.5 12 18.5a9 9 0 0 0 4.3-1.1M9.9 10a3 3 0 0 0 4.1 4.1"/>'),
+  more: S('<circle cx="12" cy="12" r="9"/><circle cx="7.8" cy="12" r="0.6" fill="currentColor"/><circle cx="12" cy="12" r="0.6" fill="currentColor"/><circle cx="16.2" cy="12" r="0.6" fill="currentColor"/>', 'stroke-width="1.9"'),
+  toggle: S('<rect x="2.5" y="6.5" width="19" height="11" rx="5.5" fill="#34C759" stroke="#34C759"/><circle cx="16" cy="12" r="4" fill="#fff" stroke="none"/>'),
+  special: S('<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/><path d="M19 3.5l.6 1.5 1.5.6-1.5.6-.6 1.5-.6-1.5-1.5-.6 1.5-.6z" fill="currentColor" stroke="none"/>'),
   help: S('<circle cx="12" cy="12" r="8.5"/><path d="M9.6 9.6a2.5 2.5 0 1 1 3.6 2.2c-.8.4-1.2 1-1.2 1.8v.4M12 16.8v.2"/>'),
 };
 
@@ -49,4 +52,13 @@ export function icon(name, cls = 'icon') {
 // Icono "Compartir" de iOS para las guías
 export function shareIcon() {
   return icon('share', 'icon icon-inline ios-share');
+}
+
+// Botón «•••» de Safari (iOS 26) y el interruptor verde, para las guías
+export function moreIcon() {
+  return icon('more', 'icon icon-inline ios-more');
+}
+
+export function toggleIcon() {
+  return icon('toggle', 'icon icon-inline ios-toggle');
 }

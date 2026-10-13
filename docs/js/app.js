@@ -18,7 +18,7 @@ import { createBackground } from './ui/background.js';
 import { attentionCount } from './ui/attention.js';
 
 // Debe coincidir con VERSION en sw.js
-export const APP_VERSION = '1.2.0';
+export const APP_VERSION = '1.3.0';
 
 const TABS = [
   { id: 'hoy', label: 'Hoy', icon: 'today' },
@@ -57,6 +57,9 @@ const ctx = {
   saveError: () => saveError,
   updateApp,
   updateChrome,
+  resetScan: () => views.escanear?.reset?.(),
+  // Re-pinta la vista activa (p. ej. tras algo guardado fuera del store, como «Suscrito ✓»)
+  repaint: () => { if (current && views[current]) renderKeepingFocus(views[current], store.get()); },
 };
 
 function buildShell() {
@@ -201,13 +204,21 @@ function registerSW() {
     offered = true;
     toast('Hay una nueva versión de la app.', {
       duration: 0,
+      // Si se cierra sin «Actualizar» (un toque, o la apartan otros avisos), se vuelve a ofrecer al volver
+      onClose: (reason) => { if (reason !== 'action') offered = false; },
       action: {
         label: 'Actualizar',
         run: async () => {
-          // Lo que se está editando en una hoja (o una foto que se está leyendo) se perdería
-          const busy = sheetsOpen() || views.escanear?.mode === 'processing';
+          // Lo que se está editando en una hoja, una foto que se está leyendo o las fotos de una
+          // revisión (el borrador se guarda, pero las fotos no) se perderían
+          const scan = views.escanear;
+          const photosOpen = scan && scan.mode !== 'home' && scan.photoCount > 0;
+          const busy = sheetsOpen() || scan?.mode === 'processing' || photosOpen;
           if (busy && !(await confirmDialog({
-            title: '¿Actualizar ahora?', text: 'Se cerrará lo que estás haciendo sin guardar. Puedes actualizar después.',
+            title: '¿Actualizar ahora?',
+            text: photosOpen && !sheetsOpen()
+              ? 'Tu revisión se guarda, pero las fotos se cerrarán (no podrás volver a verlas). Puedes actualizar después.'
+              : 'Se cerrará lo que estás haciendo sin guardar. Puedes actualizar después.',
             ok: 'Actualizar', cancel: 'Ahora no',
           }))) { offered = false; return; }
           ctx.background?.flush();
@@ -287,9 +298,16 @@ function start() {
   if (/setup=/.test(location.hash)) {
     // Primero el enlace. Si se conectó, el propio enlace ya guio (y queda abierto el paso de suscribirse);
     // si no, después la bienvenida
+    let shown = null;
     handleSetupLink().then((applied) => {
-      if (applied && !store.get().settings.onboardingDone) store.set((s) => updateSettings(s, { onboardingDone: true }));
-    }).catch((e) => console.error(e)).finally(() => { if (!store.get().settings.onboardingDone) showOnboarding(ctx); });
+      shown = applied;
+      if (applied === true && !store.get().settings.onboardingDone) store.set((s) => updateSettings(s, { onboardingDone: true }));
+    }).catch((e) => console.error(e)).finally(() => {
+      // En Safari el enlace abrió «Copia este enlace…»: la bienvenida la taparía (y quien tiene el enlace
+      // normalmente ya tiene la app). Saldrá la próxima vez que se abra sin enlace.
+      if (shown === 'safari') return;
+      if (!store.get().settings.onboardingDone) showOnboarding(ctx);
+    });
   } else if (!state.settings.onboardingDone) {
     showOnboarding(ctx);
   }

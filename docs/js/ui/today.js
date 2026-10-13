@@ -1,13 +1,15 @@
 // Pestaña "Hoy": próximo turno, semana actual, próximos días y consejos.
 import {
-  addDays, formatHours, formatLong, getAdvice, getCode, isoWeek, weekStart, weekSummary, weekdayShort,
+  addDays, formatHours, formatLong, formatTime, getAdvice, getCode, isoWeek, weekStart, weekSummary, weekdayShort,
 } from '../core/index.js';
-import { badge, badgeRow, displayName, workText } from './badge.js';
+import { badge, badgeRow, displayName } from './badge.js';
 import { cap, h, setChildren } from './dom.js';
 import { icon } from './icons.js';
-import { banners } from './banners.js';
+import { banners, inSafariTab } from './banners.js';
+import { openInstallSheet } from './install.js';
 import { syncStatusLine } from './syncStatus.js';
 import { countdown, dayLabel, daySummary, nextShift, remaining } from './shifts.js';
+import { dayTimes, workTextOf } from './times.js';
 
 export function adviceCard(ctx, a) {
   return h('article', { class: ['advice', `advice-${a.level}`] },
@@ -39,10 +41,18 @@ export function createToday(ctx) {
     const { item, key, current } = next;
     const def = item.def;
     const places = item.places;
+    // Horario de ese día (puede ser un «horario especial» solo para ese día)
+    const t = dayTimes(state, key, def.code);
+    const startTxt = t.start || formatTime(item.start);
+    const endTxt = item.startOnly ? null : (t.end || formatTime(item.end));
+    const timeTxt = endTxt ? `${startTxt} – ${endTxt}` : `desde las ${startTxt}`;
+    const work = item.startOnly ? '' : workTextOf(t);
     const facts = [
-      h('div', { class: 'fact' }, icon('clock'), h('span', {}, h('b', {}, `${def.start} – ${def.end}`), item.end.getDate() !== item.start.getDate() ? ' (termina al día siguiente)' : '')),
-      h('div', { class: 'fact' }, icon('hours'), h('span', {}, workText(def))),
-    ];
+      h('div', { class: 'fact' }, icon('clock'), h('span', { class: 'fact-time' }, h('b', {}, timeTxt),
+        !item.startOnly && item.end.getDate() !== item.start.getDate() ? ' (termina al día siguiente)' : '',
+        t.special ? h('span', { class: 'pill pill-special', 'data-testid': 'special-pill' }, 'horario especial') : null)),
+      work ? h('div', { class: 'fact' }, icon('hours'), h('span', {}, work)) : null,
+    ].filter(Boolean);
     if (places.length) {
       facts.push(h('div', { class: 'fact' }, icon('pin'), h('span', { class: 'fact-place' },
         places.map((p) => [badge(state, p.code, { size: 'sm' }), ' ',
@@ -62,7 +72,7 @@ export function createToday(ctx) {
       const pct = Math.min(100, Math.max(0, (done / total) * 100));
       top = h('div', { class: 'hero-top' },
         h('span', { class: 'hero-kicker live' }, h('span', { class: 'live-dot', 'aria-hidden': 'true' }), 'Trabajando ahora'),
-        h('span', { class: 'chip chip-live' }, `hasta las ${def.end}`));
+        h('span', { class: 'chip chip-live' }, endTxt ? `hasta las ${endTxt}` : `desde las ${startTxt}`));
       progress = h('div', { class: 'hero-progress' },
         h('div', { class: 'progress', role: 'progressbar', 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': String(Math.round(pct)), 'aria-label': 'Turno completado' },
           h('div', { class: 'progress-fill', style: { width: `${pct}%` } })),
@@ -74,7 +84,8 @@ export function createToday(ctx) {
     }
     return h('article', {
       class: ['card', 'hero', current && 'hero-current'], style: { '--c': def.color },
-      tabindex: '0', role: 'button', 'aria-label': `${current ? 'Trabajando ahora' : 'Próximo turno'}: ${def.name}, ${dayLabel(key, today)}, de ${def.start} a ${def.end}`,
+      tabindex: '0', role: 'button',
+      'aria-label': `${current ? 'Trabajando ahora' : 'Próximo turno'}: ${def.name}, ${dayLabel(key, today)}, ${endTxt ? `de ${startTxt} a ${endTxt}` : `desde las ${startTxt}`}${t.special ? ', horario especial' : ''}`,
       on: { click: (e) => { if (!e.target.closest('button')) ctx.openDay(key); }, keydown: (e) => { if (e.key === 'Enter') ctx.openDay(key); } },
     },
     top,
@@ -141,14 +152,14 @@ export function createToday(ctx) {
       const dow = i === 0 ? 'Hoy' : i === 1 ? 'Mañana' : cap(weekdayShort(key));
       rows.push(h('li', {}, h('button', {
         class: ['mini-row', i === 0 && 'is-today'], type: 'button',
-        'aria-label': `${cap(formatLong(key))}: ${s.known ? (s.name || 'sin turnos') : 'sin plan'}${s.time ? `, ${s.time}` : ''}`,
+        'aria-label': `${cap(formatLong(key))}: ${s.known ? (s.name || 'sin turnos') : 'sin plan'}${s.time ? `, ${s.time}` : ''}${s.special ? ', horario especial' : ''}`,
         on: { click: () => ctx.openDay(key) },
       },
       h('span', { class: 'mini-date' }, h('span', { class: 'mini-dow' }, dow), h('span', { class: 'mini-num' }, String(+key.slice(8)))),
       s.known && s.codes.length ? badgeRow(state, s.codes, { size: 'sm' }) : h('span', { class: 'badges' }),
       h('span', { class: 'mini-info' },
         h('span', { class: 'mini-name' }, s.known ? (s.name || '—') : h('span', { class: 'faint' }, 'Sin plan')),
-        s.time ? h('span', { class: 'mini-time' }, s.time) : null),
+        s.time ? h('span', { class: 'mini-time' }, s.time, s.special ? h('span', { class: 'mini-special' }, ' · especial') : null) : null),
       h('span', { class: 'mini-hours' }, s.hours || ''))));
     }
     return h('section', { class: 'section' },
@@ -159,6 +170,15 @@ export function createToday(ctx) {
   }
 
   function emptyState() {
+    // En Safari (sin instalar) lo primero es instalar: lo escaneado aquí no llega a la app
+    if (inSafariTab()) {
+      return h('div', { class: 'empty' },
+        h('div', { class: 'empty-art', 'aria-hidden': 'true' }, emptyArt()),
+        h('h2', { class: 'empty-title' }, 'Primero, instala la app'),
+        h('p', { class: 'empty-text' }, 'Ponla en tu pantalla de inicio y escanea tu plan desde allí. Lo que guardes aquí, en Safari, no pasa a la app.'),
+        h('button', { class: 'btn btn-primary btn-lg btn-block', type: 'button', 'data-testid': 'empty-install', on: { click: () => openInstallSheet(ctx) } }, icon('phone'), 'Instalar la app'),
+        h('button', { class: 'btn btn-plain btn-block', type: 'button', 'data-testid': 'empty-scan-here', on: { click: () => ctx.go('escanear') } }, 'o escanear aquí de momento'));
+    }
     return h('div', { class: 'empty' },
       h('div', { class: 'empty-art', 'aria-hidden': 'true' }, emptyArt()),
       h('h2', { class: 'empty-title' }, 'Aún no tienes turnos'),
@@ -172,14 +192,17 @@ export function createToday(ctx) {
     const today = ctx.today();
     const name = (state.settings.name || '').trim();
     const hasData = Object.keys(state.days).length > 0;
-    // «Actualiza la app» ya sale como aviso fijo arriba
-    const advice = getAdvice(state, now).filter((a) => !(a.id === 'newer-schema' && state.__newerSchema));
+    const syncLine = syncStatusLine(ctx, state);
+    // «Actualiza la app» ya sale como aviso fijo arriba; y si la línea del calendario ya avisa,
+    // no se repite el mismo aviso en los consejos (siguen en Horas)
+    const advice = getAdvice(state, now).filter((a) => !(a.id === 'newer-schema' && state.__newerSchema)
+      && !(syncLine && (a.id === 'sync-error' || a.id === 'read-only')));
     setChildren(el,
       h('header', { class: 'page-head' },
         h('p', { class: 'eyebrow' }, formatLong(today)),
         h('h1', { class: 'large-title' }, name ? `Hola, ${name} 👋` : 'Hola 👋'),
         hasData ? todayLine(state, today, now) : null,
-        syncStatusLine(ctx, state)),
+        syncLine),
       banners(ctx, state, 'hoy'),
       ...(hasData ? [
         hero(state, now, today),

@@ -24,6 +24,8 @@
   --danger-bg: #C3312A;
   --info: #2763A8;
   --info-soft: #E4EEFA;
+  --special: #6A3DB5;
+  --special-soft: #EFE7FB;
   --weekend: #F1EEEA;
   --red-day: #C9302A;
   --badge-text-red: #D21F1F;
@@ -66,6 +68,8 @@
     --danger-bg: #D23B31;
     --info: #79B0F2;
     --info-soft: rgba(110, 165, 240, 0.14);
+    --special: #C7AEFF;
+    --special-soft: rgba(170, 130, 250, 0.18);
     --weekend: #171513;
     --red-day: #FF6B60;
     --badge-text-red: #FF5A4E;
@@ -187,6 +191,11 @@ a { color: var(--accent-text); }
   box-shadow: 0 1px 2px rgba(150, 70, 0, 0.18), 0 6px 16px rgba(230, 115, 0, 0.22);
 }
 .btn-secondary { background: var(--card); color: var(--text); box-shadow: var(--shadow-sm), inset 0 0 0 1px var(--line); }
+/* En oscuro una tarjeta y un botón secundario tienen el mismo fondo: el botón se distingue con relleno y borde */
+@media (prefers-color-scheme: dark) {
+  .btn-secondary { background: var(--fill); box-shadow: inset 0 0 0 1px var(--line-strong); }
+  .btn-secondary:active:not(:disabled) { background: var(--fill-2); }
+}
 .btn-tinted { background: var(--accent-soft); color: var(--accent-text); }
 .btn-plain { background: none; color: var(--accent-text); }
 .btn-danger { background: var(--danger-bg); color: #fff; }
@@ -1127,3 +1136,74 @@ label.set-row { cursor: pointer; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
 }
+
+/* ---------- Horario especial (solo un día) ---------- */
+.pill-special { background: var(--special-soft); color: var(--special); }
+.fact-time { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; }
+.fact-time .pill { font-size: 12.5px; }
+.d-special {
+  flex-basis: 100%; font-size: 11.5px; font-weight: 750; color: var(--special); line-height: 1.1; letter-spacing: 0.01em;
+}
+.d-l1.is-special { color: var(--special); }
+.mini-special { color: var(--special); font-weight: 650; }
+.review-special { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; }
+.review-special-time { font-size: 14px; font-weight: 700; color: var(--special); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* Editor de día: horario de cada código ese día */
+.de-times { display: grid; gap: 0; margin-top: 12px; border-top: 0.5px solid var(--line); }
+.de-time { padding: 12px 0 4px; }
+.de-time + .de-time { border-top: 0.5px solid var(--line); }
+.de-time-head { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.de-time-head .badge { flex: none; }
+.de-time-main { display: grid; gap: 1px; min-width: 0; }
+.de-time-line { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; }
+.de-time-range { font-size: 19px; font-weight: 800; letter-spacing: -0.01em; font-variant-numeric: tabular-nums; }
+.de-time.is-special .de-time-range { color: var(--special); }
+.de-time-work { font-size: 14px; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.de-time-actions { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; margin-top: 8px; }
+.de-time-actions .link-btn { font-size: 14.5px; min-height: 44px; padding: 4px 2px; color: var(--text-2); font-weight: 600; }
+.de-time-edit { color: var(--special); background: var(--special-soft); }
+.de-time-panel {
+  margin-top: 10px; padding: 2px 12px 8px; border-radius: 14px; background: var(--special-soft);
+}
+.de-time-panel .field { margin-top: 10px; }
+.de-time-panel .input { background: var(--card); }
+.de-time-panel .hint { margin-top: 8px; color: color-mix(in srgb, var(--special) 55%, var(--text)); }
+.de-time-reset { margin-top: 4px; color: var(--special) !important; }
+.de-time-reset .icon { width: 17px; height: 17px; }
+.de-summary:first-child { margin-top: 0; }
+.de-times + .de-summary { margin-top: 8px; }
+.de-selected > .form-error { margin-bottom: 0; }
+
+/* Ajustes: suscripción recordada */
+.subscribed { display: grid; gap: 2px; padding: 12px 14px 4px; border-radius: 14px; background: var(--ok-soft); }
+.subscribed-line { display: flex; align-items: center; gap: 8px; font-size: 16px; color: var(--text); }
+.subscribed-line b { color: var(--ok); font-weight: 800; font-size: 17px; }
+.subscribed-check { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: var(--ok); color: #fff; flex: none; }
+.subscribed-check .icon { width: 14px; height: 14px; }
+.subscribed-hint { font-size: 14px; color: var(--text-2); line-height: 1.35; }
+.subscribed .link-btn { padding-left: 0; }
+.link-small { font-size: 14.5px; font-weight: 600; }
+.offline-hint { display: flex; align-items: flex-start; gap: 8px; margin-top: 10px; color: var(--warn); font-weight: 600; }
+.offline-hint .icon { width: 18px; height: 18px; flex: none; margin-top: 1px; }
+
+/* Ajustes: lugares plegados */
+.places-group { position: relative; }
+.places-group > summary { list-style: none; cursor: pointer; }
+.places-group > summary::-webkit-details-marker { display: none; }
+.places-group > summary .chev { width: 18px; height: 18px; color: var(--text-3); transition: transform 0.25s var(--ease); }
+.places-group[open] > summary .chev { transform: rotate(180deg); }
+.codes-card > .set-row + .places-group > summary::before {
+  content: ''; position: absolute; top: 0; left: 80px; right: 0; border-top: 0.5px solid var(--line);
+}
+.places-badges { display: flex; gap: 2px; justify-content: center; }
+.places-body { background: color-mix(in srgb, var(--fill) 45%, transparent); }
+.places-body .code-row::before { left: 80px; }
+.places-group + .set-subtitle { margin-top: 14px; }
+
+/* Guía de instalación (iOS 26) */
+.step-note { color: var(--text-2); font-size: 0.93em; }
+.nowrap { white-space: nowrap; }
+.step-note-block { display: block; margin-top: 3px; font-size: 14px; line-height: 1.35; }
+.ios-more { color: var(--text); }
+.ios-toggle { width: 26px; height: 19px; vertical-align: -4px; }

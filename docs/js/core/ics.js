@@ -158,6 +158,7 @@ export function buildICS(state, { from, to, now = new Date(), notes = false, pla
       if (!item.startOnly && def.breakMin && nominal !== null) {
         desc.push(`Pausa: ${def.breakMin} min (${formatHours(Math.max(0, nominal - def.breakMin))} de trabajo)`);
       }
+      if (item.special) desc.push('Horario especial de este día');
       if (places && item.placeText) desc.push(`Lugar: ${item.placeText}`);
       if (def.confirmed === false) desc.push('Horario sin confirmar');
       if (notes && entry.note) desc.push(`Nota: ${entry.note}`);

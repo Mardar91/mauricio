@@ -84,12 +84,18 @@ test('primer uso en Safari (iPhone sin instalar): paso de instalar, se queda en 
   assert.equal(steps, 3, 'en iPhone (Safari) se muestra el paso de instalar');
   await page.click('.ob-bottom .btn-primary');
   const install = await text(page, '.ob-step');
+  assert.match(install, /«•••»\s*\(abajo a la derecha\) y luego «Compartir»/);
+  assert.match(install, /iOS más antiguo, Compartir está abajo en el centro/);
   assert.match(install, /Agregar a inicio/);
   assert.match(install, /Añadir a pantalla de inicio/);
+  assert.match(install, /Deja activado «Abrir como app web»/);
   for (let i = 1; i < steps; i++) await page.click('.ob-bottom .btn-primary');
   await page.waitForSelector('.onboarding', { state: 'detached' });
   assert.ok(await visible(page, '#view-hoy'), 'en Safari no lleva a escanear');
   assert.match(await text(page, '[data-testid="banner-safari"]'), /Instala la app para no perder tus datos/);
+  // Hoy vacío en Safari: lo primero es instalar (escanear aquí queda en segundo plano)
+  assert.match(await text(page, '#view-hoy .empty .btn-primary'), /Instalar la app/);
+  assert.ok(await visible(page, '[data-testid="empty-scan-here"]'));
   await page.click('[data-testid="banner-safari"] .banner-btn');
   await sheetOpen(page);
   assert.match(await text(page, '.sheet-install'), /Compartir/);
@@ -142,7 +148,7 @@ test('calendario: editar un día actualiza las horas de la semana y del mes (y s
   await page.click('.day-row[data-key="2026-10-14"]');
   await sheetOpen(page);
   await page.click('.sheet .tile[data-code="F1"]');
-  assert.match(await text(page, '.de-summary'), /8 h 30/);
+  assert.match(await text(page, '.de-time[data-code="F1"]'), /06:00–15:00[\s\S]*8 h 30 de trabajo/);
   await page.click('[data-testid="day-save"]');
   await page.waitForSelector('.sheet-wrap', { state: 'detached' });
   assert.match(await text(page, weekSel), new RegExp(core.formatHours(before + 510)));
@@ -226,6 +232,7 @@ test('escanear: foto con el reconocedor stub → plan B a mano → guardar → s
   await page.click('[data-testid="fallback-manual"]');
   await page.waitForSelector('.review-list');
   assert.equal(await page.locator('.review-row').count(), 31);
+  assert.match(await text(page, '.review-head'), /Toca cada día y elige su turno\. Al final, toca «Guardar»/, 'sin días guardados no habla de «lo que ya tienes»');
   assert.ok(await page.locator('[data-testid="review-save"]').isDisabled());
   await page.click('.review-row[data-day="22"] .review-main');
   await sheetOpen(page);
@@ -514,6 +521,9 @@ test('«Escribir el plan a mano» muestra los días ya guardados', async () => {
 test('códigos: confirmar el horario de F6 cambia las horas; crear un código nuevo desde un día', async () => {
   const { page, ctx, errors } = await openApp({ state: demoState() });
   await tab(page, 'ajustes');
+  // F6 solo se usó en junio: está en «Ver todos los códigos»
+  assert.equal(await page.locator('.code-row[data-code="F6"]').count(), 0);
+  await page.click('[data-testid="codes-all"]');
   await page.click('.code-row[data-code="F6"]');
   await sheetOpen(page);
   assert.match(await text(page, '.sheet'), /horario es supuesto/);
@@ -618,8 +628,8 @@ test('Ajustes: orden de SPEC §10, códigos usados primero y opciones avanzadas 
   return { ctx, errors };
 });
 
-test('opciones avanzadas: borrar todos los datos pide confirmar dos veces y se puede deshacer', async () => {
-  const state = demoState();
+test('opciones avanzadas: borrar todos los datos pide confirmar dos veces y «Deshacer» lo deja todo como antes', async () => {
+  const state = demoState({ sync: true, ntfy: true });
   const { page, ctx, errors } = await openApp({ state });
   await tab(page, 'ajustes');
   await page.click('#set-advanced > summary');
@@ -632,10 +642,19 @@ test('opciones avanzadas: borrar todos los datos pide confirmar dos veces y se p
   let s = await getState(page);
   assert.equal(Object.keys(s.days).length, 0);
   assert.equal(s.settings.onboardingDone, true, 'no vuelve a salir la bienvenida');
+  assert.equal(s.settings.sync.enabled, false, 'también la conexión del calendario');
   await page.click('.toast .toast-action'); // Deshacer
   await page.waitForFunction((k) => Object.keys(JSON.parse(localStorage.getItem(k)).days).length > 0, STORAGE_KEY);
   s = await getState(page);
   assert.equal(Object.keys(s.days).length, Object.keys(state.days).length);
+  // «Todo como antes» de verdad: el calendario sigue conectado (misma identidad) y ntfy activado
+  assert.equal(s.settings.sync.enabled, true);
+  assert.equal(s.settings.sync.token, TOKEN);
+  assert.equal(s.settings.sync.key, KEY);
+  assert.equal(s.settings.sync.deviceId, 'iphone1');
+  assert.equal(s.settings.ntfy.enabled, true);
+  assert.equal(s.settings.ntfy.topic, state.settings.ntfy.topic);
+  await page.waitForSelector('[data-testid="sync-status"]:not([data-kind="off"])');
   return { ctx, errors };
 });
 
@@ -664,7 +683,7 @@ test('copia de seguridad: exportar, importar (con copia local) y «Deshacer»', 
   await page.waitForSelector('.dialog-wrap.open');
   const dlg = await text(page, '.dialog-wrap.open .dialog');
   assert.match(dlg, /3 días con turnos/);
-  assert.match(dlg, new RegExp(`este teléfono tiene ${Object.keys(state.days).length}`));
+  assert.match(dlg, new RegExp(`este teléfono tiene ${Object.keys(state.days).length} días`));
   await page.click('.dialog-wrap.open .dialog .btn-danger');
   await page.waitForSelector('.toast .toast-action');
   assert.equal(Object.keys((await getState(page)).days).length, 3);
@@ -704,7 +723,9 @@ test('enlace #setup en la app instalada: confirmar → comprobar → publicar �
   const gh = fakeGitHub();
   const { page, ctx, errors } = await openApp({ state: demoState(), hash: setupHash(), gh });
   await page.waitForSelector('.dialog-wrap.open');
-  assert.match(await text(page, '.dialog-wrap.open .dialog'), /Mardar91\/mauricio-datos/);
+  const confirmText = await text(page, '.dialog-wrap.open .dialog');
+  assert.match(confirmText, /lo preparó quien te ayuda/);
+  assert.doesNotMatch(confirmText, /Mardar91|mauricio-datos/, 'sin datos técnicos en la confirmación');
   assert.equal(await page.evaluate(() => location.hash), '', 'la URL queda limpia');
   await page.click('.dialog-wrap.open .dialog .btn-primary');
   await page.waitForSelector('[data-testid="subscribe-step"]', { timeout: 15000 });
@@ -751,7 +772,8 @@ test('enlace con otra clave: si no descifra la copia, no cambia nada', async () 
   await page.waitForSelector('.dialog-wrap.open');
   await page.click('.dialog-wrap.open .dialog .btn-primary');
   await page.waitForSelector('.dialog-wrap.open .dialog-title:text("No se pudo conectar")', { timeout: 15000 });
-  assert.match(await text(page, '.dialog-wrap.open .dialog'), /clave no coincide/);
+  assert.match(await page.locator('.dialog-wrap.open .dialog', { has: page.locator('.dialog-title:text("No se pudo conectar")') }).innerText(), /clave no coincide/);
+  assert.equal(await page.locator('.dialog-wrap.open').count(), 1, 'el «Conectando…» no se queda abierto debajo');
   await page.click('.dialog-wrap.open .dialog .btn-primary');
   const s = await getState(page);
   assert.equal(s.settings.sync.enabled, false, 'nada cambió');
@@ -768,10 +790,11 @@ test('solo lectura: aviso en Ajustes y «Usar este dispositivo» pasa a publicar
   assert.equal(gh.writes().length, 2, 'un dispositivo que solo lee no escribe');
   await tab(page, 'ajustes');
   await page.waitForSelector('[data-testid="sync-status"][data-kind="readonly"]');
-  assert.match(await text(page, '[data-testid="sync-status"]'), /Este dispositivo solo lee[\s\S]*el calendario lo actualiza tu otra app/i);
+  assert.match(await text(page, '[data-testid="sync-status"]'), /Este dispositivo solo lee[\s\S]*otro dispositivo \(por ejemplo, el de quien te ayuda\)/i);
+  assert.doesNotMatch(await text(page, '#set-calendar'), /tu otra app/i);
   await page.click('[data-testid="takeover"]');
   await page.waitForSelector('.dialog-wrap.open');
-  assert.match(await text(page, '.dialog-wrap.open .dialog'), /Tu otra app dejará de hacerlo/);
+  assert.match(await text(page, '.dialog-wrap.open .dialog'), /otro dispositivo \(por ejemplo, el de quien te ayuda\), que dejará de hacerlo/);
   await page.click('.dialog-wrap.open .dialog .btn-primary');
   await page.waitForSelector('.toast:has-text("ahora el calendario se actualiza desde aquí")', { timeout: 15000 });
   assert.equal(gh.json('backup.json').meta.publisher, 'iphone1');
@@ -802,6 +825,51 @@ test('enlace de configuración pegado en Ajustes («Tengo un enlace») en la app
   return { ctx, errors };
 });
 
+test('flujo del README: el ordenador de quien ayuda crea el enlace y el iPhone de Mauricio pasa a publicar', async () => {
+  const gh = fakeGitHub({ empty: true });
+  // 1) Ordenador de quien ayuda: sin datos, navegador normal (no iOS)
+  const helperState = core.updateSettings(core.createDefaultState(), { onboardingDone: true });
+  const A = await openApp({ state: helperState, ios: false, standalone: false, gh });
+  await tab(A.page, 'ajustes');
+  await A.page.click('[data-testid="advanced"] > summary');
+  await A.page.fill('[data-fkey="gh-owner"]', OWNER);
+  await A.page.fill('[data-fkey="gh-repo"]', REPO);
+  await A.page.fill('[data-fkey="gh-token"]', TOKEN);
+  await A.page.click('[data-fkey="btn-connect"]');
+  await waitState(A.page, (s) => Boolean(s.settings.sync.enabled && s.settings.sync.lastPushAt), null, 15000);
+  const sA = (await getState(A.page)).settings.sync;
+  assert.equal(sA.publisher, sA.deviceId, 'el ordenador vacío publica primero (repo vacío)');
+  // En el ordenador se puede cerrar el paso «Suscribirme» (es para el iPhone)
+  if (await A.page.locator('.sheet-subscribe').count()) {
+    await A.page.click('.sheet-subscribe .sheet-close');
+    await A.page.waitForSelector('.sheet-wrap', { state: 'detached' });
+  }
+  await A.ctx.grantPermissions(['clipboard-read', 'clipboard-write']);
+  await A.page.click('[data-testid="make-link"]');
+  await A.page.waitForSelector('.toast:has-text("Enlace copiado")');
+  const link = await A.page.evaluate(() => navigator.clipboard.readText());
+  assert.match(link, /#setup=/);
+  // 2) iPhone de Mauricio: app instalada con sus turnos; pega el enlace
+  const B = await openApp({ state: demoState(), gh });
+  await tab(B.page, 'ajustes');
+  await B.page.click('[data-testid="setup-paste-open"]');
+  await sheetOpen(B.page);
+  await B.page.fill('[data-testid="setup-paste"]', link);
+  await B.page.click('[data-testid="setup-paste-go"]');
+  await B.page.waitForSelector('.dialog-wrap.open');
+  await B.page.click('.dialog-wrap.open .dialog .btn-primary');
+  // Otro dispositivo publica → pregunta si este iPhone toma el relevo
+  await B.page.waitForSelector('.dialog-wrap.open .dialog-title:text("¿Usar este iPhone para actualizar el calendario?")', { timeout: 15000 });
+  await B.page.click('.dialog-wrap.open .dialog .btn-primary');
+  await B.page.waitForSelector('[data-testid="subscribe-step"]', { timeout: 15000 });
+  const sB = (await getState(B.page)).settings.sync;
+  assert.equal(gh.json('backup.json').meta.publisher, sB.deviceId, 'el iPhone publica');
+  const ics = gh.text('turnos.ics');
+  assert.match(ics, /DTSTART;TZID=Europe\/Berlin:20261013T133000/, 'el calendario tiene los turnos del iPhone');
+  assert.equal(sB.key, sA.key, 'misma clave en los dos dispositivos');
+  return { ctx: B.ctx, errors: [...A.errors, ...B.errors] };
+});
+
 test('primer uso con enlace #setup: primero el enlace y después la bienvenida', async () => {
   const { page, ctx, errors } = await openApp({ hash: setupHash() });
   await page.waitForSelector('.dialog-wrap.open');
@@ -827,11 +895,19 @@ test('calendario con error: Hoy lo dice sin jerga y Ajustes ofrece «Tengo un en
   const line = await text(page, '[data-testid="sync-line"]');
   assert.match(line, /no se está actualizando/);
   assert.doesNotMatch(line, /token|GitHub|401/i);
+  // La línea ya lo dice: el consejo igual no se repite en Hoy (sí en Horas)
+  const titles = await page.locator('#view-hoy .advice-title').allInnerTexts();
+  assert.ok(!titles.some((t) => /no se está actualizando/.test(t)), `sin aviso repetido en Hoy: ${titles.join(' | ')}`);
   await page.click('[data-testid="sync-line"]');
   await page.waitForSelector('#view-ajustes:not([hidden])');
   assert.match(await text(page, '[data-testid="sync-status"]'), /no se está actualizando/);
   assert.ok(await visible(page, '#set-calendar [data-testid="setup-paste-open"]'));
+  assert.match(await page.getAttribute('#set-calendar [data-testid="setup-paste-open"]', 'class'), /btn-primary/);
+  assert.match(await page.getAttribute('#set-calendar [data-testid="webcal"]', 'class'), /btn-secondary/, 'suscribirse queda en segundo plano');
+  assert.equal(await page.locator('#set-calendar [data-testid="alerts-notice"]').count(), 0);
   assert.match(await text(page, '#set-reminders'), /no se está actualizando/);
+  await tab(page, 'horas');
+  assert.match(await text(page, '#hours-advice'), /Tu calendario no se está actualizando/);
   return { ctx, errors };
 });
 
@@ -868,8 +944,19 @@ test('guardado fallido: aviso rojo fijo con «Exportar copia»', async () => {
   await page.waitForSelector('[data-testid="banner-save"]');
   assert.match(await text(page, '[data-testid="banner-save"]'), /No se pudo guardar en este iPhone/);
   assert.match(await text(page, '.toast-error'), /No se pudo guardar/);
+  assert.equal(await text(page, '.toast-error .toast-action'), 'Exportar copia', 'el aviso lleva «Exportar copia» (el rojo de arriba puede no verse)');
   await tab(page, 'hoy');
   assert.ok(await visible(page, '#view-hoy [data-testid="banner-save"] .banner-btn'));
+  // Guardar un código tampoco dice «guardado» si no se guardó
+  await page.evaluate(() => { for (const t of document.querySelectorAll('.toast')) t.remove(); });
+  await tab(page, 'ajustes');
+  await page.click('.code-row[data-code="Z1"]');
+  await sheetOpen(page);
+  await page.fill('.sheet-code input[type="time"] >> nth=0', '09:00');
+  await page.click('[data-testid="code-save"]');
+  if (await page.locator('.dialog-wrap.open').count()) await page.click('.dialog-wrap.open .dialog .btn-primary');
+  await page.waitForSelector('.toast-error');
+  assert.equal(await page.locator('.toast-ok').count(), 0, 'sin «✅ Z1 guardado»');
   return { ctx, errors: errors.filter((e) => !/no se pudo guardar/i.test(e)) };
 });
 
@@ -895,6 +982,11 @@ test('horas: un mes a medias lo dice («Faltan N días del plan de este mes»)',
   assert.equal(await page.locator('.hours-summary .hs-diff').count(), 0, 'sin diferencia engañosa');
   await page.click('#view-horas button[aria-label="Mes anterior"]');
   assert.equal(await page.locator('[data-testid="hours-partial"]').count(), 0);
+  // Calendario: lo mismo (diferencia «—» con el mes a medias)
+  await tab(page, 'calendario');
+  assert.notEqual((await text(page, '[data-testid="month-diff"]')).split('\n').pop().trim(), '—', 'octubre completo: con diferencia');
+  await page.click('#view-calendario button[aria-label="Mes siguiente"]');
+  assert.match(await text(page, '[data-testid="month-diff"]'), /—/);
   return { ctx, errors };
 });
 
@@ -1074,6 +1166,315 @@ test('textos: español neutro (sin giros solo de España ni «X» para miércole
     assert.doesNotMatch(src, re, `texto a cambiar: ${re}`);
   }
   assert.doesNotMatch(all.join(' '), /\bX\b/);
+  return { ctx, errors };
+});
+
+test('horario especial: cambiar la hora solo un día (horas, calendario, Hoy y .ics) y volver al normal', async () => {
+  const gh = fakeGitHub();
+  const state = demoState({ sync: true });
+  const day = '2026-10-13';
+  const otherS1 = Object.keys(state.days).sort().find((k) => k > day && state.days[k].codes.includes('S1'));
+  assert.ok(otherS1, 'hay otro día con S1');
+  const { page, ctx, errors } = await openApp({ state, gh });
+  // Primero se publica el calendario normal
+  const t0 = Date.now();
+  while (!gh.text('turnos.ics') && Date.now() - t0 < 8000) await page.waitForTimeout(150);
+  assert.match(gh.text('turnos.ics'), /DTSTART;TZID=Europe\/Berlin:20261013T133000/);
+  const weekBefore = core.weekSummary(state, '2026-10-12').total;
+  await tab(page, 'calendario');
+  await page.click(`.day-row[data-key="${day}"]`);
+  await sheetOpen(page);
+  const card = `.de-time[data-code="S1"]`;
+  assert.match(await text(page, card), /13:30–22:00[\s\S]*8 h de trabajo/);
+  assert.doesNotMatch(await text(page, '.sheet-day'), /\bnull\b|undefined/);
+  assert.match(await text(page, `${card} [data-testid="code-all-days"]`), /Cambiar el horario de S1 en todos los días/);
+  await page.click(`${card} [data-testid="day-time-edit"]`);
+  await page.fill(`${card} [data-testid="day-time-start"]`, '15:00');
+  await page.fill(`${card} [data-testid="day-time-end"]`, '20:00');
+  assert.equal(await page.inputValue(`${card} [data-testid="day-time-break"]`), '0', 'un día de 5 h no lleva la pausa de 30 min');
+  assert.match(await text(page, card), /15:00–20:00[\s\S]*horario especial[\s\S]*5 h de trabajo/);
+  assert.match(await text(page, card), /Los demás días, S1 sigue 13:30–22:00/);
+  await page.click('[data-testid="day-save"]');
+  await page.waitForSelector('.sheet-wrap', { state: 'detached' });
+  let s = await getState(page);
+  assert.deepEqual(s.days[day].times, { S1: { start: '15:00', end: '20:00', breakMin: 0 } });
+  assert.equal(s.codes.S1?.start ?? core.DEFAULT_CODES.S1.start, '13:30', 'S1 no cambia en los demás días');
+  // Calendario: ese día con su hora y la marca; otro S1, igual que siempre
+  assert.match(await text(page, `.day-row[data-key="${day}"]`), /15:00–20:00/);
+  assert.equal(await page.locator(`.day-row[data-key="${day}"] [data-testid="special-mark"]`).count(), 1);
+  assert.match(await page.getAttribute(`.day-row[data-key="${day}"]`, 'aria-label'), /horario especial/);
+  await page.click('button[aria-label="Mes siguiente"]');
+  await page.click('button[aria-label="Mes anterior"]');
+  if (otherS1.slice(0, 7) === day.slice(0, 7)) {
+    assert.match(await text(page, `.day-row[data-key="${otherS1}"]`), /13:30–22:00/);
+    assert.equal(await page.locator(`.day-row[data-key="${otherS1}"] [data-testid="special-mark"]`).count(), 0);
+  }
+  assert.match(await text(page, '.week[data-week="2026-10-12"] .week-sep-hours'), new RegExp(core.formatHours(weekBefore - 480 + 300)));
+  // Hoy: la tarjeta grande usa la hora de ese día
+  await tab(page, 'hoy');
+  const hero = await text(page, '.hero');
+  assert.match(hero, /15:00 – 20:00/);
+  assert.match(hero, /horario especial/);
+  assert.match(hero, /empieza en 4 h 45 min/);
+  assert.match(hero, /5 h de trabajo/);
+  // El .ics publicado: solo cambia el evento de ese día
+  const t1 = Date.now();
+  while (!/20261013T150000/.test(gh.text('turnos.ics')) && Date.now() - t1 < 8000) await page.waitForTimeout(150);
+  const ics = gh.text('turnos.ics').replace(/\r\n /g, '');
+  const ev = (uid) => ics.split('BEGIN:VEVENT').find((b) => b.includes(`UID:${uid}@turnos-mauricio`)) || '';
+  assert.match(ev(`${day}-S1`), /DTSTART;TZID=Europe\/Berlin:20261013T150000/);
+  assert.match(ev(`${day}-S1`), /DTEND;TZID=Europe\/Berlin:20261013T200000/);
+  const o = otherS1.replace(/-/g, '');
+  assert.match(ev(`${otherS1}-S1`), new RegExp(`DTSTART;TZID=Europe/Berlin:${o}T133000`));
+  // Volver al horario normal
+  await tab(page, 'calendario');
+  await page.click(`.day-row[data-key="${day}"]`);
+  await sheetOpen(page);
+  assert.match(await text(page, card), /horario especial/);
+  await page.click(`${card} [data-testid="day-time-reset"]`);
+  assert.match(await text(page, card), /13:30–22:00/);
+  await page.click('[data-testid="day-save"]');
+  await page.waitForSelector('.sheet-wrap', { state: 'detached' });
+  s = await getState(page);
+  assert.ok(!s.days[day].times || !s.days[day].times.S1, 'sin horario especial');
+  assert.match(await text(page, `.day-row[data-key="${day}"]`), /13:30–22:00/);
+  assert.equal(await page.locator(`.day-row[data-key="${day}"] [data-testid="special-mark"]`).count(), 0);
+  return { ctx, errors };
+});
+
+test('horario especial: quitar el código quita su hora; una hora incompleta no se guarda', async () => {
+  const { page, ctx, errors } = await openApp({ state: demoState() });
+  await tab(page, 'calendario');
+  await page.click('.day-row[data-key="2026-10-13"]');
+  await sheetOpen(page);
+  await page.click('.de-time[data-code="S1"] [data-testid="day-time-edit"]');
+  await page.fill('.de-time[data-code="S1"] [data-testid="day-time-end"]', '');
+  await page.click('[data-testid="day-save"]');
+  assert.match(await text(page, '.sheet-day .form-error'), /Pon la hora de inicio y la de fin de S1/);
+  await page.fill('.de-time[data-code="S1"] [data-testid="day-time-end"]', '23:00');
+  // Cambiar S1 por F1: la hora especial de S1 se va con él
+  await page.click('.sheet .tile[data-code="F1"]');
+  assert.equal(await page.locator('.de-time[data-code="S1"]').count(), 0);
+  await page.click('[data-testid="day-save"]');
+  await page.waitForSelector('.sheet-wrap', { state: 'detached' });
+  const s = await getState(page);
+  assert.deepEqual(s.days['2026-10-13'].codes, ['F1', 'S51']);
+  assert.ok(!s.days['2026-10-13'].times, 'sin horarios de códigos que ya no están');
+  return { ctx, errors };
+});
+
+test('códigos: «Cambiar el horario de S1 en todos los días» avisa con el número de días y pide confirmar', async () => {
+  const state = demoState();
+  const { page, ctx, errors } = await openApp({ state });
+  const all = Object.values(state.days).filter((d) => d.codes.includes('S1')).length;
+  const future = Object.entries(state.days).filter(([k, d]) => k >= '2026-10-13' && d.codes.includes('S1')).length;
+  await tab(page, 'calendario');
+  await page.click('.day-row[data-key="2026-10-13"]');
+  await sheetOpen(page);
+  await page.click('.de-time[data-code="S1"] [data-testid="code-all-days"]');
+  await page.waitForSelector('.sheet-code');
+  await page.waitForTimeout(400);
+  const notice = await text(page, '[data-testid="code-all-days-notice"]');
+  assert.match(notice, new RegExp(`Esto cambia S1 en todos tus días \\(${all} días\\)`));
+  assert.match(notice, /Si solo cambia hoy, usa «Cambiar la hora solo este día»/);
+  await page.fill('.sheet-code input[type="time"] >> nth=0', '14:00');
+  await page.click('[data-testid="code-save"]');
+  await page.waitForSelector('.dialog-wrap.open');
+  const dlg = await text(page, '.dialog-wrap.open .dialog');
+  assert.match(dlg, /¿Cambiar S1 en todos los días\?/);
+  assert.match(dlg, new RegExp(`S1 pasará a 14:00–22:00 en ${future} días de tu plan, desde hoy`));
+  await page.click('.dialog-wrap.open .dialog .btn-secondary'); // No
+  await page.waitForSelector('.dialog-wrap', { state: 'detached' });
+  assert.equal((await getState(page)).codes.S1?.start ?? '13:30', '13:30', 'no cambió nada');
+  await page.click('[data-testid="code-save"]');
+  await page.waitForSelector('.dialog-wrap.open');
+  await page.click('.dialog-wrap.open .dialog .btn-primary');
+  await page.waitForSelector('.sheet-code', { state: 'detached' });
+  assert.equal((await getState(page)).codes.S1.start, '14:00');
+  assert.match(await text(page, '.de-time[data-code="S1"]'), /14:00–22:00/, 'el editor del día se actualiza');
+  return { ctx, errors };
+});
+
+test('Hoy: un código con solo hora de inicio no muestra «null»', async () => {
+  let state = demoState();
+  state = core.upsertCode(state, { ...core.getCode(state, 'TS'), start: '10:45', end: null, countsHours: true });
+  state = core.setDay(state, '2026-10-13', ['TS']);
+  const { page, ctx, errors } = await openApp({ state });
+  const hero = await text(page, '.hero');
+  assert.doesNotMatch(hero, /null/);
+  assert.match(hero, /desde las 10:45/);
+  assert.doesNotMatch(await page.getAttribute('.hero', 'aria-label'), /null/);
+  return { ctx, errors };
+});
+
+test('calendario: suscribirse se recuerda («Suscrito ✓») y un enlace renovado no vuelve a pedirlo', async () => {
+  const gh = fakeGitHub();
+  const { page, ctx, errors } = await openApp({ state: demoState({ sync: true }), gh });
+  // Que el enlace webcal no navegue en Chromium
+  await page.evaluate(() => document.addEventListener('click', (e) => { if (e.target.closest?.('a[href^="webcal:"]')) e.preventDefault(); }));
+  await tab(page, 'ajustes');
+  assert.ok(await visible(page, '#set-calendar [data-testid="webcal"]'));
+  assert.equal(await page.locator('[data-testid="subscribed"]').count(), 0);
+  // Enlace nuevo con la misma dirección en un teléfono que ya funcionaba: no se repite «Último paso»
+  await page.click('[data-testid="setup-paste-renew"]');
+  await sheetOpen(page);
+  await page.fill('[data-testid="setup-paste"]', `${APP}${setupHash()}`);
+  await page.click('[data-testid="setup-paste-go"]');
+  await page.waitForSelector('.dialog-wrap.open');
+  await page.click('.dialog-wrap.open .dialog .btn-primary');
+  await page.waitForSelector('.toast:has-text("sigue funcionando")', { timeout: 15000 });
+  assert.equal(await page.locator('.sheet-subscribe').count(), 0, 'sin «Último paso» otra vez');
+  // Tocar «Suscribirme en el iPhone» se recuerda en este dispositivo
+  await page.click('#set-calendar [data-testid="webcal"]');
+  await page.waitForSelector('#set-calendar [data-testid="subscribed"]');
+  const sub = await page.evaluate(() => JSON.parse(localStorage.getItem('turnos-mauricio:subscribed')));
+  assert.equal(sub.url, `webcal://raw.githubusercontent.com/${OWNER}/${REPO}/HEAD/turnos.ics`);
+  assert.match(await text(page, '[data-testid="subscribed"]'), /Suscrito ✓/);
+  assert.equal(await page.locator('#set-calendar [data-testid="webcal"]').count(), 0, 'sin el botón grande');
+  assert.equal(await page.locator('#set-calendar [data-testid="alerts-notice"]').count(), 0);
+  // «Suscribirme otra vez» avisa de que se duplicaría
+  await page.click('[data-testid="subscribe-again"]');
+  await page.waitForSelector('.dialog-wrap.open');
+  assert.match(await text(page, '.dialog-wrap.open .dialog'), /verías cada turno \(y cada aviso\) dos veces/);
+  await page.click('.dialog-wrap.open .dialog .btn-secondary');
+  await page.waitForSelector('.dialog-wrap', { state: 'detached' });
+  return { ctx, errors };
+});
+
+test('enlace #setup: el paso «Suscribirme» no invita a repetirlo, avisa sin internet y recuerda la suscripción', async () => {
+  const gh = fakeGitHub();
+  const { page, ctx, errors } = await openApp({ state: demoState(), hash: setupHash(), gh });
+  await page.evaluate(() => document.addEventListener('click', (e) => { if (e.target.closest?.('a[href^="webcal:"]')) e.preventDefault(); }));
+  // Sin internet al conectar
+  const offline = (r) => r.abort('internetdisconnected');
+  await page.route('https://api.github.com/**', offline);
+  await page.waitForSelector('.dialog-wrap.open');
+  await page.click('.dialog-wrap.open .dialog .btn-primary');
+  await page.waitForSelector('[data-testid="subscribe-step"]', { timeout: 15000 });
+  const sheetText = await text(page, '.sheet-subscribe');
+  assert.doesNotMatch(sheetText, /repetir cuando quieras/i);
+  assert.match(sheetText, /Hazlo una sola vez/);
+  assert.doesNotMatch(sheetText, /\bnull\b|undefined/);
+  assert.equal(await page.getAttribute('.sheet-subscribe [data-testid="webcal"]', 'aria-disabled'), 'true');
+  assert.match(await text(page, '.sheet-subscribe [data-testid="offline-hint"]'), /Sin conexión a internet: el botón se activará solo cuando vuelva/);
+  // Vuelve internet: el botón se activa y tocarlo se recuerda
+  await page.unroute('https://api.github.com/**', offline);
+  await page.evaluate(() => window.__turnosTest.background().syncNow());
+  await page.waitForSelector('.sheet-subscribe [data-testid="webcal"][aria-disabled="false"]', { timeout: 15000 });
+  assert.equal(await page.locator('.sheet-subscribe [data-testid="offline-hint"]').count(), 0);
+  await page.click('.sheet-subscribe [data-testid="webcal"]');
+  await page.waitForSelector('.sheet-subscribe [data-testid="subscribe-done"]');
+  await page.click('[data-testid="subscribe-close"]');
+  await page.waitForSelector('.sheet-wrap', { state: 'detached' });
+  assert.ok(await visible(page, '#set-calendar [data-testid="subscribed"]'));
+  return { ctx, errors };
+});
+
+test('enlace #setup sin internet: al volver la conexión, si otro dispositivo publica, pregunta «¿Usar este iPhone?»', async () => {
+  const gh = fakeGitHub();
+  await seedRemote(gh, demoState(), { deviceId: 'navegador' });
+  const { page, ctx, errors } = await openApp({ state: demoState(), hash: setupHash(), gh });
+  const offline = (r) => r.abort('internetdisconnected');
+  await page.route('https://api.github.com/**', offline);
+  await page.waitForSelector('.dialog-wrap.open');
+  await page.click('.dialog-wrap.open .dialog .btn-primary');
+  await page.waitForSelector('[data-testid="subscribe-step"]', { timeout: 15000 });
+  await page.click('.sheet-subscribe .sheet-close');
+  await page.waitForSelector('.sheet-wrap', { state: 'detached' });
+  await page.unroute('https://api.github.com/**', offline);
+  await page.evaluate(() => window.__turnosTest.background().syncNow());
+  await page.waitForSelector('.dialog-wrap.open .dialog-title:text("¿Usar este iPhone para actualizar el calendario?")', { timeout: 15000 });
+  assert.match(await text(page, '.dialog-wrap.open .dialog'), /Recomendado si este es tu iPhone/);
+  await page.click('.dialog-wrap.open .dialog .btn-primary');
+  await page.waitForSelector('.toast:has-text("ahora el calendario se actualiza desde aquí")', { timeout: 15000 });
+  assert.equal(gh.json('backup.json').meta.publisher, (await getState(page)).settings.sync.deviceId);
+  assert.equal(await page.evaluate(() => localStorage.getItem('turnos-mauricio:ask-takeover')), null, 'solo se pregunta una vez');
+  return { ctx, errors };
+});
+
+test('enlace #setup en Safari con almacenamiento nuevo: la bienvenida no tapa «Copia este enlace»', async () => {
+  const { page, ctx, errors, net } = await openApp({ state: null, hash: setupHash(), standalone: false });
+  await page.waitForSelector('[data-testid="setup-safari"]');
+  await page.waitForTimeout(800);
+  assert.equal(await page.locator('.onboarding').count(), 0, 'sin bienvenida encima');
+  const onTop = await page.evaluate(() => {
+    const b = document.querySelector('[data-testid="setup-copy"]').getBoundingClientRect();
+    return Boolean(document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2)?.closest('[data-testid="setup-copy"]'));
+  });
+  assert.ok(onTop, 'el botón «Copiar el enlace» se puede tocar');
+  assert.deepEqual(net.github, []);
+  return { ctx, errors };
+});
+
+test('Ajustes en Safari (sin instalar): primero «Instalar la app», con la guía de iOS 26', async () => {
+  const { page, ctx, errors } = await openApp({ state: demoState(), standalone: false });
+  await tab(page, 'ajustes');
+  assert.equal(await page.locator('#set-calendar [data-testid="setup-paste-open"]').count(), 0, 'pegar el enlace aquí no sirve');
+  assert.match(await text(page, '#set-calendar'), /se pega dentro de la app, no aquí en Safari/);
+  await page.click('[data-testid="cal-install"]');
+  await sheetOpen(page);
+  const guide = await text(page, '.sheet-install');
+  assert.match(guide, /Toca «•••»\s*\(abajo a la derecha\) y luego «Compartir»/);
+  assert.match(guide, /Deja activado «Abrir como app web»/);
+  assert.equal(await page.locator('.sheet-install .ios-more').count(), 1);
+  assert.equal(await page.locator('.sheet-install .ios-toggle').count(), 1);
+  return { ctx, errors };
+});
+
+test('calendario con datos de una versión más nueva: «Actualizar la app» (no «Tengo un enlace nuevo»)', async () => {
+  const gh = fakeGitHub();
+  await seedRemote(gh, demoState(), { deviceId: 'iphone1' });
+  const doc = gh.json('backup.json');
+  doc.v = 9;
+  gh.write('backup.json', JSON.stringify(doc));
+  const { page, ctx, errors } = await openApp({ state: connected(), gh });
+  await waitState(page, (s) => s.settings.sync.lastErrorCode === 'NEWER_REMOTE');
+  await page.waitForSelector('[data-testid="sync-line"].sync-alert');
+  assert.match(await text(page, '[data-testid="sync-line"]'), /Actualiza la app/);
+  await tab(page, 'ajustes');
+  assert.match(await text(page, '#set-calendar [data-testid="update-app"]'), /Actualizar la app/);
+  assert.equal(await page.locator('#set-calendar [data-testid="setup-paste-open"]').count(), 0);
+  return { ctx, errors };
+});
+
+test('Ajustes: «Mis turnos y horarios» corto (lugares plegados, turnos de los próximos 2 meses)', async () => {
+  const state = demoState();
+  const { page, ctx, errors } = await openApp({ state });
+  await tab(page, 'ajustes');
+  const rows = await page.locator('#set-codes .codes-card > .code-row').count();
+  assert.ok(rows <= 8, `pocas filas a la vista (${rows})`);
+  for (const c of ['F1', 'S1', 'N1', 'Z1']) assert.ok(await visible(page, `.code-row[data-code="${c}"]`), c);
+  assert.equal(await page.locator('#set-codes .codes-card > .code-row[data-code="F51"]').count(), 0, 'los lugares no van sueltos');
+  assert.match(await text(page, '[data-testid="places"] > summary'), /Lugares \(\d+\)/);
+  assert.equal(await page.locator('.code-row[data-code="F51"]').first().isVisible(), false);
+  await page.click('[data-testid="places"] > summary');
+  assert.ok(await visible(page, '.code-row[data-code="F51"]'));
+  return { ctx, errors };
+});
+
+test('diálogos: cerrar antes del primer fotograma no los deja abiertos; un aviso persistente no se pierde', async () => {
+  const { page, ctx, errors } = await openApp({ state: demoState() });
+  const r = await page.evaluate(async () => {
+    const { busyDialog, confirmDialog } = await import('./js/ui/sheet.js');
+    const b = busyDialog('Conectando…');
+    b.close();
+    const p = confirmDialog({ title: 'Prueba' });
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    const answer = await p;
+    await new Promise((res) => requestAnimationFrame(() => requestAnimationFrame(res)));
+    const open = document.querySelectorAll('.dialog-wrap.open').length;
+    const { toast } = await import('./js/ui/toast.js');
+    window.__closed = null;
+    toast('Hay una nueva versión de la app.', { duration: 0, onClose: (why) => { window.__closed = why; }, action: { label: 'Actualizar', run: () => {} } });
+    for (const t of ['uno', 'dos', 'tres', 'cuatro']) toast(t);
+    await new Promise((res) => setTimeout(res, 300));
+    return { answer, open, sticky: [...document.querySelectorAll('.toast-sticky:not(.toast-leaving)')].map((t) => t.textContent) };
+  });
+  assert.equal(r.answer, false);
+  assert.equal(r.open, 0, 'ningún diálogo se queda abierto');
+  assert.equal(r.sticky.length, 1, 'el aviso de «nueva versión» sigue ahí');
+  await page.click('.toast-sticky .toast-text');
+  assert.equal(await page.evaluate(() => window.__closed), 'dismiss', 'al cerrarlo se avisa (para volver a ofrecerlo)');
   return { ctx, errors };
 });
 

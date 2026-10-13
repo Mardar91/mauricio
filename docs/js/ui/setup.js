@@ -1,19 +1,25 @@
 // Conectar el Calendario del iPhone: enlace de configuración (#setup=…), «Tengo un enlace» (pegar),
 // paso «Suscribirme en el iPhone» y «Usar este dispositivo». Todo pasa por la cola única (ctx.syncQueue).
 import { parseSetupLink } from '../core/index.js';
-import { copyText, h, isIOS } from './dom.js';
+import { copyText, dateTime, h, isIOS, safeStorage, setChildren } from './dom.js';
 import { icon } from './icons.js';
 import { installSteps } from './install.js';
 import { inSafariTab } from './banners.js';
-import { alertDialog, busyDialog, confirmDialog, openSheet } from './sheet.js';
-import { calendarReady, webcalUrl } from './syncStatus.js';
+import { alertDialog, busyDialog, confirmDialog, openSheet, sheetsOpen } from './sheet.js';
+import {
+  TRANSIENT, calendarReady, isConfigured, isSubscribed, markSubscribed, subscribedInfo, webcalUrl,
+} from './syncStatus.js';
+
+// Conectado sin internet y sin saber aún quién publica: se pregunta en la primera sincronización
+const ASK_TAKEOVER_KEY = 'turnos-mauricio:ask-takeover';
 
 // Enlace recibido (al abrir la app con #setup=… o pegado). link: el enlace completo (para copiarlo).
+// → true (conectado) | false | 'safari' (se mostró «Copia este enlace…»: no hay que tapar esa hoja)
 export async function openSetupLink(ctx, cfg, link) {
   // Safari de iOS sin instalar: su almacenamiento no es el de la app. No se configura nada aquí.
   if (inSafariTab()) {
     showCopyLinkSheet(ctx, link);
-    return false;
+    return 'safari';
   }
   return runSetup(ctx, cfg);
 }
@@ -52,19 +58,27 @@ function showCopyLinkSheet(ctx, link) {
   });
 }
 
+const deviceWord = () => (isIOS() ? 'iPhone' : 'dispositivo');
+
 // Confirmar → comprobar (lee y descifra con una copia; si falla no cambia nada) → guardar → publicar
-// o solo leer → paso «Suscribirme en el iPhone». opts.confirm: false en el formulario avanzado.
+// o solo leer → paso «Suscribirme en el iPhone» (solo si hace falta). opts.confirm: false en el
+// formulario avanzado.
 export async function runSetup(ctx, cfg, { confirm = true } = {}) {
   if (confirm) {
     const ok = await confirmDialog({
       icon: '🔗',
       title: 'Conectar el Calendario del iPhone',
-      text: `Este enlace lo preparó quien te ayuda (${cfg.owner}/${cfg.repo}). Sirve para que tus turnos aparezcan en el Calendario del iPhone, con avisos. Tus horarios se podrán ver con el enlace del calendario (las notas no). ¿Lo conecto?`,
+      text: 'Este enlace lo preparó quien te ayuda. Así tus turnos salen en el Calendario del iPhone, con avisos. ¿Lo conecto?',
       ok: 'Sí, conectar',
       cancel: 'Ahora no',
     });
     if (!ok) return false;
   }
+  // Cómo estaba antes: si el calendario sigue en la misma dirección, no hay que suscribirse otra vez
+  const prev = ctx.store.get().settings.sync;
+  const prevUrl = prev.enabled && isConfigured(prev) ? webcalUrl(prev) : null;
+  const prevWorked = Boolean(prevUrl && (prev.lastPushAt || prev.lastPullAt));
+
   const busy = busyDialog('Conectando con tu calendario…');
   let t;
   try {
@@ -80,22 +94,55 @@ export async function runSetup(ctx, cfg, { confirm = true } = {}) {
   }
   if (t.readOnly) {
     // Ya publica otro dispositivo (p. ej. el navegador de quien ayuda)
-    const yes = await confirmDialog({
-      icon: '📲',
-      title: `¿Usar este ${isIOS() ? 'iPhone' : 'dispositivo'} para actualizar el calendario?`,
-      text: 'Tu otra app dejará de hacerlo. Primero se juntan los turnos de los dos.',
-      ok: 'Sí, usar este', cancel: 'No, solo leer',
-    });
+    const yes = await askUseThisDevice();
     if (yes) await becomePublisherNow(ctx);
   } else if (!t.error) {
     const b2 = busyDialog('Preparando tu calendario…');
     let r = null;
     try { r = await ctx.syncQueue.sync(); } finally { b2.close(); }
-    if (r && !r.ok && r.error && !r.error.retry) await alertDialog({ icon: '⚠️', title: 'Falta un detalle', text: r.error.message });
+    if (r && r.ok && r.readOnly) {
+      if (await askUseThisDevice()) await becomePublisherNow(ctx);
+    } else if (r && !r.ok && r.error && !r.error.retry) {
+      await alertDialog({ icon: '⚠️', title: 'Falta un detalle', text: r.error.message });
+    }
+  } else {
+    // Sin internet: todavía no se sabe si otro dispositivo publica. Se preguntará al conectar.
+    rememberAskTakeover(ctx.store.get().settings.sync);
   }
   ctx.go('ajustes', { section: 'calendar' });
-  openSubscribeSheet(ctx);
+  const url = webcalUrl(ctx.store.get().settings.sync);
+  const same = url && ((prevWorked && url === prevUrl) || isSubscribed(ctx.store.get().settings.sync));
+  if (same) ctx.toast('Listo, tu calendario sigue funcionando.', { type: 'ok', duration: 6000 });
+  else openSubscribeSheet(ctx);
   return true;
+}
+
+function askUseThisDevice() {
+  return confirmDialog({
+    icon: '📲',
+    title: `¿Usar este ${deviceWord()} para actualizar el calendario?`,
+    text: 'Ahora lo actualiza otro dispositivo (por ejemplo, el de quien te ayuda), que dejará de hacerlo. Primero se juntan los turnos de los dos. Recomendado si este es tu iPhone.',
+    ok: 'Sí, usar este', cancel: 'No, solo leer',
+  });
+}
+
+function rememberAskTakeover(sync) {
+  try { safeStorage()?.setItem(ASK_TAKEOVER_KEY, JSON.stringify({ target: `${sync.owner}/${sync.repo}/${sync.branch || ''}`, at: new Date().toISOString() })); } catch { /* nada */ }
+}
+
+// Tras una sincronización (fondo): si se conectó sin internet y resulta que otro dispositivo publica,
+// se pregunta ahora «¿Usar este iPhone?» (una sola vez)
+export async function maybeAskTakeover(ctx, res) {
+  const ls = safeStorage();
+  let pending = null;
+  try { pending = JSON.parse(ls?.getItem(ASK_TAKEOVER_KEY) || 'null'); } catch { pending = null; }
+  if (!pending || !res?.ok) return;
+  const s = ctx.store.get().settings.sync;
+  const drop = () => { try { ls?.removeItem(ASK_TAKEOVER_KEY); } catch { /* nada */ } };
+  if (!s.enabled || pending.target !== `${s.owner}/${s.repo}/${s.branch || ''}` || !res.readOnly) { drop(); return; }
+  if (sheetsOpen() || document.querySelector('.onboarding')) return; // se pregunta en la próxima
+  drop();
+  if (await askUseThisDevice()) await becomePublisherNow(ctx);
 }
 
 // «Usar este dispositivo» (tras confirmarlo): lee + fusiona + publica desde aquí
@@ -115,27 +162,57 @@ export async function takeOver(ctx) {
   const ok = await confirmDialog({
     icon: '📲',
     title: '¿Actualizar el calendario desde este dispositivo?',
-    text: 'Tu otra app dejará de hacerlo. Primero se juntan los turnos de los dos.',
+    text: 'Ahora lo actualiza otro dispositivo (por ejemplo, el de quien te ayuda), que dejará de hacerlo. Primero se juntan los turnos de los dos.',
     ok: 'Sí, usar este', cancel: 'Ahora no',
   });
   if (!ok) return false;
   return becomePublisherNow(ctx);
 }
 
+// Abre la dirección webcal (dentro del mismo toque, para que iOS la acepte)
+function openWebcal(url) {
+  const a = h('a', { href: url, hidden: true });
+  document.body.append(a);
+  a.click();
+  a.remove();
+}
+
 // Botón grande «Suscribirme en el iPhone» (webcal). Desactivado mientras se prepara el calendario.
-export function subscribeButton(ctx, sync, { block = true } = {}) {
+// Al tocarlo se recuerda en este dispositivo (para no invitar a repetirlo: duplicaría los turnos).
+export function subscribeButton(ctx, sync, { block = true, secondary = false, onTap } = {}) {
   const url = webcalUrl(sync);
   const ready = calendarReady(sync) && Boolean(url);
   return h('a', {
-    class: ['btn', 'btn-primary', 'btn-lg', block && 'btn-block', !ready && 'is-disabled'],
+    class: ['btn', secondary ? 'btn-secondary' : 'btn-primary', 'btn-lg', block && 'btn-block', !ready && 'is-disabled'],
     href: ready ? url : '#', 'aria-disabled': ready ? 'false' : 'true', 'data-testid': 'webcal',
     on: { click: (e) => {
-      if (ready) return;
+      if (ready) { markSubscribed(url, ctx.now()); onTap?.(); return; }
       e.preventDefault();
       ctx.toast('Espera un momento: estamos preparando tu calendario.', { type: 'info' });
     } },
-  }, ready ? icon('calendar') : h('span', { class: 'spinner spinner-sm spinner-white', 'aria-hidden': 'true' }),
+  }, ready ? icon('calendar') : h('span', { class: ['spinner', 'spinner-sm', !secondary && 'spinner-white'], 'aria-hidden': 'true' }),
   ready ? 'Suscribirme en el iPhone' : 'Preparando tu calendario…');
+}
+
+// «Suscrito ✓» + «¿Lo borraste del Calendario? Suscribirme otra vez» (con aviso de no repetirlo)
+export function subscribedBlock(ctx, sync, { onChange } = {}) {
+  const info = subscribedInfo();
+  const url = webcalUrl(sync);
+  const again = async () => {
+    const ok = await confirmDialog({
+      icon: '⚠️', title: '¿Suscribirte otra vez?',
+      text: 'Hazlo solo si borraste el calendario «Turnos de Mauricio» de la app Calendario. Si todavía lo tienes, no lo repitas: verías cada turno (y cada aviso) dos veces.',
+      ok: 'Lo borré: suscribirme', cancel: 'No, ya lo tengo',
+      onOk: () => { markSubscribed(url, ctx.now()); openWebcal(url); },
+    });
+    if (ok) onChange?.();
+  };
+  return h('div', { class: 'subscribed', 'data-testid': 'subscribed' },
+    h('p', { class: 'subscribed-line' },
+      h('span', {}, h('b', {}, 'Suscrito ✓'), info?.at ? ` · desde el ${dateTime(info.at).replace(/,.*$/, '')}` : '')),
+    h('p', { class: 'subscribed-hint' }, 'Tus turnos ya llegan a la app Calendario. No hace falta repetirlo.'),
+    h('button', { class: 'link-btn link-small', type: 'button', 'data-testid': 'subscribe-again', on: { click: again } },
+      '¿Lo borraste del Calendario? Suscribirme otra vez'));
 }
 
 // Aviso que no puede faltar al suscribirse
@@ -152,26 +229,59 @@ export function subscribeSteps() {
     h('li', {}, h('b', {}, 'Desactiva «Eliminar alertas»'), ' y toca ', h('b', {}, '«Agregar»'), ' (u «OK»).'));
 }
 
-// Último paso tras conectar: suscribirse en el Calendario del iPhone
+// Sin internet mientras se prepara: que no parezca colgado
+export function offlineHint(sync) {
+  const offline = navigator.onLine === false || TRANSIENT.includes(sync?.lastErrorCode);
+  if (calendarReady(sync) || !offline) return null;
+  return h('p', { class: 'hint offline-hint', 'data-testid': 'offline-hint' }, icon('cloud'),
+    h('span', {}, 'Sin conexión a internet: el botón se activará solo cuando vuelva. Puedes cerrar esto y volver luego a Ajustes.'));
+}
+
+// Último paso tras conectar: suscribirse en el Calendario del iPhone (una sola vez)
 export function openSubscribeSheet(ctx) {
-  const btnHost = h('div', { class: 'subscribe-btn-host' });
+  const body = h('div', { class: 'subscribe-body', 'data-testid': 'subscribe-step' });
+  const foot = h('div', { class: 'subscribe-btn-host' });
+  let sheet = null;
+  const moved = (() => { const old = subscribedInfo(); return Boolean(old && old.url !== webcalUrl(ctx.store.get().settings.sync)); })();
   const paint = () => {
     const s = ctx.store.get().settings.sync;
-    btnHost.replaceChildren(subscribeButton(ctx, s));
+    if (isSubscribed(s)) {
+      setChildren(body,
+        h('div', { class: 'notice notice-ok', 'data-testid': 'subscribe-done' }, icon('check'), h('p', {},
+          h('b', {}, 'Hecho. '), 'Si el iPhone te lo preguntó, ya estás suscrito: tus turnos aparecen en la app Calendario en unos minutos.')),
+        alertsNotice(),
+        h('p', { class: 'hint' }, 'No hace falta repetirlo. Si no se abrió nada, en Ajustes → «¿No se abre o no se actualiza?» está la forma a mano.'));
+      setChildren(foot, h('button', { class: 'btn btn-primary btn-lg btn-block', type: 'button', 'data-testid': 'subscribe-close', on: { click: () => sheet?.close() } }, 'Listo'));
+      return;
+    }
+    setChildren(body,
+      moved ? h('div', { class: 'notice notice-info' }, icon('info'), h('p', {},
+        h('b', {}, 'Tu calendario tiene una dirección nueva. '),
+        'Suscríbete a la nueva y, en la app Calendario, borra el «Turnos de Mauricio» antiguo para no ver los turnos dos veces.')) : null,
+      alertsNotice(),
+      subscribeSteps(),
+      h('p', { class: 'hint' }, 'Hazlo una sola vez. Tus turnos aparecen en la app Calendario en unos minutos.'));
+    setChildren(foot, subscribeButton(ctx, s, { onTap: () => setTimeout(paint, 400) }), offlineHint(s));
   };
   paint();
   const unsub = ctx.store.subscribe(paint);
-  return openSheet({
+  const onNet = () => paint();
+  window.addEventListener('online', onNet);
+  window.addEventListener('offline', onNet);
+  sheet = openSheet({
     title: 'Último paso: tu calendario',
     subtitle: 'Así el iPhone te avisa antes de cada turno',
     className: 'sheet-subscribe',
-    body: h('div', { class: 'subscribe-body', 'data-testid': 'subscribe-step' },
-      alertsNotice(),
-      subscribeSteps(),
-      h('p', { class: 'hint' }, 'Tus turnos aparecen en la app Calendario en unos minutos. Lo puedes repetir cuando quieras en Ajustes → Calendario del iPhone.')),
-    footer: btnHost,
-    onClose: unsub,
+    body,
+    footer: foot,
+    onClose: () => {
+      unsub();
+      window.removeEventListener('online', onNet);
+      window.removeEventListener('offline', onNet);
+      ctx.repaint?.(); // Ajustes pasa a «Suscrito ✓»
+    },
   });
+  return sheet;
 }
 
 // «Tengo un enlace»: pegar con un toque (portapapeles) o en el recuadro

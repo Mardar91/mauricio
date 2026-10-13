@@ -1,7 +1,7 @@
 // Estado de la app en localStorage: carga/migración, mutaciones puras, copias de seguridad y fusión
 // entre dispositivos (días y códigos con updatedAt + tombstones, ver SPEC §9).
 import { isSyncKey } from './cipher.js';
-import { DEFAULT_CODES, KINDS, SHAPES, baseCode, cleanCode, guessCode, nominalMinutes, normalizeDayCodes } from './codes.js';
+import { DEFAULT_BREAK, DEFAULT_CODES, KINDS, MAX_DAY_BREAK, SHAPES, allowsSpecialTimes, baseCode, cleanCode, getCode, guessCode, nominalMinutes, normalizeDayCodes } from './codes.js';
 import { isKey, parseHHMM } from './dates.js';
 import { scanToDays } from './diff.js';
 import { clone, hashString, isPlainObject, isSafeKey, stableStringify } from './util.js';
@@ -23,7 +23,6 @@ export const MAX_NOTE_LEN = 1000;
 const MAX_CODES_PER_DAY = 12;
 const SOURCES = ['scan', 'manual', 'import'];
 const LAYOUTS = ['phone-list', 'pc-grid', 'unknown'];
-const DEFAULT_BREAK = 30;
 
 export const DEFAULT_SETTINGS = Object.freeze({
   name: 'Mauricio',
@@ -186,15 +185,45 @@ function cleanCodes(list) {
     .filter((c) => c && c.length <= MAX_CODE_LEN).slice(0, MAX_CODES_PER_DAY);
 }
 
-function sanitizeDay(entry) {
+// Pausa de un horario especial: entero 0..MAX_DAY_BREAK, undefined si no viene, NaN si no es válida
+function dayBreak(v) {
+  if (v === undefined || v === null || v === '') return undefined;
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 && n <= MAX_DAY_BREAK ? Math.round(n) : NaN;
+}
+
+// Horarios especiales de un día ({ CODE: { start, end, breakMin? } }) solo de códigos de ese día.
+// Lo inválido se descarta (al cargar o importar). → objeto o null si no queda nada
+function sanitizeTimes(times, codes, state = null) {
+  if (!isPlainObject(times)) return null;
+  const out = {};
+  for (const [k, t] of Object.entries(times)) {
+    const c = isSafeKey(k) ? cleanCode(k) : '';
+    if (!c || !codes.includes(c) || !isPlainObject(t)) continue;
+    // Igual que setDay: solo códigos que admiten horario (no lugares, libres, vacaciones…)
+    if (state && !allowsSpecialTimes(getCode(state, c))) continue;
+    if (parseHHMM(t.start) === null || parseHHMM(t.end) === null || parseHHMM(t.start) === parseHHMM(t.end)) continue;
+    const v = { start: normHHMM(t.start), end: normHHMM(t.end) };
+    const b = dayBreak(t.breakMin);
+    if (Number.isInteger(b)) v.breakMin = b;
+    out[c] = v;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+function sanitizeDay(entry, state = null) {
   if (Array.isArray(entry)) entry = { codes: entry };
   if (!isPlainObject(entry) || !Array.isArray(entry.codes)) return null;
-  return {
-    codes: cleanCodes(entry.codes),
+  const codes = cleanCodes(entry.codes);
+  const out = {
+    codes,
     note: typeof entry.note === 'string' ? entry.note.slice(0, MAX_NOTE_LEN) : '',
     source: SOURCES.includes(entry.source) ? entry.source : 'manual',
     updatedAt: isoOrNull(entry.updatedAt),
   };
+  const times = sanitizeTimes(entry.times, codes, state);
+  if (times) out.times = times;
+  return out;
 }
 
 function sanitizeChange(c) {
@@ -250,7 +279,7 @@ export function migrateState(raw) {
   }
   if (isPlainObject(raw.days)) {
     for (const [key, entry] of Object.entries(raw.days)) {
-      const day = isKey(key) ? sanitizeDay(entry) : null;
+      const day = isKey(key) ? sanitizeDay(entry, state) : null;
       if (day) {
         state.days[key] = { ...day, codes: normalizeDayCodes(state, day.codes) };
         ensureCodes(state, state.days[key].codes);
@@ -516,17 +545,51 @@ function ensureMaps(state) {
   return state;
 }
 
-// Guarda los códigos de un día (devuelve un estado nuevo; si nada cambia, el mismo)
-export function setDay(state, key, codes, { note, source = 'manual', now } = {}) {
+// Horarios especiales para setDay: valida (lanza Error en español), se queda con los de códigos del
+// día que admiten horario y quita los que son iguales al horario normal del código. → objeto o null
+function dayTimesFor(state, codes, times) {
+  if (times === null || times === undefined) return null;
+  if (!isPlainObject(times)) throw new Error('Horario especial no válido.');
+  const out = {};
+  for (const [k, t] of Object.entries(times)) {
+    const c = isSafeKey(k) ? cleanCode(k) : '';
+    if (!c || !codes.includes(c) || t === null || t === undefined) continue;
+    if (!isPlainObject(t)) throw new Error(`Horario especial de ${c} no válido.`);
+    if (parseHHMM(t.start) === null) throw new Error(`Hora de inicio no válida: ${t.start ?? ''}`);
+    if (parseHHMM(t.end) === null) throw new Error(`Hora de fin no válida: ${t.end ?? ''}`);
+    if (parseHHMM(t.start) === parseHHMM(t.end)) throw new Error(`La hora de fin de ${c} no puede ser la misma que la de inicio.`);
+    const b = dayBreak(t.breakMin);
+    if (Number.isNaN(b)) throw new Error(`La pausa tiene que estar entre 0 y ${MAX_DAY_BREAK} minutos.`);
+    const def = getCode(state, c);
+    if (!allowsSpecialTimes(def)) continue;
+    const v = { start: normHHMM(t.start), end: normHHMM(t.end) };
+    if (b !== undefined) v.breakMin = b;
+    // Igual que el horario normal del código: no es especial
+    if (v.start === def.start && v.end === def.end && (b === undefined || b === (Number(def.breakMin) || 0))) continue;
+    out[c] = v;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+const sameTimes = (a, b) => stableStringify(a ?? null) === stableStringify(b ?? null);
+
+// Guarda los códigos de un día (devuelve un estado nuevo; si nada cambia, el mismo).
+// times: horarios especiales de ese día { CODE: { start, end, breakMin? } } (solo para ese día; el
+// código no cambia). undefined = se conservan los que había (de los códigos que siguen en el día);
+// null o {} = se quitan. Lanza Error (en español) si una hora o la pausa no son válidas.
+export function setDay(state, key, codes, { note, source = 'manual', times, now } = {}) {
   if (!isKey(key)) throw new Error(`Fecha no válida: ${key}`);
   const prev = state.days?.[key] ?? null;
   const after = normalizeDayCodes(state, cleanCodes((codes || []).filter((c) => typeof c === 'string')));
   const nextNote = (note === undefined ? (prev?.note ?? '') : String(note ?? '')).slice(0, MAX_NOTE_LEN);
-  if (prev && sameList(prev.codes, after) && prev.note === nextNote) return state;
+  // Sin times: se quedan los del día (los de un código quitado se van con él)
+  const nextTimes = times === undefined ? sanitizeTimes(prev?.times, after) : dayTimesFor(state, after, times);
+  if (prev && sameList(prev.codes, after) && prev.note === nextNote && sameTimes(prev.times, nextTimes)) return state;
   const next = ensureMaps(clone(state));
   ensureCodes(next, after);
   const at = nowIso(now);
   next.days[key] = { codes: after, note: nextNote, source: SOURCES.includes(source) ? source : 'manual', updatedAt: at };
+  if (nextTimes) next.days[key].times = nextTimes;
   delete next.tombstones[key];
   if (!prev || !sameList(prev.codes, after)) {
     logChange(next, { at, dayKey: key, before: prev ? [...prev.codes] : [], after: [...after], source: next.days[key].source });
@@ -627,7 +690,8 @@ export function deleteCode(state, code, { now } = {}) {
 
 // Mezcla profunda de ajustes. Si cambian los recordatorios o publishPlaces, anota calendarUpdatedAt
 // (sello del .ics) y remindersUpdatedAt / placesUpdatedAt (para fusionar entre dispositivos). Un
-// remindersUpdatedAt / placesUpdatedAt explícito en el parche se respeta (p. ej. el de un enlace).
+// sello explícito en el parche (remindersUpdatedAt, placesUpdatedAt o calendarUpdatedAt) se respeta
+// (p. ej. los lugares que sugiere un enlace no cambian el sello del calendario).
 export function updateSettings(state, patch, { now } = {}) {
   const next = clone(state);
   next.settings = fixSettings(mergeSettings(state.settings, patch));
@@ -644,7 +708,7 @@ export function updateSettings(state, patch, { now } = {}) {
   }
   if (remindersChanged && !given('remindersUpdatedAt')) next.settings.remindersUpdatedAt = at;
   if (placesChanged && !given('placesUpdatedAt')) next.settings.placesUpdatedAt = at;
-  if (remindersChanged || placesChanged) next.settings.calendarUpdatedAt = at;
+  if ((remindersChanged || placesChanged) && !given('calendarUpdatedAt')) next.settings.calendarUpdatedAt = at;
   return next;
 }
 
@@ -742,7 +806,7 @@ export function importBackup(state, json, { now, force = false } = {}) {
   const next = migrateState(data);
   const localDays = state.days || {};
   if (!count(next.days) && count(localDays) && !force) {
-    throw importError('Esa copia no tiene ningún día con turnos. No se ha cambiado nada.', 'EMPTY_BACKUP');
+    throw importError('Esa copia no tiene ningún día con turnos. No se cambió nada.', 'EMPTY_BACKUP');
   }
   // Ajustes propios de este dispositivo
   const cur = state.settings || {};
@@ -764,7 +828,7 @@ export function importBackup(state, json, { now, force = false } = {}) {
   next.tombstones = newestStamps(sanitizeStamps(state.tombstones, isKey), next.tombstones);
   for (const [key, d] of Object.entries(next.days)) {
     const local = localDays[key];
-    if (local && sameList(local.codes, d.codes) && local.note === d.note) {
+    if (local && sameList(local.codes, d.codes) && local.note === d.note && sameTimes(local.times, d.times)) {
       next.days[key] = { ...d, source: local.source, updatedAt: local.updatedAt };
     } else {
       next.days[key] = { ...d, source: 'import', updatedAt: restamp ? at : d.updatedAt };

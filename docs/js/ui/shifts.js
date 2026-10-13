@@ -4,6 +4,7 @@ import {
 } from '../core/index.js';
 import { cap } from './dom.js';
 import { displayName } from './badge.js';
+import { dayTimes, rangeText } from './times.js';
 
 // Turno en curso o el siguiente (hasta 60 días) → { item, current, key } | null
 export function nextShift(state, now = new Date()) {
@@ -53,17 +54,21 @@ export function remaining(ms) {
   return mm ? `${hh} h ${mm} min` : `${hh} h`;
 }
 
-// Resumen de un día para listas: { name, time, hours, main, kind, holiday, note }
+// Resumen de un día para listas: { name, time, hours, main, kind, holiday, note, special }
+// time usa el horario de ese día (special: true si algún código tiene «horario especial»)
 export function daySummary(state, key) {
   const entry = state.days?.[key];
   const holiday = holidayName(key);
-  if (!entry) return { known: false, name: '', time: '', hours: '', holiday, note: '' };
+  if (!entry) return { known: false, name: '', time: '', hours: '', holiday, note: '', special: false };
   const defs = entry.codes.map((c) => getCode(state, c));
   const m = dayMinutes(state, key);
-  const work = defs.filter((d) => (d.kind === 'shift' || (d.kind === 'event' && d.countsHours)) && hasTime(d));
+  const timed = defs.map((d) => ({ d, t: dayTimes(state, key, d.code) }))
+    .filter(({ d, t }) => (d.kind === 'shift' || (d.kind === 'event' && d.countsHours)) && hasTime(t));
+  const work = timed.map((x) => x.d);
   const main = work[0] || defs.find((d) => d.kind !== 'place') || defs[0] || null;
   const name = main && defs.length ? displayName(main) : '';
-  const time = work.length ? work.map((d) => `${d.start}–${d.end}`).join(' · ') : '';
+  const time = timed.map((x) => rangeText(x.t)).join(' · ');
+  const special = timed.some((x) => x.t.special);
   const hours = m.total ? formatHours(m.total) : '';
-  return { known: true, name, time, hours, main, kind: main?.kind ?? null, holiday, note: entry.note || '', minutes: m, codes: entry.codes };
+  return { known: true, name, time, hours, main, kind: main?.kind ?? null, holiday, note: entry.note || '', minutes: m, codes: entry.codes, special };
 }

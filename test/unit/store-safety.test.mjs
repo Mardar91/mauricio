@@ -318,7 +318,7 @@ const connected = (s) => updateSettings(s, { sync: { enabled: true, token: 'TOK'
 test('importBackup: copia vacía rechazada si el teléfono tiene días (salvo force); copia cifrada → aviso', () => {
   const phone = connected(stateWith({ '2026-10-12': ['F1'] }));
   const empty = JSON.stringify({ app: 'turnos-mauricio', schema: 1, days: {} });
-  assert.throws(() => importBackup(phone, empty), (e) => e.code === 'EMPTY_BACKUP' && /No se ha cambiado nada/.test(e.message));
+  assert.throws(() => importBackup(phone, empty), (e) => e.code === 'EMPTY_BACKUP' && /No se cambió nada/.test(e.message));
   const forced = importBackup(phone, empty, { force: true, now: T0 });
   assert.deepEqual(forced.days, {});
   assert.ok(forced.tombstones['2026-10-12']);

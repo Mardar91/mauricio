@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import {
   syncNow, pullOnly, becomePublisher, applySyncResult, syncConfigPatch, applySyncConfig, ensureSyncIdentity,
   trySetupConfig, createSyncQueue, parseSetupLink, buildSetupLink, decryptBackup, isReadOnlyDevice, LINK_PLACES_AT,
+  UNKNOWN_PUBLISHER,
 } from '../../docs/js/core/sync.js';
 import { STORAGE_KEY, createDefaultState, createStore, setDay, updateSettings, upsertCode, mergeStates } from '../../docs/js/core/store.js';
 import { isSyncKey } from '../../docs/js/core/cipher.js';
@@ -35,13 +36,16 @@ test('backup.json borrado: una copia vacía no vacía el calendario y quien solo
   assert.equal(events(gh), 3);
   gh.remove('backup.json');
   const n = gh.fetch.calls.length;
-  // Safari vacío recién configurado (nunca vio publicar a nadie) → EMPTY_LOCAL, tampoco al pasar a publicar
+  // Safari vacío recién configurado (nunca vio publicar a nadie): el turnos.ics publicado no es suyo →
+  // solo lee (publisher desconocido); y al pasar a publicar → EMPTY_LOCAL
   const S = device('safari');
-  for (const fn of [syncNow, becomePublisher]) {
-    const r = await fn(S, { fetchImpl: gh.fetch, now: at(DAY) });
-    assert.equal(r.error?.code, 'EMPTY_LOCAL');
-    assert.match(r.error.detail, /3 eventos/);
-  }
+  const ro = await syncNow(S, { fetchImpl: gh.fetch, now: at(DAY) });
+  assert.equal(ro.ok, true, JSON.stringify(ro.error));
+  assert.equal(ro.readOnly, true);
+  assert.equal(ro.publisher.deviceId, UNKNOWN_PUBLISHER);
+  const r = await becomePublisher(S, { fetchImpl: gh.fetch, now: at(DAY) });
+  assert.equal(r.error?.code, 'EMPTY_LOCAL');
+  assert.match(r.error.detail, /3 eventos/);
   // El lector (con o sin cambios propios) recuerda quién publicaba: solo lee, ni con force
   for (const s of [R, setDay(R, '2026-10-25', ['F1'], { now: at(DAY) })]) {
     const r = await syncNow(s, { fetchImpl: gh.fetch, now: at(DAY), force: true });
@@ -65,9 +69,9 @@ test('backup.json borrado: una copia vacía no vacía el calendario y quien solo
   assert.equal(t.ok, true, JSON.stringify(t.error));
   assert.equal(t.tookOver, true);
   assert.equal(doc(gh).meta.publisher, 'lector');
-  // Vaciar a propósito sigue siendo posible tras confirmarlo (allowEmpty)
+  // Vaciar a propósito sigue siendo posible tras confirmarlo («Usar este dispositivo» + allowEmpty)
   gh.remove('backup.json');
-  const empty = await syncNow(S, { fetchImpl: gh.fetch, now: at(3 * DAY), allowEmpty: true });
+  const empty = await becomePublisher(S, { fetchImpl: gh.fetch, now: at(3 * DAY), allowEmpty: true });
   assert.equal(empty.pushed, true);
   assert.equal(events(gh), 0);
 });

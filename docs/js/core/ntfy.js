@@ -58,7 +58,7 @@ function httpError(status) {
   if (status === 429) return 'ntfy: demasiados avisos seguidos. Se volverá a intentar más tarde.';
   if (status === 401 || status === 403) return 'ntfy: este tema está protegido. Usa otro nombre de tema.';
   if (status === 413) return 'ntfy: el mensaje es demasiado largo.';
-  if (status >= 500) return 'ntfy no responde ahora mismo. Se volverá a intentar más tarde.';
+  if (status >= 500) return 'ntfy no responde en este momento. Se volverá a intentar más tarde.';
   return `ntfy respondió con un error (${status}).`;
 }
 

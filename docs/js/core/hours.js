@@ -1,5 +1,5 @@
 // Horas trabajadas, acreditadas y objetivo (Soll) por día, semana y mes. Todo en minutos.
-import { countsAsWork, getCode, isNightCode, shiftInterval } from './codes.js';
+import { countsAsWork, getDayCode, isNightCode, shiftInterval } from './codes.js';
 import { addDays, isHoliday, isWeekend, monthKeys, weekStart, weekdayIndex } from './dates.js';
 
 const FREE_KINDS = ['off', 'wish'];
@@ -31,7 +31,7 @@ export function dayMinutes(state, key) {
   const out = { worked: 0, credited: 0, total: 0, items: [] };
   if (!entry) return out;
   for (const code of entry.codes || []) {
-    const def = getCode(state, code);
+    const def = getDayCode(state, key, code); // con el horario especial del día si lo hay
     let minutes = 0, type = 'none';
     if (countsAsWork(def)) {
       const iv = shiftInterval(state, key, code);
@@ -46,7 +46,7 @@ export function dayMinutes(state, key) {
         out.credited += minutes;
       }
     }
-    out.items.push({ code, minutes, type });
+    out.items.push(def.special ? { code, minutes, type, special: true } : { code, minutes, type });
   }
   out.total = out.worked + out.credited;
   return out;
@@ -92,7 +92,7 @@ export function monthSummary(state, year, month1) {
   const weekendsWorked = new Set();
   for (const d of days) {
     if (!d.known) continue;
-    const defs = d.codes.map((c) => getCode(state, c));
+    const defs = d.codes.map((c) => getDayCode(state, d.key, c));
     const work = defs.filter(countsAsWork);
     // Turnos: todo lo que cuenta horas salvo los eventos (reuniones)
     const shiftLike = work.filter((def) => def.kind !== 'event');

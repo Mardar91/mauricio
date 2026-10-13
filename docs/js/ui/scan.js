@@ -6,8 +6,9 @@ import {
 import { badgeRow } from './badge.js';
 import { ago, cap, h, listText, plural, safeStorage, setChildren } from './dom.js';
 import { icon } from './icons.js';
-import { banners } from './banners.js';
+import { banners, saveFailedToast } from './banners.js';
 import { confirmDialog, openSheet } from './sheet.js';
+import { dayTimes, rangeText } from './times.js';
 
 const LOW_CONFIDENCE = 0.7;
 const EMPLOYEE = 'Ducuara';
@@ -566,9 +567,11 @@ export function createScan(ctx) {
       h('div', { class: 'review-top' },
         h('h1', { class: 'large-title' }, review.manual ? 'Plan a mano' : 'Revisa el plan'),
         h('button', { class: 'btn btn-plain btn-sm review-cancel', type: 'button', 'data-testid': 'review-cancel', on: { click: askCancel } }, 'Cancelar')),
-      h('p', { class: 'page-sub' }, review.manual
-        ? 'Aquí ves lo que ya tienes guardado. Toca un día para elegir o cambiar su turno.'
-        : 'Comprueba que todo está bien. Toca un día para corregirlo.'));
+      h('p', { class: 'page-sub' }, !review.manual
+        ? 'Comprueba que todo está bien. Toca un día para corregirlo.'
+        : rows.some((r) => state.days[r.key])
+          ? 'Aquí ves lo que ya tienes guardado. Toca un día para elegir o cambiar su turno.'
+          : 'Toca cada día y elige su turno. Al final, toca «Guardar».'));
 
     const notices = [];
     if (upToDate) {
@@ -625,6 +628,8 @@ export function createScan(ctx) {
         } },
       });
       const showAlt = r.conflict && r.alternatives?.length && !r.edited;
+      // Horario especial guardado para ese día (se mantiene si el código sigue)
+      const specials = state.days[r.key] ? r.codes.map((c) => ({ c, t: dayTimes(state, r.key, c) })).filter((x) => x.t.special) : [];
       return h('li', {
         class: ['review-row', `t-${r.present ? r.type : 'none'}`, r.doubtful && r.type !== 'same' && 'doubtful', r.unread && !r.present && 'unread',
           !r.accepted && r.present && 'unchecked', review.manual && 'manual'],
@@ -636,6 +641,9 @@ export function createScan(ctx) {
         h('span', { class: 'review-codes' },
           r.codes.length ? badgeRow(state, r.codes) : h('span', { class: 'faint' }, r.present ? 'Vacío' : r.unread ? 'Toca para completarlo' : review.manual ? 'Tocar para elegir' : '—'),
           h('span', { class: 'review-status' }, statusPill(r),
+            specials.map((x) => h('span', { class: 'review-special' },
+              h('span', { class: 'review-special-time' }, `${x.c} ${rangeText(x.t)}`),
+              h('span', { class: 'pill pill-special', 'data-testid': 'special-pill' }, 'horario especial'))),
             showAlt ? h('span', { class: 'alt-hint' }, `En la otra foto pone: ${altText(state, r.alternatives)}`) : null)),
         h('span', { class: ['row-chevron', !r.present && !r.stored && 'row-add'], 'aria-hidden': 'true' }, icon(r.present || r.stored ? 'pencil' : 'plus'))));
     }));
@@ -736,7 +744,7 @@ export function createScan(ctx) {
     render(store.get());
     ctx.go('calendario', { key: keys.includes(toKey(ctx.now())) ? toKey(ctx.now()) : keys[0] });
     if (!okSave) {
-      ctx.toast('No se pudo guardar en este teléfono. Mira el aviso rojo de arriba.', { type: 'error', duration: 8000 });
+      saveFailedToast(ctx);
       return;
     }
     const first = skipped[0];
@@ -768,6 +776,18 @@ export function createScan(ctx) {
     },
     draftInfo: () => (review && draftAt && (mode === 'review' || mode === 'fallback') ? { at: draftAt } : null),
     get mode() { return mode; },
+    // Fotos en memoria (no se guardan en el borrador: se perderían al recargar)
+    get photoCount() { return photos.length; },
+    // Borrar todos los datos: también la revisión a medias que hay en memoria
+    reset() {
+      runId++;
+      Promise.resolve().then(() => recognizer?.dispose?.()).catch(() => {});
+      review = null;
+      clearDraft();
+      cleanupPhotos();
+      mode = 'home';
+      render(store.get());
+    },
   };
 }
 

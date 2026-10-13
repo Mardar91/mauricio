@@ -1,20 +1,25 @@
-// Guía para añadir la app a la pantalla de inicio (iPhone). La comparten la bienvenida, el aviso de
-// Safari y Ajustes. Los menús de iOS cambian según el país: se nombran las dos formas.
+// Guía para añadir la app a la pantalla de inicio (iPhone, Safari de iOS 26 y anteriores). La comparten
+// la bienvenida, el aviso de Safari, el enlace abierto en Safari y Ajustes. Los menús de iOS cambian
+// según el país: se nombran las dos formas.
 import { h, isIOS } from './dom.js';
-import { icon, shareIcon } from './icons.js';
+import { icon, moreIcon, shareIcon, toggleIcon } from './icons.js';
 import { openSheet } from './sheet.js';
 
+// Nombre del botón y su icono juntos (que el icono no quede solo en otra línea)
+const term = (label, ic, after = '') => h('span', { class: 'nowrap' }, h('b', {}, label), ' ', ic, after);
+
 export function installSteps({ compact = false } = {}) {
-  return h('ol', { class: ['steps', compact && 'steps-compact'] },
-    h('li', {}, isIOS() ? 'En Safari, toca el botón ' : 'En el iPhone, abre esta página en Safari y toca ',
-      h('b', {}, 'Compartir'), ' ', shareIcon(), ' (abajo, en el centro).'),
-    h('li', {}, 'Baja un poco y toca ', h('b', {}, '«Agregar a inicio»'), ' o ', h('b', {}, '«Añadir a pantalla de inicio»'),
-      ' ', icon('addSquare', 'icon icon-inline'), ' (el cuadrado con +).'),
-    h('li', {}, 'Toca ', h('b', {}, '«Agregar»'), ' (o «Añadir»), arriba a la derecha.'),
-    h('li', {}, 'Abre la app siempre desde el icono naranja ', h('b', {}, '«Turnos»'), '.'));
+  return h('ol', { class: ['steps', 'install-steps', compact && 'steps-compact'], 'data-testid': 'install-steps' },
+    h('li', {}, isIOS() ? '' : 'En el iPhone, abre esta página en Safari. ',
+      'Toca ', term('«•••»', moreIcon()), ' (abajo a la derecha) y luego ', term('«Compartir»', shareIcon(), '.'),
+      h('span', { class: 'step-note step-note-block' }, '(En iPhones con iOS más antiguo, Compartir está abajo en el centro.)')),
+    h('li', {}, 'Toca ', h('b', {}, '«Agregar a inicio»'), ' o ', h('b', {}, '«Añadir a pantalla de '),
+      term('inicio»', icon('addSquare', 'icon icon-inline'), '.'), compact ? null : h('span', { class: 'step-note' }, ' Si no lo ves, baja un poco.')),
+    h('li', {}, 'Deja activado ', term('«Abrir como app web»', toggleIcon(), '.')),
+    h('li', {}, 'Toca ', h('b', {}, '«Agregar»'), ' (o «Añadir»). Listo: abre la app siempre desde el icono ', h('b', {}, '«Turnos»'), '.'));
 }
 
-// Hoja con la guía (desde el aviso de Safari)
+// Hoja con la guía (aviso de Safari, Hoy vacío y Ajustes en Safari)
 export function openInstallSheet(ctx) {
   const hasDays = Object.keys(ctx.store.get().days || {}).length > 0;
   const sheet = openSheet({

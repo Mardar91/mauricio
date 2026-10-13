@@ -16,7 +16,7 @@ function banner(cls, ic, title, text, action, testid) {
       action ? h('button', { class: 'btn btn-sm banner-btn', type: 'button', on: { click: action.run } }, action.label) : null));
 }
 
-async function exportNow(ctx) {
+export async function exportNow(ctx) {
   try {
     const json = exportBackup(ctx.store.get(), { now: ctx.now() });
     const res = await shareOrDownload(`turnos-mauricio-${toKey(ctx.now())}.json`, json, 'application/json');
@@ -24,6 +24,23 @@ async function exportNow(ctx) {
   } catch (e) {
     ctx.toast(e.message || 'No se pudo exportar la copia.', { type: 'error' });
   }
+}
+
+// No se pudo guardar: aviso con «Exportar copia» a mano (el aviso rojo puede quedar fuera de la vista)
+export function saveFailedToast(ctx) {
+  ctx.toast(`No se pudo guardar en este ${isIOS() ? 'iPhone' : 'dispositivo'}. Exporta una copia y pide ayuda.`, {
+    type: 'error', duration: 10000, action: { label: 'Exportar copia', run: () => exportNow(ctx) },
+  });
+}
+
+// Aviso de «guardado» solo si de verdad se guardó (si no, el de error). → true si se guardó
+export function savedToast(ctx, text, opts = {}) {
+  if (ctx.store.saveOk?.() === false) {
+    saveFailedToast(ctx);
+    return false;
+  }
+  ctx.toast(text, { type: 'ok', ...opts });
+  return true;
 }
 
 // where: 'hoy' | 'escanear' | 'calendario' | 'horas' | 'ajustes'

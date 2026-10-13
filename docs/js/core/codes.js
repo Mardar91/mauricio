@@ -102,9 +102,61 @@ export function nominalMinutes(def) {
   return e > s ? e - s : e + 1440 - s;
 }
 
-// Intervalo real del código ese día (fechas locales; si fin <= inicio termina al día siguiente)
-export function shiftInterval(state, dayKey, code) {
+// ---------- Horario especial de un día (DayEntry.times) ----------
+
+export const DEFAULT_BREAK = 30;
+export const MAX_DAY_BREAK = 240;
+// Tipos sin horario: no admiten horario especial (lugares, libres, vacaciones, baja)
+const TIMELESS_KINDS = ['place', 'off', 'wish', 'vacation', 'sick'];
+
+// ¿Se le puede poner un horario especial a este código en un día?
+export function allowsSpecialTimes(def) {
+  return Boolean(def) && !TIMELESS_KINDS.includes(def.kind);
+}
+
+// Horario especial guardado para ese código ese día (solo si el código está en el día), o null
+function dayOverride(state, key, code) {
+  const entry = state?.days?.[key];
+  const t = entry?.times?.[code];
+  if (!t || !(entry.codes || []).includes(code)) return null;
+  if (parseHHMM(t.start) === null || parseHHMM(t.end) === null) return null;
+  return t;
+}
+
+// Pausa de un horario especial: la indicada; si no, la del código, salvo que el día dure 6 h o
+// menos y el código tenga la pausa por defecto (30 min) → 0 (como upsertCode, SPEC §2)
+function overrideBreak(def, t) {
+  const b = Number(t.breakMin);
+  if (t.breakMin !== undefined && t.breakMin !== null && Number.isFinite(b)) return Math.max(0, Math.round(b));
+  const base = Number(def.breakMin) || 0;
+  const s = parseHHMM(t.start), e = parseHHMM(t.end);
+  const nominal = e > s ? e - s : e + 1440 - s;
+  const sameAsCode = t.start === def.start && t.end === def.end;
+  return !sameAsCode && nominal <= 360 && base === DEFAULT_BREAK ? 0 : base;
+}
+
+// Horario que vale ese día para ese código → { start, end, breakMin, special }.
+// special: true si el día tiene un horario especial para el código (DayEntry.times).
+export function effectiveTimes(state, key, code) {
   const def = getCode(state, code);
+  const t = allowsSpecialTimes(def) ? dayOverride(state, key, def.code) : null;
+  if (!t) return { start: def.start ?? null, end: def.end ?? null, breakMin: Number(def.breakMin) || 0, special: false };
+  return { start: t.start, end: t.end, breakMin: overrideBreak(def, t), special: true };
+}
+
+// Definición del código tal como vale ese día: con el horario especial si lo hay (special: true,
+// confirmed: true porque ese horario lo escribió el usuario). Sin horario especial = getCode.
+export function getDayCode(state, key, code) {
+  const def = getCode(state, code);
+  const t = allowsSpecialTimes(def) ? dayOverride(state, key, def.code) : null;
+  if (!t) return def;
+  return { ...def, start: t.start, end: t.end, breakMin: overrideBreak(def, t), confirmed: true, special: true };
+}
+
+// Intervalo real del código ese día (fechas locales; si fin <= inicio termina al día siguiente).
+// Usa el horario especial del día si lo hay.
+export function shiftInterval(state, dayKey, code) {
+  const def = getDayCode(state, dayKey, code);
   const s = parseHHMM(def.start), e = parseHHMM(def.end);
   if (s === null || e === null) return null;
   const d = fromKey(dayKey);
@@ -117,7 +169,7 @@ export function shiftInterval(state, dayKey, code) {
 // Intervalo para avisos y calendario: como shiftInterval, pero si solo hay hora de inicio
 // dura 1 h (startOnly: true). null si no tiene hora de inicio.
 export function timedInterval(state, dayKey, code) {
-  const def = getCode(state, code);
+  const def = getDayCode(state, dayKey, code);
   const s = parseHHMM(def.start);
   if (s === null) return null;
   if (parseHHMM(def.end) !== null) return { ...shiftInterval(state, dayKey, code), startOnly: false };

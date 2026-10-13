@@ -98,6 +98,7 @@ export function openSheet({
   root().append(wrap);
   lockScroll();
   requestAnimationFrame(() => {
+    if (closed) return; // se cerró antes del primer fotograma
     wrap.classList.add('open');
     panel.focus({ preventScroll: true });
   });
@@ -179,7 +180,8 @@ export function confirmDialog({ title, text = '', ok = 'Aceptar', cancel = 'Canc
     stack.push(api);
     root().append(wrap);
     lockScroll();
-    requestAnimationFrame(() => { wrap.classList.add('open'); box.focus({ preventScroll: true }); });
+    // Si se cerró antes del primer fotograma (respuesta muy rápida), no se vuelve a abrir
+    requestAnimationFrame(() => { if (done) return; wrap.classList.add('open'); box.focus({ preventScroll: true }); });
   });
 }
 
@@ -198,7 +200,7 @@ export function busyDialog(text) {
   stack.push(api);
   root().append(wrap);
   lockScroll();
-  requestAnimationFrame(() => { wrap.classList.add('open'); box.focus({ preventScroll: true }); });
+  requestAnimationFrame(() => { if (done) return; wrap.classList.add('open'); box.focus({ preventScroll: true }); });
   api.close = () => {
     if (done) return;
     done = true;

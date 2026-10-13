@@ -78,7 +78,7 @@ export function createCalendar(ctx) {
     const s = daySummary(state, key);
     const weekend = isWeekend(key);
     const isToday = key === today;
-    const label = `${cap(weekdayShort(key))} ${+key.slice(8)}: ${s.known ? (s.name || 'nada planificado') : 'sin plan'}${s.time ? `, ${s.time}` : ''}${s.hours ? `, ${s.hours}` : ''}${s.holiday ? `, festivo: ${s.holiday}` : ''}${s.note ? ', con nota' : ''}`;
+    const label = `${cap(weekdayShort(key))} ${+key.slice(8)}: ${s.known ? (s.name || 'nada planificado') : 'sin plan'}${s.time ? `, ${s.time}` : ''}${s.special ? ', horario especial' : ''}${s.hours ? `, ${s.hours}` : ''}${s.holiday ? `, festivo: ${s.holiday}` : ''}${s.note ? ', con nota' : ''}`;
     let line1 = '', line2 = '';
     if (s.known && s.codes.length) {
       if (s.time) { line1 = s.time; line2 = [s.name, s.hours].filter(Boolean).join(' · '); }
@@ -98,9 +98,10 @@ export function createCalendar(ctx) {
     h('span', { class: 'd-num', 'aria-hidden': 'true' }, h('span', { class: 'd-day' }, key.slice(8)), h('span', { class: 'd-dow' }, weekdayShort(key))),
     h('span', { class: 'd-codes', 'aria-hidden': 'true' },
       s.known && s.codes.length ? badgeRow(state, s.codes, { title: false }) : null,
-      s.note ? h('span', { class: 'd-note' }, icon('note')) : null),
+      s.note ? h('span', { class: 'd-note' }, icon('note')) : null,
+      s.special ? h('span', { class: 'd-special', 'data-testid': 'special-mark' }, 'horario especial') : null),
     h('span', { class: 'd-right', 'aria-hidden': 'true' },
-      line1 ? h('span', { class: ['d-l1', !s.codes?.length && 'faint'] }, line1) : null,
+      line1 ? h('span', { class: ['d-l1', !s.codes?.length && 'faint', s.special && s.time && 'is-special'] }, line1) : null,
       line2 ? h('span', { class: 'd-l2' }, line2) : null)));
   }
 
@@ -109,13 +110,14 @@ export function createCalendar(ctx) {
     title.textContent = cap(formatMonth(year, month));
 
     const ms = monthSummary(state, year, month);
-    // Mes vacío o a medias: la diferencia todavía no dice nada (sin colores de alarma)
+    // Mes vacío o a medias: la diferencia todavía no dice nada (como en Horas): «—» y sin colores
     const complete = ms.daysKnown === ms.days.length;
     const diffCls = !complete ? 'muted-strong' : ms.diff >= 0 ? 'pos' : ms.diff > -8 * 60 ? 'neg-soft' : 'neg';
-    setChildren(summary, 
+    setChildren(summary,
       h('div', { class: 'ms-item' }, h('span', { class: 'ms-label' }, 'Planificado'), h('b', { class: 'ms-value' }, formatHours(ms.total))),
       h('div', { class: 'ms-item' }, h('span', { class: 'ms-label' }, 'Objetivo'), h('b', { class: 'ms-value' }, formatHours(ms.soll))),
-      h('div', { class: 'ms-item' }, h('span', { class: 'ms-label' }, 'Diferencia'), h('b', { class: ['ms-value', diffCls] }, ms.daysKnown ? formatSignedHours(ms.diff) : '—')),
+      h('div', { class: 'ms-item', 'data-testid': 'month-diff' }, h('span', { class: 'ms-label' }, 'Diferencia'),
+        h('b', { class: ['ms-value', diffCls] }, complete ? formatSignedHours(ms.diff) : '—')),
     );
     setChildren(bannerHost, banners(ctx, state, 'calendario'));
     const missing = ms.days.length - ms.daysKnown;

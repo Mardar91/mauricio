@@ -7,6 +7,8 @@ import { badgeFromDef, KIND_LABEL } from './badge.js';
 import { contrastText, h, nextId, parseNum, plural, setChildren } from './dom.js';
 import { icon } from './icons.js';
 import { confirmDialog, openSheet } from './sheet.js';
+import { savedToast } from './banners.js';
+import { dayTimesSupported } from './times.js';
 
 export const SWATCHES = [
   ['#F2E500', 'Amarillo'], ['#8DC47E', 'Verde'], ['#3D63B8', 'Azul'], ['#F3B9BF', 'Rosa'],
@@ -24,7 +26,13 @@ const TIMED = ['shift', 'event', 'other'];
 const snap = (d) => JSON.stringify([d.code, d.kind, d.name, d.start || '', d.end || '', Number(d.breakMin) || 0, Boolean(d.countsHours),
   d.creditHours ?? null, d.color, d.shape, d.place || '']);
 
-// opts: { onSaved(code), kind }
+// Días del plan que usan el código (desde 'from', si se indica) y no tienen un horario especial para él
+function daysUsing(state, code, from = null) {
+  return Object.entries(state.days || {}).filter(([k, e]) => (!from || k >= from) && Array.isArray(e?.codes) && e.codes.includes(code)
+    && !e.times?.[code]).length;
+}
+
+// opts: { onSaved(code), kind, fromDay: 'YYYY-MM-DD' (abierto desde el editor de ese día) }
 export function openCodeEditor(ctx, code, opts = {}) {
   const { store } = ctx;
   const isNew = !code;
@@ -181,9 +189,9 @@ export function openCodeEditor(ctx, code, opts = {}) {
       if (d.creditHours !== null && !(d.creditHours >= 0 && d.creditHours <= 24)) return showError('Las horas por día deben estar entre 0 y 24.');
     }
     const def = buildDef(c);
+    const today = toKey(ctx.now());
     // Un cambio que quita horas (o avisos) a un código que se usa: preguntar antes
     if (!isNew && countsAsWork(existing) && !countsAsWork(def)) {
-      const today = toKey(ctx.now());
       const n = Object.entries(state.days || {}).filter(([k, e]) => k >= today && e?.codes?.includes(c)).length;
       const ok = await confirmDialog({
         icon: '⚠️', title: `¿Seguro que quieres cambiar ${c}?`,
@@ -191,6 +199,19 @@ export function openCodeEditor(ctx, code, opts = {}) {
         ok: 'Sí, cambiar', cancel: 'No, dejarlo como estaba', danger: true,
       });
       if (!ok) return;
+    } else if (!isNew && ((existing.start || null) !== def.start || (existing.end || null) !== def.end)) {
+      // Cambiar la hora de un código cambia todos sus días: decirlo con el número de días
+      const n = daysUsing(state, c, today);
+      if (n > 0) {
+        const range = def.start && def.end ? `${def.start}–${def.end}` : def.start ? `las ${def.start}` : 'sin horario';
+        const ok = await confirmDialog({
+          icon: '🗓️', title: `¿Cambiar ${c} en todos los días?`,
+          text: `${c} pasará a ${range} en ${plural(n, 'día', 'días')} de tu plan, desde hoy.`
+            + (dayTimesSupported() ? ' Si solo cambia un día, mejor usa «Cambiar la hora solo este día» al editar ese día.' : ''),
+          ok: `Sí, en ${n === 1 ? 'ese día' : `los ${n} días`}`, cancel: 'No, dejarlo como estaba',
+        });
+        if (!ok) return;
+      }
     }
     const before = state.codes[c] ? { ...state.codes[c] } : null;
     try {
@@ -200,8 +221,7 @@ export function openCodeEditor(ctx, code, opts = {}) {
       return showError(e.message);
     }
     sheet.close();
-    ctx.toast(isNew ? `Código ${c} creado` : `${c} guardado${wasUnconfirmed ? ' y confirmado' : ''}`, {
-      type: 'ok',
+    savedToast(ctx, isNew ? `Código ${c} creado` : `${c} guardado${wasUnconfirmed ? ' y confirmado' : ''}`, {
       action: isNew ? undefined : { label: 'Deshacer', run: () => store.set((s) => (before ? upsertCode(s, before) : deleteCode(s, c))) },
     });
     opts.onSaved?.(c);
@@ -220,11 +240,22 @@ export function openCodeEditor(ctx, code, opts = {}) {
     if (!ok) return;
     store.set((s) => deleteCode(s, existing.code));
     sheet.close();
-    ctx.toast(builtin ? `${existing.code} restablecido` : `${existing.code} borrado`);
+    savedToast(ctx, builtin ? `${existing.code} restablecido` : `${existing.code} borrado`);
     opts.onSaved?.(existing.code);
   }
 
+  // Abierto desde un día: dejar claro que esto cambia todos los días con este código
+  let allDaysNotice = null;
+  if (opts.fromDay && existing && TIMED.includes(existing.kind)) {
+    const n = daysUsing(store.get(), existing.code);
+    const isToday = opts.fromDay === toKey(ctx.now());
+    allDaysNotice = h('div', { class: 'notice notice-warn', 'data-testid': 'code-all-days-notice' }, icon('calendar'), h('p', {},
+      h('b', {}, `Esto cambia ${existing.code} en todos tus días${n ? ` (${plural(n, 'día', 'días')})` : ''}. `),
+      dayTimesSupported() ? `Si solo cambia ${isToday ? 'hoy' : 'ese día'}, usa «Cambiar la hora solo este día».` : ''));
+  }
+
   const body = h('form', { class: 'code-editor', on: { submit: (e) => { e.preventDefault(); save(); } } },
+    allDaysNotice,
     wasUnconfirmed ? h('div', { class: 'notice notice-warn' }, icon('warning'),
       h('p', {}, existing.kind === 'other' ? 'La app no sabe qué es este código. Elige su tipo en «Más opciones» y, si tiene, su horario.'
         : 'Este horario es supuesto. Revísalo y toca «Confirmar».')) : null,
@@ -243,7 +274,8 @@ export function openCodeEditor(ctx, code, opts = {}) {
     h('button', { class: 'btn btn-primary btn-lg grow', type: 'button', 'data-testid': 'code-save', on: { click: save } }, wasUnconfirmed ? 'Confirmar' : 'Guardar'));
 
   renderKinds(); renderColors(); renderShapes(); updateVisibility(); updatePreview();
-  const title = isNew ? 'Código nuevo' : existing.kind === 'place' ? `Lugar ${existing.code}` : `Código ${existing.code === '-' ? '“-” (libre)' : existing.code}`;
+  const title = isNew ? 'Código nuevo' : existing.kind === 'place' ? `Lugar ${existing.code}`
+    : opts.fromDay && TIMED.includes(existing.kind) ? `${existing.code} en todos los días` : `Código ${existing.code === '-' ? '“-” (libre)' : existing.code}`;
   const sheet = openSheet({
     title,
     subtitle: isNew ? 'Por ejemplo, un turno o un lugar que no estaba' : existing.kind === 'place' ? 'Dónde trabajas ese día' : KIND_LABEL[existing.kind],

@@ -86,13 +86,33 @@ test('regla 5: balance del mes', () => {
   assert.match(a.text, /154 h/);
 });
 
+test('regla 5: balance del mes completo sin «(0 h)» y sin diferencia con el mes a medias', () => {
+  // Octubre 2026: 22 días laborables → objetivo 154 h; Q1 = 7 h justas
+  let s = upsertCode(stateWith({}), { code: 'Q1', kind: 'shift', name: 'Siete', start: '08:00', end: '15:00', breakMin: 0 }, { now: NOW });
+  for (let d = 1; d <= 31; d++) {
+    const key = `2026-10-${String(d).padStart(2, '0')}`;
+    const wd = new Date(2026, 9, d).getDay();
+    s = setDay(s, key, wd === 0 || wd === 6 ? ['-'] : ['Q1'], { now: NOW });
+  }
+  const text = (st) => find(getAdvice(st, NOW), 'month-2026-10').text;
+  const day = (st, end) => setDay(st, '2026-10-14', ['Q1'], { times: { Q1: { start: '08:00', end } }, now: NOW });
+  assert.equal(text(s), 'Tienes justo las horas de tu objetivo (154 h).');
+  assert.equal(text(day(s, '15:10')), 'Tienes justo las horas de tu objetivo (154 h).'); // +10 min: justo
+  assert.equal(text(day(s, '18:30')), 'Tienes 157 h 30 planificadas: +3 h 30 sobre tu objetivo (154 h).');
+  assert.equal(text(day(s, '10:00')), 'Tienes 149 h planificadas: 5 h menos que tu objetivo (154 h).');
+  for (const end of ['15:00', '15:10', '18:30', '10:00']) assert.doesNotMatch(text(day(s, end)), /\(0 h\)|−|\(\+/);
+  // Mes a medias: sin diferencia
+  const half = { ...s, days: Object.fromEntries(Object.entries(s.days).filter(([k]) => k <= '2026-10-12')) };
+  assert.equal(text(half), 'Por ahora tienes 56 h planificadas de tu objetivo de 154 h, pero faltan 19 días por cargar.');
+});
+
 test('regla 6: bloque de noches próximo', () => {
   const s = stateWith({ '2026-10-13': ['N1'], '2026-10-14': ['N1'], '2026-10-15': ['-'] });
   const a = find(getAdvice(s, NOW), 'nights-2026-10-13');
   assert.ok(a);
   assert.equal(a.level, 'info');
   assert.match(a.title, /2 noches/);
-  assert.match(a.text, /no conduzcas/);
+  assert.match(a.text, /no manejes/);
   assert.equal(find(getAdvice(stateWith({ '2026-10-20': ['N1'] }), NOW), 'nights-'), undefined); // demasiado lejos
 });
 
@@ -201,7 +221,7 @@ test('U13: el consejo de recordatorios no promete minutos y lleva a la sección 
 
 test('U4: si el calendario no se actualiza, aviso en Hoy (pasajeros solo si duran)', () => {
   const base = stateWith(REAL_WEEK);
-  const auth = updateSettings(base, { sync: { enabled: true, lastError: 'La conexión del calendario ha caducado.', lastErrorCode: 'AUTH', lastPushAt: NOW.toISOString() } });
+  const auth = updateSettings(base, { sync: { enabled: true, lastError: 'La conexión del calendario ya no funciona.', lastErrorCode: 'AUTH', lastPushAt: NOW.toISOString() } });
   const a = find(getAdvice(auth, NOW), 'sync-error');
   assert.equal(a.level, 'alert');
   assert.equal(a.title, 'Tu calendario no se está actualizando');
@@ -225,11 +245,11 @@ test('sync-error: el primer fallo pasajero sin haber conectado nunca da un aviso
   const never = updateSettings(base, { sync: { enabled: true, lastError: 'Sin conexión', lastErrorCode: 'NETWORK', lastErrorSince: NOW.toISOString() } });
   const a = find(getAdvice(never, NOW), 'sync-error');
   assert.equal(a.level, 'info');
-  assert.match(a.text, /Todavía no se ha podido conectar el calendario/);
+  assert.match(a.text, /Todavía no se pudo conectar el calendario/);
   assert.doesNotMatch(a.text, /Hace tiempo/);
   assert.deepEqual([a.action.tab, a.action.section], ['ajustes', 'calendar']);
   // Un error no pasajero sigue siendo una alerta aunque nunca haya conectado
-  const auth = updateSettings(never, { sync: { lastErrorCode: 'AUTH', lastError: 'caducado' } });
+  const auth = updateSettings(never, { sync: { lastErrorCode: 'AUTH', lastError: 'ya no funciona' } });
   assert.equal(find(getAdvice(auth, NOW), 'sync-error').level, 'alert');
 });
 
@@ -270,4 +290,16 @@ test('read-only: si otro dispositivo publica y aquí hay cambios sin publicar, s
   assert.ok(find(getAdvice(updateSettings(clean, { sync: { unpublished: 2 } }), NOW), 'read-only'));
   // Si este dispositivo es el que publica, nada
   assert.equal(find(getAdvice(updateSettings(edited, { sync: { publisher: 'safari' } }), NOW), 'read-only'), undefined);
+});
+
+test('textos de la lógica: español neutro, sin giros solo de España ni jerga', async () => {
+  const fs = await import('node:fs');
+  const dir = new URL('../../docs/js/core/', import.meta.url);
+  // Solo el código (sin las líneas de comentario)
+  const src = fs.readdirSync(dir).filter((f) => f.endsWith('.js'))
+    .map((f) => fs.readFileSync(new URL(f, dir), 'utf8').split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n')).join('\n');
+  for (const re of [/[Hh]az una foto/, /hazle una foto/i, /Acuéstate pronto/, /conduzcas/, /ha caducado/, /No se ha enviado/,
+    /ahora mismo/, /ordenador/, /Rellen/, /He podido/, /ha fallado/, /Has cambiado/, /tu otra app/i, /añádelos/, /\(0 h\)/]) {
+    assert.doesNotMatch(src, re, `texto a cambiar: ${re}`);
+  }
 });
