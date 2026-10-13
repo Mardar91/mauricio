@@ -1,7 +1,8 @@
-// Estado del Calendario del iPhone en palabras sencillas (Hoy y Ajustes). Sin jerga.
+// Estado del calendario (del iPhone o del teléfono) en palabras sencillas (Hoy y Ajustes). Sin jerga.
 import { calendarUrls, isReadOnlyDevice } from '../core/index.js';
 import { ago, h, plural, safeStorage } from './dom.js';
 import { icon } from './icons.js';
+import { calendarPhrase, platform } from './platform.js';
 
 // Errores pasajeros (sin red, servicio ocupado…): se reintenta solo
 export const TRANSIENT = ['NETWORK', 'SERVER', 'RATE_LIMIT', 'CONFLICT', 'RETRY'];
@@ -60,10 +61,11 @@ export function webcalUrl(sync) {
 // line: frase corta para la pantalla Hoy
 export function syncState(state, now = new Date(), { busy = false } = {}) {
   const s = state?.settings?.sync || {};
+  const cal = calendarPhrase(); // «Calendario del iPhone» en iOS; «calendario del teléfono» en los demás
   if (!s.enabled || !isConfigured(s)) {
     return {
       kind: 'off', title: 'Sin conectar',
-      text: 'Tus turnos todavía no salen en el Calendario del iPhone.',
+      text: `Tus turnos todavía no salen en el ${cal}.`,
       line: null,
     };
   }
@@ -74,13 +76,13 @@ export function syncState(state, now = new Date(), { busy = false } = {}) {
     return {
       kind: 'error', title: 'El calendario no se está actualizando', code: s.lastErrorCode || null, remedy,
       text: s.lastError,
-      line: remedy === 'update' ? 'Actualiza la app para que el Calendario del iPhone siga al día.'
-        : remedy === 'pull' ? 'El Calendario del iPhone no se está actualizando: faltan tus turnos en este teléfono.'
-          : 'El Calendario del iPhone no se está actualizando. Pide ayuda a quien te configuró la app.',
+      line: remedy === 'update' ? `Actualiza la app para que el ${cal} siga al día.`
+        : remedy === 'pull' ? `El ${cal} no se está actualizando: faltan tus turnos en este teléfono.`
+          : `El ${cal} no se está actualizando. Pide ayuda a quien te configuró la app.`,
     };
   }
   if (busy) {
-    return { kind: 'busy', title: 'Actualizando el calendario…', text: last ? `Última vez: ${when}.` : '', line: 'Actualizando el Calendario del iPhone…' };
+    return { kind: 'busy', title: 'Actualizando el calendario…', text: last ? `Última vez: ${when}.` : '', line: `Actualizando el ${cal}…` };
   }
   if (s.lastError) {
     const fresh = !last;
@@ -95,13 +97,14 @@ export function syncState(state, now = new Date(), { busy = false } = {}) {
     return {
       kind: 'readonly', title: 'Este dispositivo solo lee',
       text: 'El calendario lo actualiza otro dispositivo (por ejemplo, el de quien te ayuda).' + (n ? ` Hay ${plural(n, 'cambio', 'cambios')} aquí que no ${n === 1 ? 'está' : 'están'} en el calendario.` : ''),
-      line: n ? 'Hay cambios aquí que no están en el Calendario del iPhone.' : null,
+      line: n ? `Hay cambios aquí que no están en el ${cal}.` : null,
     };
   }
   if (!last) {
-    return { kind: 'pending', title: 'Preparando tu calendario…', text: 'En un momento estará listo.', line: 'Preparando el Calendario del iPhone…' };
+    return { kind: 'pending', title: 'Preparando tu calendario…', text: 'En un momento estará listo.', line: `Preparando el ${cal}…` };
   }
-  return { kind: 'ok', title: 'Conectado', text: `Al día · actualizado ${when}.`, line: `Calendario del iPhone al día · ${when}` };
+  // En Hoy, corto (en Android «Calendario del teléfono al día» no cabe en una línea)
+  return { kind: 'ok', title: 'Conectado', text: `Al día · actualizado ${when}.`, line: `${platform() === 'ios' ? cal : 'Tu calendario'} al día · ${when}` };
 }
 
 // Línea de estado para Hoy (null si no hay nada que decir). Sin «Actualizando…»: en Hoy no parpadea

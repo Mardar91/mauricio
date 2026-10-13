@@ -6,8 +6,8 @@ import path from 'node:path';
 import { chromium } from 'playwright';
 import { startServer } from '../tools/serve.mjs';
 import {
-  KEY, OWNER, REPO, ROOT, STORAGE_KEY, SYNC, TOKEN, core, demoState, ensureOut, fakeGitHub, findOverflow, iphoneContext,
-  mockNetwork, preparePage, seedRemote,
+  KEY, NOW, OTHER_KEY, OWNER, REPO, ROOT, STORAGE_KEY, SYNC, TOKEN, core, demoState, ensureOut, fakeGitHub, findOverflow,
+  iphoneContext, mockNetwork, preparePage, seedRemote,
 } from './helpers.mjs';
 
 const filter = process.argv.slice(2).join(' ');
@@ -28,8 +28,9 @@ const test = (name, fn, opts = {}) => tests.push({ name, fn, opts });
 
 // Abre la app con un estado inicial; devuelve { page, ctx, errors, net }.
 // standalone: true = app abierta desde la pantalla de inicio; false = pestaña de Safari (iPhone)
-async function openApp({ state = null, sw = 'block', width = 390, hash = '', net = true, standalone = true, ios = true, gh } = {}) {
-  const ctx = await iphoneContext(browser, { scale: 1, sw, width, ios });
+// device: 'android' | 'desktop' | 'ipad' (por defecto, iPhone)
+async function openApp({ state = null, sw = 'block', width = 390, height = 844, hash = '', net = true, standalone = true, ios = true, gh, device } = {}) {
+  const ctx = await iphoneContext(browser, { scale: 1, sw, width, height, ios, device });
   openContexts.push(ctx);
   const errors = [];
   const page = await preparePage(ctx, { state, errors, standalone });
@@ -48,6 +49,10 @@ const waitState = (page, fn, arg, timeout = 10000) => page.waitForFunction(([k, 
 }, [STORAGE_KEY, fn.toString(), arg], { timeout });
 
 const getState = (page) => page.evaluate((k) => JSON.parse(localStorage.getItem(k)), STORAGE_KEY);
+// Suma (en minutos) de las líneas de «Saldo de horas» («+18 h 30», «−2 h 30», «+5 h»)
+const sumBalanceRows = (page) => page.evaluate(() => [...document.querySelectorAll('[data-testid="overtime"] .bal-months b')]
+  .map((b) => { const m = b.textContent.trim().match(/^([+−-]?)(\d+) h(?: (\d+))?$/); return m ? (m[1] === '+' || !m[1] ? 1 : -1) * (Number(m[2]) * 60 + Number(m[3] || 0)) : NaN; })
+  .reduce((a, n) => a + n, 0));
 const tab = (page, id) => page.click(`.tab[data-tab="${id}"]`);
 const text = (page, sel) => page.locator(sel).first().innerText();
 const visible = (page, sel) => page.locator(sel).first().isVisible();
@@ -62,10 +67,11 @@ async function sheetOpen(page) {
 test('primer uso: la bienvenida se puede saltar y no vuelve a salir', async () => {
   const { page, ctx, errors } = await openApp();
   await page.waitForSelector('.onboarding.open');
-  assert.match(await text(page, '.ob-title'), /Hola, Mauricio/);
+  assert.equal(await text(page, '.ob-title'), '¡Hola! 👋', 'sin nombre todavía: saludo neutro');
   await page.click('.ob-skip');
   await page.waitForSelector('.onboarding', { state: 'detached' });
   assert.match(await text(page, '#view-hoy'), /Aún no tienes turnos/);
+  assert.equal(await text(page, '#view-hoy .large-title'), 'Hola 👋');
   assert.equal((await getState(page)).settings.onboardingDone, true);
   await page.reload();
   await page.waitForSelector('.tabbar');
@@ -81,15 +87,16 @@ test('primer uso en Safari (iPhone sin instalar): paso de instalar, se queda en 
   const { page, ctx, errors } = await openApp({ standalone: false });
   await page.waitForSelector('.onboarding.open');
   const steps = await page.locator('.ob-dot').count();
-  assert.equal(steps, 3, 'en iPhone (Safari) se muestra el paso de instalar');
+  assert.equal(steps, 4, 'en iPhone (Safari) se muestra el paso de instalar (bienvenida, nombre, instalar, avisos)');
   await page.click('.ob-bottom .btn-primary');
+  await page.click('.ob-bottom .btn-primary'); // nombre: se puede dejar vacío
   const install = await text(page, '.ob-step');
   assert.match(install, /«•••»\s*\(abajo a la derecha\) y luego «Compartir»/);
   assert.match(install, /iOS más antiguo, Compartir está abajo en el centro/);
   assert.match(install, /Agregar a inicio/);
   assert.match(install, /Añadir a pantalla de inicio/);
   assert.match(install, /Deja activado «Abrir como app web»/);
-  for (let i = 1; i < steps; i++) await page.click('.ob-bottom .btn-primary');
+  for (let i = 2; i < steps; i++) await page.click('.ob-bottom .btn-primary');
   await page.waitForSelector('.onboarding', { state: 'detached' });
   assert.ok(await visible(page, '#view-hoy'), 'en Safari no lleva a escanear');
   assert.match(await text(page, '[data-testid="banner-safari"]'), /Instala la app para no perder tus datos/);
@@ -110,8 +117,8 @@ test('primer uso en Safari (iPhone sin instalar): paso de instalar, se queda en 
 test('primer uso en la app instalada: completar la bienvenida lleva a Escanear, sin aviso de Safari', async () => {
   const { page, ctx, errors } = await openApp({ standalone: true });
   await page.waitForSelector('.onboarding.open');
-  assert.equal(await page.locator('.ob-dot').count(), 2, 'sin paso de instalar');
-  for (let i = 0; i < 2; i++) await page.click('.ob-bottom .btn-primary');
+  assert.equal(await page.locator('.ob-dot').count(), 3, 'sin paso de instalar');
+  for (let i = 0; i < 3; i++) await page.click('.ob-bottom .btn-primary');
   await page.waitForSelector('.onboarding', { state: 'detached' });
   assert.ok(await visible(page, '#view-escanear'));
   assert.equal(await page.locator('[data-testid="banner-safari"]').count(), 0);
@@ -636,7 +643,7 @@ test('opciones avanzadas: borrar todos los datos pide confirmar dos veces y «De
   await page.click('[data-testid="wipe"]');
   await page.waitForSelector('.dialog-wrap.open');
   await page.click('.dialog-wrap.open .dialog .btn-danger');
-  await page.waitForSelector('.dialog-wrap.open .dialog-title:text("¿Seguro?")');
+  await page.waitForSelector('.dialog-wrap.open .dialog-title:text("¿Lo confirmas?")');
   await page.click('.dialog-wrap.open .dialog .btn-danger');
   await page.waitForSelector('.toast .toast-action');
   let s = await getState(page);
@@ -839,9 +846,9 @@ test('flujo del README: el ordenador de quien ayuda crea el enlace y el iPhone d
   await waitState(A.page, (s) => Boolean(s.settings.sync.enabled && s.settings.sync.lastPushAt), null, 15000);
   const sA = (await getState(A.page)).settings.sync;
   assert.equal(sA.publisher, sA.deviceId, 'el ordenador vacío publica primero (repo vacío)');
-  // Quien ayuda no ve el paso «Suscribirme»: le lleva a «Crear enlace para Mauricio»
+  // Quien ayuda no ve el paso «Suscribirme»: le lleva a «Crear enlace…» (y a «para otra persona»)
   await A.page.waitForSelector('.dialog-wrap.open .dialog-title:text("Conectado")');
-  assert.match(await text(A.page, '.dialog-wrap.open .dialog'), /Crear enlace para Mauricio/);
+  assert.match(await text(A.page, '.dialog-wrap.open .dialog'), /Crear enlace de configuración[\s\S]*Crear enlace para otra persona/);
   await A.page.click('.dialog-wrap.open .dialog .btn-primary');
   await A.page.waitForSelector('.dialog-wrap.open', { state: 'detached' });
   assert.equal(await A.page.locator('.sheet-subscribe').count(), 0, 'sin paso «Suscribirme» en el dispositivo de quien ayuda');
@@ -1070,7 +1077,8 @@ test('PWA: nueva versión → aviso «Actualizar» → recarga con la caché nue
 test('PWA: manifest, iconos y metadatos de iOS', async () => {
   const { page, ctx, errors } = await openApp({ state: demoState() });
   const m = await page.evaluate(async () => (await fetch('manifest.webmanifest')).json());
-  assert.equal(m.name, 'Turnos de Mauricio');
+  assert.equal(m.name, 'Turnos', 'nombre neutro (lo usan varias personas)');
+  assert.equal(await page.title(), 'Turnos');
   assert.equal(m.short_name, 'Turnos');
   assert.equal(m.display, 'standalone');
   assert.equal(m.start_url, './');
@@ -1118,14 +1126,13 @@ test('diseño: objetivos táctiles de al menos 44 px y campos de 16 px o más (s
   const check = async (where) => {
     small.push(...(await page.evaluate((w) => {
       const out = [];
-      for (const el of document.querySelectorAll('button, a.btn, label.btn, .switch, .check, input, select, textarea')) {
+      for (const el of document.querySelectorAll('button, a.btn, a.link-btn, label.btn, .switch, .check, input, select, textarea, summary')) {
         const r = el.getBoundingClientRect();
         if (!r.width || !r.height || el.closest('[hidden], .file-inputs, .visually-hidden') || getComputedStyle(el).visibility === 'hidden') continue;
         const fs = parseFloat(getComputedStyle(el).fontSize);
         if (/^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName) && el.type !== 'checkbox' && fs < 16) out.push(`${w}: campo ${el.getAttribute('aria-label') || el.className} ${fs}px`);
         // Interruptores y círculos: la fila entera (label) es el objetivo
         if (el.matches('.switch, .check')) { const lab = el.closest('label'); if (lab) { const lr = lab.getBoundingClientRect(); if (lr.height >= 44) continue; } }
-        if (el.matches('.link-inline')) continue; // enlace dentro de una tarjeta que también se puede tocar
         if (Math.min(r.height, r.width) < 43.5) out.push(`${w}: ${el.tagName.toLowerCase()}.${String(el.className).split(' ').join('.')} ${Math.round(r.width)}×${Math.round(r.height)} "${(el.getAttribute('aria-label') || el.textContent || '').trim().slice(0, 24)}"`);
       }
       return out;
@@ -1164,7 +1171,9 @@ test('textos: español neutro (sin giros solo de España ni «X» para miércole
     all.push(await page.evaluate(() => document.querySelector('.view:not([hidden])').textContent));
   }
   const src = fs.readdirSync(path.join(ROOT, 'docs/js/ui')).map((f) => fs.readFileSync(path.join(ROOT, 'docs/js/ui', f), 'utf8')).join('\n');
-  for (const re of [/Hacer foto/, /Haz una foto/, /hazle una foto/i, /Rellen/, /He podido/, /ha fallado/, /de baja\b/, /Acuéstate pronto/, /[«"]X[»"]/]) {
+  for (const re of [/Hacer foto/, /Haz una foto/, /hazle una foto/i, /Rellen/, /He podido/, /ha fallado/, /de baja\b/, /Acuéstate pronto/, /[«"]X[»"]/,
+    // Lo usan Mauricio y su hermana: sin textos con género
+    /¿Seguro\b/, /\bestás suscrit[oa]\b/, /\bbienvenido\b/i]) {
     assert.doesNotMatch(src, re, `texto a cambiar: ${re}`);
   }
   assert.doesNotMatch(all.join(' '), /\bX\b/);
@@ -1305,7 +1314,7 @@ test('Hoy: un código con solo hora de inicio no muestra «null»', async () => 
   const hero = await text(page, '.hero');
   assert.doesNotMatch(hero, /null/);
   assert.match(hero, /desde las 10:45/);
-  assert.doesNotMatch(await page.getAttribute('.hero', 'aria-label'), /null/);
+  assert.doesNotMatch(await page.getAttribute('[data-testid="hero-open"]', 'aria-label'), /null/);
   return { ctx, errors };
 });
 
@@ -1477,6 +1486,670 @@ test('diálogos: cerrar antes del primer fotograma no los deja abiertos; un avis
   assert.equal(r.sticky.length, 1, 'el aviso de «nueva versión» sigue ahí');
   await page.click('.toast-sticky .toast-text');
   assert.equal(await page.evaluate(() => window.__closed), 'dismiss', 'al cerrarlo se avisa (para volver a ofrecerlo)');
+  return { ctx, errors };
+});
+
+// ---------- SPEC §11–§14: varias personas, Android, funciones nuevas y diseño adaptable ----------
+
+// GitHub con el calendario de Mauricio (raíz) y, si se pide, el de Ana (carpeta «ana», otra clave)
+async function familyGitHub({ ana = true } = {}) {
+  const gh = fakeGitHub();
+  await seedRemote(gh, demoState(), { deviceId: 'iphone1', name: 'Mauricio' });
+  if (ana) {
+    let st = core.updateSettings(core.createDefaultState(), { onboardingDone: true });
+    st = core.setDay(st, '2026-10-14', ['S1'], { now: new Date('2026-10-10T10:00:00Z') });
+    await seedRemote(gh, st, { deviceId: 'android-ana', dir: 'ana', key: OTHER_KEY, name: 'Ana' });
+  }
+  return gh;
+}
+// Simula el aviso de instalación de Chrome (beforeinstallprompt)
+const fakeInstallPrompt = (page, outcome = 'accepted') => page.evaluate((o) => {
+  window.__prompted = false;
+  const e = new Event('beforeinstallprompt', { cancelable: true });
+  e.prompt = async () => { window.__prompted = true; };
+  e.userChoice = Promise.resolve({ outcome: o });
+  window.dispatchEvent(e);
+}, outcome);
+const RECORDING_STUB = `export async function recognize(input, o = {}) { globalThis.__employeeName = o.employeeName; o.onProgress?.(1, 'Listo');
+  return { layout: 'unknown', month: null, year: null, days: [], warnings: [] }; }
+export async function dispose() {}`;
+
+test('primer uso: nombre y nombre del plan (saltables) → saludo, Ajustes «Tu nombre» y la tabla del PC', async () => {
+  const { page, ctx, errors } = await openApp();
+  await page.waitForSelector('.onboarding.open');
+  await page.click('[data-testid="ob-next"]');
+  assert.match(await text(page, '.ob-step[data-step="name"]'), /¿Cómo te llamas\?[\s\S]*¿Cómo sale tu nombre en el plan\?/);
+  await page.fill('[data-testid="ob-name"]', '  Ana ');
+  assert.equal(await page.getAttribute('[data-testid="ob-plan-name"]', 'placeholder'), 'Ej.: Ducuara Ana', 'sugiere «Ducuara <nombre>»');
+  await page.fill('[data-testid="ob-plan-name"]', 'Ducuara Ana');
+  await page.click('[data-testid="ob-next"]');
+  assert.match(await text(page, '.ob-step'), /Avisos antes de trabajar/);
+  let s = await getState(page);
+  assert.equal(s.settings.name, 'Ana');
+  assert.equal(s.settings.planName, 'Ducuara Ana');
+  await page.click('[data-testid="ob-next"]');
+  await page.waitForSelector('.onboarding', { state: 'detached' });
+  await tab(page, 'hoy');
+  assert.equal(await text(page, '#view-hoy .large-title'), 'Hola, Ana 👋');
+  // Ajustes → «Tu nombre»: se puede cambiar
+  await tab(page, 'ajustes');
+  assert.equal(await page.inputValue('#set-name [data-fkey="name"]'), 'Ana');
+  assert.equal(await page.inputValue('#set-name [data-fkey="planName"]'), 'Ducuara Ana');
+  await page.fill('#set-name [data-fkey="name"]', 'Lucía');
+  await page.press('#set-name [data-fkey="name"]', 'Tab');
+  await waitState(page, (st) => st.settings.name === 'Lucía');
+  await tab(page, 'hoy');
+  assert.equal(await text(page, '#view-hoy .large-title'), 'Hola, Lucía 👋');
+  // Escanear: el lector busca la fila con el nombre del plan
+  await page.route('**/docs/js/recognize/index.js', (r) => r.fulfill({ contentType: 'text/javascript', body: RECORDING_STUB }));
+  await tab(page, 'escanear');
+  await page.setInputFiles('input[data-testid="scan-pick"]', PHOTO);
+  await page.waitForSelector('.fallback', { timeout: 20000 });
+  assert.equal(await page.evaluate(() => globalThis.__employeeName), 'Ducuara Ana');
+  s = await getState(page);
+  assert.equal(s.settings.planName, 'Ducuara Ana');
+  return { ctx, errors };
+});
+
+test('primer uso saltado: sin nombre, saludo neutro y el lector usa «Ducuara»', async () => {
+  const { page, ctx, errors } = await openApp();
+  await page.waitForSelector('.onboarding.open');
+  await page.click('[data-testid="ob-next"]');
+  await page.click('.ob-skip');
+  await page.waitForSelector('.onboarding', { state: 'detached' });
+  const s = await getState(page);
+  assert.equal(s.settings.name, '');
+  assert.equal(s.settings.planName, '');
+  assert.equal(await text(page, '#view-hoy .large-title'), 'Hola 👋');
+  await page.route('**/docs/js/recognize/index.js', (r) => r.fulfill({ contentType: 'text/javascript', body: RECORDING_STUB }));
+  await tab(page, 'escanear');
+  await page.setInputFiles('input[data-testid="scan-pick"]', PHOTO);
+  await page.waitForSelector('.fallback', { timeout: 20000 });
+  assert.equal(await page.evaluate(() => globalThis.__employeeName), 'Ducuara');
+  return { ctx, errors };
+});
+
+test('Android: «Calendario del teléfono», ICSx⁵ (intent) primero y Google Calendar después, sin avisos de Safari', async () => {
+  const gh = await familyGitHub();
+  const state = core.updateSettings(demoState(), { name: 'Ana', sync: { ...SYNC, key: OTHER_KEY, dir: 'ana', deviceId: 'android-ana' } });
+  const { page, ctx, errors } = await openApp({ state, gh, device: 'android', standalone: false, width: 360, height: 740 });
+  await waitState(page, (s) => Boolean(s.settings.sync.lastPullAt));
+  assert.equal(await page.evaluate(() => document.documentElement.dataset.platform), 'android');
+  assert.equal(await page.locator('[data-testid="banner-safari"]').count(), 0, 'en Android no hay aviso de Safari');
+  await page.waitForSelector('[data-testid="sync-line"]');
+  assert.match(await text(page, '[data-testid="sync-line"]'), /^Tu calendario al día/);
+  assert.doesNotMatch(await text(page, '#view-hoy'), /iPhone/);
+  await tab(page, 'ajustes');
+  assert.match(await page.locator('#set-calendar .set-title').textContent(), /^Calendario del teléfono$/);
+  const href = await page.getAttribute('#set-calendar [data-testid="webcal"]', 'href');
+  assert.equal(href, `intent://raw.githubusercontent.com/${OWNER}/${REPO}/HEAD/ana/turnos.ics#Intent;scheme=webcals;package=at.bitfire.icsdroid;S.browser_fallback_url=${encodeURIComponent('https://play.google.com/store/apps/details?id=at.bitfire.icsdroid')};end`);
+  assert.match(await text(page, '#set-calendar [data-testid="webcal"]'), /Ver mis turnos en el calendario/);
+  assert.match(await text(page, '#set-calendar [data-testid="alerts-notice"]'), /Ignore alerts embedded in the calendar/);
+  await ctx.grantPermissions(['clipboard-read', 'clipboard-write']);
+  await page.click('#set-calendar [data-testid="copy-cal-link"]');
+  await page.waitForSelector('.toast:has-text("Enlace copiado")');
+  assert.equal(await page.evaluate(() => navigator.clipboard.readText()), `https://raw.githubusercontent.com/${OWNER}/${REPO}/HEAD/ana/turnos.ics`);
+  // Las dos guías, la recomendada primero
+  const guides = await page.locator('#set-calendar .guide-group > details > summary').allInnerTexts();
+  assert.match(guides[0], /ICSx⁵ \(recomendado\)/);
+  assert.match(guides[1], /Google Calendar/);
+  await page.click('details[data-fkey="guide-icsx5"] > summary');
+  const icsx5 = await text(page, 'details[data-fkey="guide-icsx5"]');
+  // Orden real de ICSx⁵ 2.4: «SUBSCRIBE» en la 1.ª pantalla; en la 2.ª («Alarms») solo la flecha →, que
+  // la crea y cierra ICSx⁵; el intervalo se pone después, abriéndola desde su icono
+  assert.match(icsx5, /Google Play[\s\S]*1,99 €[\s\S]*Permitir[\s\S]*SUBSCRIBE[\s\S]*Título y color[\s\S]*Ignore alerts embedded in the calendar[\s\S]*flecha →[\s\S]*se cierra[\s\S]*desde su icono[\s\S]*Mis suscripciones[\s\S]*Cada hora[\s\S]*Sin restricciones/);
+  assert.doesNotMatch(icsx5, /Ignore alerts embedded in the calendar[^\n]*\n[^\n]*SUBSCRIBE/, '«SUBSCRIBE» no va después de «Alarms»');
+  assert.match(icsx5, /«Turnos de Ana»/);
+  await page.click('details[data-fkey="guide-google"] > summary');
+  assert.match(await text(page, 'details[data-fkey="guide-google"]'), /calendar\.google\.com[\s\S]*Desde una URL[\s\S]*Agregar notificación/);
+  // Sin «iPhone» en Ajustes (salvo la guía de otra persona, que no está abierta)
+  assert.doesNotMatch(await page.evaluate(() => document.getElementById('view-ajustes').innerText), /iPhone/);
+  // «Ver sus turnos» de Mauricio: guía para mirar sin sus avisos
+  await page.waitForSelector('#set-family');
+  await page.click('#set-family [data-dir="_"] [data-testid="family-subscribe"]');
+  await sheetOpen(page);
+  assert.match(await page.getAttribute('[data-testid="family-open-android"]', 'href'), new RegExp(`^intent://raw\\.githubusercontent\\.com/${OWNER}/${REPO}/HEAD/turnos\\.ics#Intent;scheme=webcals;`));
+  assert.match(await text(page, '[data-testid="family-guide"]'), /activa «Ignore alerts embedded in the calendar»/);
+  return { ctx, errors };
+});
+
+test('Android: botón «Instalar la app» (beforeinstallprompt) y guía del menú ⋮', async () => {
+  const { page, ctx, errors } = await openApp({ state: demoState(), device: 'android', standalone: false });
+  await tab(page, 'ajustes');
+  assert.match(await text(page, '#set-install'), /menú ⋮[\s\S]*Instalar app/);
+  assert.equal(await page.locator('#set-install [data-testid="install-prompt"]').count(), 0, 'sin aviso de Chrome todavía');
+  assert.doesNotMatch(await text(page, '#set-install'), /Safari/);
+  await fakeInstallPrompt(page);
+  await page.waitForSelector('#set-install [data-testid="install-prompt"]');
+  await page.click('#set-install [data-testid="install-prompt"]');
+  await page.waitForFunction(() => window.__prompted === true);
+  await page.waitForSelector('#set-install [data-testid="install-prompt"]', { state: 'detached' });
+  return { ctx, errors };
+});
+
+test('Android: «Atrás» cierra la hoja o el diálogo (y pregunta si hay cambios) sin salir de la app', async () => {
+  const { page, ctx, errors } = await openApp({ state: demoState(), device: 'android', standalone: false });
+  const url = page.url();
+  await tab(page, 'calendario');
+  await page.click('.day-row[data-key="2026-10-14"]');
+  await sheetOpen(page);
+  await page.evaluate(() => history.back());
+  await page.waitForSelector('.sheet-wrap', { state: 'detached' });
+  assert.equal(page.url(), url, 'sigue en la app');
+  assert.ok(await visible(page, '#view-calendario'));
+  // Con cambios: «Atrás» pregunta; «Atrás» otra vez sigue editando
+  await page.click('.day-row[data-key="2026-10-14"]');
+  await sheetOpen(page);
+  await page.click('.sheet .tile[data-code="S1"]');
+  await page.evaluate(() => history.back());
+  await page.waitForSelector('.dialog-wrap.open');
+  assert.match(await text(page, '.dialog-wrap.open .dialog'), /Salir sin guardar/);
+  await page.waitForTimeout(150);
+  await page.evaluate(() => history.back());
+  await page.waitForSelector('.dialog-wrap', { state: 'detached' });
+  assert.ok(await visible(page, '.sheet-day'), 'la hoja sigue abierta');
+  await page.click('[data-testid="day-save"]');
+  await page.waitForSelector('.sheet-wrap', { state: 'detached' });
+  assert.deepEqual((await getState(page)).days['2026-10-14'].codes, ['S1']);
+  // Cerrada desde la app: no queda la entrada extra en el historial
+  await page.waitForTimeout(200);
+  assert.ok(!(await page.evaluate(() => history.state?.turnosBack)), 'sin entrada pendiente');
+  // La bienvenida: «Atrás» vuelve un paso
+  await page.evaluate(() => import('./js/ui/onboarding.js').then((m) => m.showOnboarding(window.__turnosTest && { store: window.__turnosTest.store, go: window.__turnosTest.go, repaint: () => {} }, { again: true })));
+  await page.waitForSelector('.onboarding.open');
+  await page.click('[data-testid="ob-next"]');
+  await page.waitForSelector('.ob-step[data-step="name"]');
+  await page.evaluate(() => history.back());
+  await page.waitForSelector('.ob-step[data-step="welcome"]');
+  await page.evaluate(() => history.back());
+  await page.waitForSelector('.onboarding', { state: 'detached' });
+  assert.equal(page.url(), url);
+  return { ctx, errors };
+});
+
+test('iPhone: cerrar hojas con ✕ o Escape no deja entradas en el historial', async () => {
+  const { page, ctx, errors } = await openApp({ state: demoState() });
+  const before = await page.evaluate(() => history.length);
+  await tab(page, 'calendario');
+  for (let i = 0; i < 3; i++) {
+    await page.click('.day-row[data-key="2026-10-14"]');
+    await sheetOpen(page);
+    if (i % 2) await page.keyboard.press('Escape'); else await page.click('.sheet-close');
+    await page.waitForSelector('.sheet-wrap', { state: 'detached' });
+  }
+  await page.waitForTimeout(200);
+  assert.ok(!(await page.evaluate(() => history.state?.turnosBack)));
+  // El historial no crece sin límite (cada hoja quita su entrada)
+  assert.ok(await page.evaluate(() => history.length) <= before + 1);
+  return { ctx, errors };
+});
+
+test('varias personas: «Crear enlace para otra persona» (carpeta y clave nuevas) y «Calendarios de la familia»', async () => {
+  const gh = await familyGitHub();
+  const state = core.updateSettings(demoState(), { name: 'Mauricio', sync: { ...SYNC, deviceId: 'iphone1' } });
+  const { page, ctx, errors } = await openApp({ state, gh });
+  await waitState(page, (s) => Boolean(s.settings.sync.lastPullAt || s.settings.sync.lastPushAt));
+  await tab(page, 'ajustes');
+  await page.waitForSelector('#set-family', { timeout: 10000 });
+  const items = page.locator('#set-family [data-testid="family-item"]');
+  assert.equal(await items.count(), 2);
+  assert.match(await items.nth(0).innerText(), /Mauricio[\s\S]*Tu calendario[\s\S]*Tú/);
+  assert.match(await items.nth(1).innerText(), /Ana/);
+  assert.match(await text(page, '#set-family'), /deja activado «Eliminar alertas»/);
+  // iPhone: antes de suscribirse, el aviso «deja ACTIVADO Eliminar alertas»; la suscripción sale de su botón
+  await page.evaluate(() => document.addEventListener('click', (e) => {
+    const a = e.target.closest?.('a[href^="webcal:"]');
+    if (a) { e.preventDefault(); window.__opened = a.href; }
+  }, true));
+  await page.click('#set-family [data-dir="ana"] [data-testid="family-subscribe"]');
+  await page.waitForSelector('.dialog-wrap.open [data-testid="family-ios-notice"]');
+  assert.match(await text(page, '.dialog-wrap.open .dialog-title'), /Turnos de Ana: solo para mirar/);
+  assert.match(await text(page, '.dialog-wrap.open .dialog-strong'), /Cuando el iPhone lo pregunte, deja ACTIVADO «Eliminar alertas»/);
+  assert.equal(await page.evaluate(() => window.__opened || null), null, 'todavía no se abre nada');
+  await page.click('.dialog-wrap.open .btn-primary');
+  await page.waitForFunction(() => Boolean(window.__opened));
+  assert.equal(await page.evaluate(() => window.__opened), `webcal://raw.githubusercontent.com/${OWNER}/${REPO}/HEAD/ana/turnos.ics`);
+  await page.waitForSelector('.dialog-wrap', { state: 'detached' });
+  // Crear enlace para otra persona
+  await page.click('[data-testid="advanced"] > summary');
+  assert.match(await text(page, '[data-testid="make-link"]'), /Crear enlace para Mauricio/);
+  await page.click('[data-testid="make-person-link"]');
+  await sheetOpen(page);
+  await page.click('[data-testid="person-create"]');
+  assert.match(await text(page, '.sheet-person .form-error'), /Escribe el nombre/);
+  await page.fill('[data-testid="person-name"]', 'Ana');
+  await page.click('[data-testid="person-create"]');
+  await page.waitForSelector('[data-testid="person-result"]:not([hidden])');
+  const link = await page.locator('[data-testid="person-link"]').textContent();
+  const cfg = core.parseSetupLink(link);
+  assert.equal(cfg.dir, 'ana-2', 'no repite la carpeta de Ana que ya existe');
+  assert.equal(cfg.name, 'Ana');
+  assert.equal(cfg.token, TOKEN);
+  assert.equal(cfg.owner, OWNER);
+  assert.ok(core.isSyncKey(cfg.key) && cfg.key !== KEY && cfg.key !== OTHER_KEY, 'clave nueva');
+  assert.match(await text(page, '[data-testid="person-result"]'), /carpeta «ana-2»[\s\S]*En Android[\s\S]*En iPhone/);
+  await ctx.grantPermissions(['clipboard-read', 'clipboard-write']);
+  await page.click('[data-testid="person-copy"]');
+  await page.waitForSelector('.toast:has-text("Enlace copiado")');
+  assert.equal(await page.evaluate(() => navigator.clipboard.readText()), link);
+  assert.equal((await getState(page)).settings.sync.dir, '', 'este dispositivo no cambia de carpeta');
+  assert.equal(gh.writes().filter((l) => /ana-2/.test(l)).length, 0, 'crear el enlace no escribe nada');
+  return { ctx, errors };
+});
+
+test('varias personas: el enlace de Ana abierto en su Android publica en «ana/» sin tocar el calendario de Mauricio', async () => {
+  const gh = await familyGitHub({ ana: false });
+  const rootBackup = gh.text('backup.json');
+  const rootIcs = gh.text('turnos.ics');
+  const seeded = gh.writes().length;
+  const p = core.buildPersonLink(APP, { owner: OWNER, repo: REPO, branch: '', token: TOKEN }, { name: 'Ana', existingDirs: [''] });
+  let st = core.updateSettings(core.createDefaultState(), { onboardingDone: true });
+  st = core.setDay(st, '2026-10-14', ['S1'], { now: new Date('2026-10-12T10:00:00Z') });
+  const { page, ctx, errors } = await openApp({ state: st, gh, hash: p.link.slice(APP.length), device: 'android', standalone: false });
+  await page.waitForSelector('.dialog-wrap.open');
+  const confirm = await text(page, '.dialog-wrap.open .dialog');
+  assert.match(confirm, /Conectar el calendario del teléfono/);
+  assert.match(confirm, /para Ana/);
+  await page.click('.dialog-wrap.open .dialog .btn-primary');
+  await page.waitForSelector('[data-testid="subscribe-step"]', { timeout: 15000 });
+  await page.waitForSelector('.sheet-subscribe [data-testid="webcal"][aria-disabled="false"]', { timeout: 15000 });
+  assert.match(await page.getAttribute('.sheet-subscribe [data-testid="webcal"]', 'href'), /^intent:\/\/raw\.githubusercontent\.com\/[^#]+\/HEAD\/ana\/turnos\.ics#Intent;scheme=webcals;package=at\.bitfire\.icsdroid;/);
+  assert.match(await text(page, '[data-testid="subscribe-step"]'), /ICSx⁵[\s\S]*Cada hora/);
+  assert.ok(await visible(page, '.sheet-subscribe [data-testid="copy-cal-link"]'), '«Copiar enlace» siempre');
+  const s = await getState(page);
+  assert.equal(s.settings.sync.dir, 'ana');
+  assert.equal(s.settings.name, 'Ana', 'el nombre del enlace se guarda (no tenía)');
+  assert.equal(s.settings.sync.key, p.key);
+  const backup = gh.json('ana/backup.json');
+  assert.equal(backup.meta.publisher, s.settings.sync.deviceId, 'el teléfono de Ana publica su carpeta');
+  assert.equal(backup.meta.name, 'Ana');
+  assert.match(gh.text('ana/turnos.ics'), /X-WR-CALNAME:Turnos de Ana/);
+  assert.equal(gh.text('backup.json'), rootBackup, 'la copia de Mauricio no cambia');
+  assert.equal(gh.text('turnos.ics'), rootIcs, 'el calendario de Mauricio no cambia');
+  const mine = gh.writes().slice(seeded);
+  assert.ok(mine.length >= 2 && mine.every((l) => /\/contents\/ana\//.test(l)), `solo escribe en ana/: ${mine.join(', ')}`);
+  await page.click('.sheet-subscribe .sheet-close');
+  await page.waitForSelector('.sheet-wrap', { state: 'detached' });
+  await tab(page, 'hoy');
+  assert.equal(await text(page, '#view-hoy .large-title'), 'Hola, Ana 👋');
+  return { ctx, errors };
+});
+
+test('Horas: suplementos del mes (con € si hay salario) y saldos (horas y vacaciones del año)', async () => {
+  let state = demoState();
+  state = core.updateSettings(state, { supplements: { hourlyWage: 20 }, balances: { overtimeStartMin: 90, overtimeStartMonth: '2026-08', vacationCarryOver: 2.5 } });
+  const { page, ctx, errors } = await openApp({ state });
+  await tab(page, 'horas');
+  const sp = core.monthSummary(state, 2026, 10).supplements;
+  for (const k of ['night', 'saturday', 'sunday', 'holiday']) {
+    assert.equal(await text(page, `[data-testid="supplements"] [data-kind="${k}"] .sup-hours`), core.formatHours(sp[k].minutes), k);
+  }
+  const eur = new Intl.NumberFormat('es-ES', { style: 'currency', currency: 'EUR' }).format(sp.euros);
+  assert.match(await text(page, '[data-testid="supplements-total"]'), new RegExp(`≈ ${eur.replace(/[.\s]/g, '.')}`));
+  assert.match(await text(page, '[data-testid="supplements"]'), /Comprueba tu contrato/);
+  const ob = core.overtimeBalance(state, { now: NOW });
+  assert.equal(await text(page, '[data-testid="overtime"] .bal-value'), core.formatSignedHours(ob.balance));
+  assert.match(await text(page, '[data-testid="overtime"]'), /Desde agosto 2026\./);
+  assert.equal(await text(page, '[data-testid="bal-start"] b'), '+1 h 30');
+  assert.equal(await sumBalanceRows(page), ob.balance, 'las líneas suman el total');
+  const vac = core.vacationSummary(state, 2026, { now: NOW });
+  assert.match(await text(page, '[data-testid="vacation"] .bal-value'), new RegExp(`^${String(vac.remaining).replace('.', ',')} días`));
+  assert.match(await text(page, '[data-testid="vacation"]'), new RegExp(`Usadas: ${vac.used} días`));
+  // Sin salario: invita a ponerlo → Ajustes «Contrato y nómina» abierto
+  await page.evaluate(() => window.__turnosTest.store.set((s) => { s.settings.supplements.hourlyWage = null; return s; }));
+  await page.click('[data-testid="supplements"] .sup-wage');
+  await page.waitForFunction(() => document.getElementById('set-payroll')?.open === true);
+  await page.fill('[data-fkey="wage"]', '18,5');
+  await page.press('[data-fkey="wage"]', 'Tab');
+  await waitState(page, (s) => s.settings.supplements.hourlyWage === 18.5);
+  await page.fill('[data-fkey="vac-days"]', '28');
+  await page.press('[data-fkey="vac-days"]', 'Tab');
+  await waitState(page, (s) => s.settings.balances.vacationDaysPerYear === 28);
+  await page.fill('[data-fkey="ot-start"]', '-3,5');
+  await page.press('[data-fkey="ot-start"]', 'Tab');
+  await waitState(page, (s) => s.settings.balances.overtimeStartMin === -210);
+  await page.fill('[data-fkey="sup-night"]', '400');
+  await page.press('[data-fkey="sup-night"]', 'Tab');
+  await page.waitForSelector('.toast-error:has-text("porcentaje")');
+  assert.equal((await getState(page)).settings.supplements.night.pct, 26, 'un valor no válido no se guarda');
+  await page.fill('[data-fkey="sup-sunday"]', '50');
+  await page.press('[data-fkey="sup-sunday"]', 'Tab');
+  await waitState(page, (s) => s.settings.supplements.sunday.pct === 50);
+  await page.selectOption('[data-fkey="ot-month"]', '2026-09');
+  await waitState(page, (s) => s.settings.balances.overtimeStartMonth === '2026-09');
+  return { ctx, errors };
+});
+
+test('Ajustes: «Contrato y nómina» plegado por defecto, con el aviso «comprueba tu contrato»', async () => {
+  const { page, ctx, errors } = await openApp({ state: demoState() });
+  await tab(page, 'ajustes');
+  assert.equal(await page.evaluate(() => document.getElementById('set-payroll').open), false);
+  assert.equal(await page.locator('[data-fkey="wage"]').isVisible(), false);
+  await page.click('[data-testid="payroll"] > summary');
+  assert.match(await text(page, '[data-testid="payroll-note"]'), /Comprueba tu contrato/);
+  for (const k of ['vac-days', 'vac-carry', 'ot-start', 'ot-month', 'sup-night', 'sup-night-from', 'sup-night-to', 'sup-saturday', 'sup-sunday', 'sup-holiday', 'wage']) {
+    assert.ok(await page.locator(`[data-fkey="${k}"]`).isVisible(), k);
+  }
+  assert.equal(await page.inputValue('[data-fkey="sup-night-from"]'), '23:00');
+  return { ctx, errors };
+});
+
+test('tiempo de viaje: el lugar con 25 min → «Sal a las 13:05 hacia S51» en Hoy y «Abrir en Mapas»', async () => {
+  const { page, ctx, errors } = await openApp({ state: demoState() });
+  assert.equal(await page.locator('[data-testid="travel-fact"]').count(), 0, 'sin viaje no se dice');
+  await tab(page, 'ajustes');
+  await page.click('[data-testid="places"] > summary');
+  await page.click('.code-row[data-code="S51"]');
+  await sheetOpen(page);
+  assert.equal(await page.locator('.sheet-code [data-testid="ce-maps"]').isVisible(), false, 'sin dirección no hay mapa');
+  await page.fill('.sheet-code input[placeholder^="Ej.: Karl"]', 'Karl-Marx-Straße 101, Berlín');
+  assert.equal(await page.getAttribute('.sheet-code [data-testid="ce-maps"]', 'href'), `https://maps.apple.com/?q=${encodeURIComponent('Karl-Marx-Straße 101, Berlín')}`);
+  await page.selectOption('[data-testid="ce-travel"]', '25');
+  assert.match(await text(page, '.ce-preview'), /25 min de viaje/);
+  await page.click('[data-testid="code-save"]');
+  await page.waitForSelector('.sheet-wrap', { state: 'detached' });
+  assert.equal((await getState(page)).codes.S51.travelMin, 25);
+  assert.match(await text(page, '.code-row[data-code="S51"]'), /25 min de viaje/);
+  await tab(page, 'hoy');
+  assert.equal(await text(page, '[data-testid="travel-fact"]'), 'Sal a las 13:05 hacia S51 (25 min de viaje)');
+  assert.match(await page.getAttribute('#view-hoy [data-testid="maps-link"]', 'href'), /^https:\/\/maps\.apple\.com\/\?q=/);
+  // Tocar «Mapa» no abre el editor del día
+  await page.evaluate(() => document.addEventListener('click', (e) => { if (e.target.closest('a[data-testid="maps-link"]')) e.preventDefault(); }));
+  await page.click('#view-hoy [data-testid="maps-link"]');
+  await page.waitForTimeout(300);
+  assert.equal(await page.locator('.sheet-wrap').count(), 0);
+  return { ctx, errors };
+});
+
+test('recordatorios: «Avisarme para subir el plan» (activado) se puede apagar y quita el aviso del calendario', async () => {
+  const { page, ctx, errors } = await openApp({ state: demoState() });
+  await tab(page, 'ajustes');
+  const sw = '#set-reminders [data-fkey="planUpload"]';
+  assert.equal(await page.isChecked(sw), true);
+  assert.match(core.buildICS(await getState(page), { now: NOW }), /UID:plan-2026-11@/);
+  await page.click(sw);
+  await waitState(page, (s) => s.settings.reminders.planUpload === false);
+  assert.doesNotMatch(core.buildICS(await getState(page), { now: NOW }), /UID:plan-/);
+  return { ctx, errors };
+});
+
+test('enfermedad: K «Enfermedad» en la paleta, se guarda y acredita la jornada', async () => {
+  const { page, ctx, errors } = await openApp({ state: demoState() });
+  await tab(page, 'calendario');
+  await page.click('.day-row[data-key="2026-10-20"]');
+  await sheetOpen(page);
+  const tile = page.locator('.sheet .tile[data-code="K"]');
+  assert.ok(await tile.isVisible(), 'K a mano, sin «Más códigos»');
+  assert.match(await tile.getAttribute('aria-label'), /K Enfermedad/);
+  await tile.click();
+  await page.click('[data-testid="day-save"]');
+  await page.waitForSelector('.sheet-wrap', { state: 'detached' });
+  const s = await getState(page);
+  assert.deepEqual(s.days['2026-10-20'].codes, ['K']);
+  assert.equal(core.dayMinutes(s, '2026-10-20').credited, 7 * 60);
+  assert.match(await text(page, '.day-row[data-key="2026-10-20"]'), /Enfermedad/);
+  return { ctx, errors };
+});
+
+test('ordenador (1280×800): columna central, pestañas y hojas centradas; teclado (Escape, flechas y foco)', async () => {
+  const { page, ctx, errors } = await openApp({ state: demoState(), device: 'desktop', width: 1280, height: 800, standalone: false });
+  assert.equal(await page.evaluate(() => document.documentElement.dataset.platform), 'desktop');
+  const box = (sel) => page.evaluate((s) => { const r = document.querySelector(s).getBoundingClientRect(); return { l: r.left, r: r.right, w: r.width, vw: innerWidth }; }, sel);
+  const views = await box('#views');
+  assert.ok(views.w <= 720, `columna de ${views.w} px`);
+  assert.ok(Math.abs(views.l - (views.vw - views.r)) <= 1, 'columna centrada');
+  for (const sel of ['.hero', '.week-card']) assert.ok((await box(sel)).w <= 680, `${sel} sin estirarse`);
+  const bar = await box('.tabbar');
+  assert.ok(bar.w <= 600 && Math.abs(bar.l - (bar.vw - bar.r)) <= 1, `barra de pestañas centrada (${JSON.stringify(bar)})`);
+  assert.equal(await page.locator('[data-testid="banner-safari"]').count(), 0);
+  assert.doesNotMatch(await text(page, '#view-hoy'), /iPhone/);
+  // Hoja centrada; Escape la cierra
+  await tab(page, 'calendario');
+  await page.click('.day-row[data-key="2026-10-14"]');
+  await sheetOpen(page);
+  const sh = await box('.sheet');
+  assert.ok(sh.w <= 620 && Math.abs(sh.l - (sh.vw - sh.r)) <= 1, `hoja centrada (${JSON.stringify(sh)})`);
+  await page.keyboard.press('Escape');
+  await page.waitForSelector('.sheet-wrap', { state: 'detached' });
+  // Flechas: mes siguiente / anterior
+  await page.keyboard.press('ArrowRight');
+  assert.match(await text(page, '.nav-title'), /Noviembre 2026/);
+  await page.keyboard.press('ArrowLeft');
+  await page.keyboard.press('ArrowLeft');
+  assert.match(await text(page, '.nav-title'), /Septiembre 2026/);
+  // Tabulador: el foco se ve
+  await page.keyboard.press('Tab');
+  const outline = await page.evaluate(() => getComputedStyle(document.activeElement).outlineStyle);
+  assert.notEqual(outline, 'none', 'foco visible con el teclado');
+  return { ctx, errors };
+});
+
+test('diseño: nada se sale a 360 px en Android ni en tablet (820 y 1180) con lo nuevo abierto', async () => {
+  const problems = [];
+  for (const [device, width, height] of [['android', 360, 740], ['ipad', 820, 1180], ['ipad', 1180, 820]]) {
+    let state = demoState({ sync: true });
+    state = core.upsertCode(state, { ...core.getCode(state, 'S51'), place: 'Karl-Marx-Straße 101, Berlín', travelMin: 25 });
+    state = core.updateSettings(state, { name: 'Ana', supplements: { hourlyWage: 18.5 } });
+    const { page, ctx } = await openApp({ state, device, width, height, standalone: device !== 'android' });
+    for (const id of ['hoy', 'calendario', 'escanear', 'horas', 'ajustes']) {
+      await tab(page, id);
+      if (id === 'ajustes') { await page.click('[data-testid="payroll"] > summary'); await page.click('#set-advanced > summary'); }
+      await page.waitForTimeout(150);
+      problems.push(...(await findOverflow(page)).map((p) => `${device} ${width}: ${id}: ${p}`));
+    }
+    await ctx.close();
+  }
+  assert.deepEqual(problems, []);
+  return { ctx: null, errors: [] };
+});
+
+test('iPad: dice «iPad» (no «iPhone») en el calendario, la suscripción y los consejos', async () => {
+  const { page, ctx, errors } = await openApp({ state: demoState({ sync: true }), gh: fakeGitHub(), device: 'ipad', width: 820, height: 1180 });
+  assert.equal(await page.evaluate(() => document.documentElement.dataset.platform), 'ios');
+  await tab(page, 'ajustes');
+  assert.equal((await page.locator('#set-calendar .set-title').textContent()).trim(), 'Calendario del iPad');
+  assert.match(await text(page, '#set-calendar [data-testid="webcal"]'), /Suscribirme en el iPad/);
+  assert.match(await text(page, '#set-calendar [data-testid="alerts-notice"]'), /cuando el iPad lo pregunte/);
+  assert.match(await text(page, '#set-reminders'), /Calendario del iPad[\s\S]*«Suscribirme en el iPad»/);
+  for (const id of ['hoy', 'calendario', 'horas', 'ajustes']) {
+    await tab(page, id);
+    assert.doesNotMatch(await text(page, `#view-${id}`), /iPhone/, id);
+  }
+  return { ctx, errors };
+});
+
+test('textos: «calendario del teléfono» en minúscula dentro de las frases (Android)', async () => {
+  const state = core.updateSettings(demoState(), { name: 'Ana' });
+  const { page, ctx, errors } = await openApp({ state, device: 'android', standalone: false, width: 360, height: 740 });
+  await tab(page, 'ajustes');
+  assert.equal((await page.locator('#set-calendar .set-title').textContent()).trim(), 'Calendario del teléfono', 'el título de la sección sí');
+  assert.match(await text(page, '[data-testid="sync-status"]'), /no salen en el calendario del teléfono/);
+  assert.match(await text(page, '#set-reminders'), /falta conectar el calendario del teléfono/);
+  await tab(page, 'calendario');
+  await page.click('.day-row[data-key="2026-10-14"]');
+  await sheetOpen(page);
+  assert.match(await text(page, '.sheet-day'), /La nota no sale en el calendario del teléfono/);
+  return { ctx, errors };
+});
+
+test('Android: antes de suscribirse, Ajustes explica que ICSx⁵ se instala primero (1,99 €), antes del botón', async () => {
+  const gh = await familyGitHub();
+  const state = core.updateSettings(demoState(), { name: 'Ana', sync: { ...SYNC, key: OTHER_KEY, dir: 'ana', deviceId: 'android-ana' } });
+  const { page, ctx, errors } = await openApp({ state, gh, device: 'android', standalone: false, width: 360, height: 740 });
+  await waitState(page, (s) => Boolean(s.settings.sync.lastPullAt));
+  await tab(page, 'ajustes');
+  await page.waitForSelector('#set-calendar [data-testid="webcal"][aria-disabled="false"]');
+  const card = await text(page, '#set-calendar .cal-card');
+  assert.match(card, /Instala «ICSx⁵» desde Google Play \(cuesta 1,99 €\)[\s\S]*SUBSCRIBE[\s\S]*flecha →[\s\S]*Cada hora[\s\S]*Ver mis turnos en el calendario/);
+  // Los pasos van antes del botón
+  const order = await page.evaluate(() => {
+    const st = document.querySelector('#set-calendar .cal-card .steps');
+    const btn = document.querySelector('#set-calendar [data-testid="webcal"]');
+    return Boolean(st.compareDocumentPosition(btn) & Node.DOCUMENT_POSITION_FOLLOWING);
+  });
+  assert.ok(order, 'pasos y después el botón');
+  return { ctx, errors };
+});
+
+test('calendario a 360 px: el mes y las semanas se leen enteros («Septiembre 2026», «12–18 oct», «31 ago – 6 sept»)', async () => {
+  const { page, ctx, errors } = await openApp({ state: demoState(), device: 'android', standalone: false, width: 360, height: 740 });
+  await tab(page, 'calendario');
+  assert.equal(await text(page, '[data-week="2026-10-12"] .week-sep-range'), '12–18 oct');
+  const clipped = [];
+  for (let i = 0; i < 4; i++) {
+    if (i) await page.click('[aria-label="Mes siguiente"]');
+    clipped.push(...await page.evaluate(() => [...document.querySelectorAll('.nav-title, .week-sep-range')]
+      .filter((e) => e.scrollWidth > e.clientWidth + 0.5).map((e) => e.textContent)));
+  }
+  // Septiembre (con la semana del 31 de agosto)
+  for (let i = 0; i < 4; i++) await page.click('[aria-label="Mes anterior"]');
+  assert.equal(await text(page, '.nav-title'), 'Septiembre 2026');
+  assert.equal(await text(page, '[data-week="2026-08-31"] .week-sep-range'), '31 ago – 6 sept');
+  clipped.push(...await page.evaluate(() => [...document.querySelectorAll('.nav-title, .week-sep-range')]
+    .filter((e) => e.scrollWidth > e.clientWidth + 0.5).map((e) => e.textContent)));
+  assert.deepEqual(clipped, [], 'nada cortado con «…»');
+  return { ctx, errors };
+});
+
+test('editar día: «Sal a las…» y «Abrir en Mapas» en el turno; un libre no dice «0 h de trabajo»', async () => {
+  let state = demoState();
+  state = core.upsertCode(state, { ...core.getCode(state, 'S51'), place: 'Karl-Marx-Straße 101, Berlín', travelMin: 25 });
+  const { page, ctx, errors } = await openApp({ state });
+  await tab(page, 'calendario');
+  await page.click('.day-row[data-key="2026-10-13"]');
+  await sheetOpen(page);
+  assert.equal(await text(page, '.sheet-day [data-testid="day-travel"]'), 'Sal a las 13:05 hacia S51 (25 min de viaje)');
+  assert.equal(await page.getAttribute('.sheet-day [data-testid="day-maps"]', 'href'), `https://maps.apple.com/?q=${encodeURIComponent('Karl-Marx-Straße 101, Berlín')}`);
+  // Horario especial: la hora de salir cambia con él
+  await page.click('.sheet-day [data-testid="day-time-edit"]');
+  await page.fill('.sheet-day [data-testid="day-time-start"]', '15:00');
+  await page.waitForFunction(() => /14:35/.test(document.querySelector('.sheet-day [data-testid="day-travel"]').textContent));
+  await page.keyboard.press('Escape');
+  await page.waitForSelector('.dialog-wrap.open');
+  await page.click('.dialog-wrap.open .btn-danger');
+  await page.waitForSelector('.sheet-wrap', { state: 'detached' });
+  // Un día libre
+  const off = Object.entries(state.days).find(([k, d]) => k >= '2026-10-01' && d.codes.length === 1 && d.codes[0] === '-')[0];
+  await page.click(`.day-row[data-key="${off}"]`);
+  await sheetOpen(page);
+  assert.equal(await page.locator('.sheet-day .de-summary').isVisible(), false);
+  assert.doesNotMatch(await text(page, '.sheet-day .de-selected'), /0 h de trabajo/);
+  return { ctx, errors };
+});
+
+test('códigos: «Restablecer» un lugar dice que borra la dirección y el viaje, y se puede deshacer', async () => {
+  let state = demoState();
+  state = core.upsertCode(state, { ...core.getCode(state, 'S51'), place: 'Karl-Marx-Straße 101, Berlín', travelMin: 25 });
+  const { page, ctx, errors } = await openApp({ state });
+  await tab(page, 'ajustes');
+  await page.click('[data-testid="places"] > summary');
+  await page.click('.code-row[data-code="S51"]');
+  await sheetOpen(page);
+  await page.click('.sheet-code .btn-danger-plain');
+  await page.waitForSelector('.dialog-wrap.open');
+  assert.match(await text(page, '.dialog-wrap.open .dialog-text'), /se borrarán su dirección y su tiempo de viaje/);
+  await page.click('.dialog-wrap.open .btn-danger');
+  await waitState(page, (s) => !s.codes.S51.place);
+  await page.click('.toast .toast-action:has-text("Deshacer")');
+  await waitState(page, (s) => s.codes.S51.place === 'Karl-Marx-Straße 101, Berlín' && s.codes.S51.travelMin === 25);
+  return { ctx, errors };
+});
+
+test('Horas: el saldo muestra los meses anteriores y el saldo inicial (las líneas suman el total)', async () => {
+  const state = core.updateSettings(demoState(), { balances: { overtimeStartMin: 300 } });
+  const { page, ctx, errors } = await openApp({ state });
+  await tab(page, 'horas');
+  const ob = core.overtimeBalance(state, { now: NOW });
+  assert.ok(ob.months.length > 3, 'hay más de 3 meses con plan');
+  assert.equal(await text(page, '[data-testid="overtime"] .bal-value'), core.formatSignedHours(ob.balance));
+  assert.match(await text(page, '[data-testid="bal-earlier"]'), new RegExp(`Meses anteriores \\(${ob.months.length - 3}\\)`));
+  assert.equal(await text(page, '[data-testid="bal-start"] b'), '+5 h');
+  assert.equal(await sumBalanceRows(page), ob.balance);
+  return { ctx, errors };
+});
+
+test('teclado: «Próximo turno» es un botón de verdad (Espacio abre el día) y «Esta semana» responde a Espacio', async () => {
+  let state = demoState();
+  state = core.upsertCode(state, { ...core.getCode(state, 'S51'), place: 'Karl-Marx-Straße 101, Berlín' });
+  const { page, ctx, errors } = await openApp({ state, device: 'desktop', width: 1280, height: 800, standalone: false });
+  assert.equal(await page.locator('.hero[role="button"], .hero [role="button"]').count(), 0, 'sin role=button con enlaces dentro');
+  assert.equal(await page.locator('[data-testid="hero-open"] a, [data-testid="hero-open"] button').count(), 0);
+  await page.focus('[data-testid="hero-open"]');
+  await page.keyboard.press('Space');
+  await sheetOpen(page);
+  assert.match(await text(page, '.sheet-title'), /13 de octubre/);
+  await page.keyboard.press('Escape');
+  await page.waitForSelector('.sheet-wrap', { state: 'detached' });
+  await page.focus('.week-card');
+  await page.keyboard.press('Space');
+  await page.waitForSelector('#view-calendario:not([hidden])');
+  return { ctx, errors };
+});
+
+test('teclado: con Tab, el foco nunca queda debajo de la barra de pestañas (ordenador e iPhone)', async () => {
+  const hidden = [];
+  for (const [device, width, height] of [['desktop', 1280, 800], [undefined, 390, 844]]) {
+    const { page, ctx } = await openApp({ state: demoState({ sync: true }), device, width, height, standalone: device !== 'desktop' });
+    await tab(page, 'ajustes');
+    await page.evaluate(() => { window.scrollTo(0, 0); document.activeElement?.blur(); });
+    for (let i = 0; i < 60; i++) {
+      await page.keyboard.press('Tab');
+      const r = await page.evaluate(() => {
+        const el = document.activeElement;
+        if (!el || el === document.body || el.closest('.tabbar')) return null;
+        const a = el.getBoundingClientRect(), bar = document.querySelector('.tabbar').getBoundingClientRect();
+        if (a.height > innerHeight / 2) return null;
+        return a.bottom > bar.top + 1 ? `${el.tagName} «${(el.getAttribute('aria-label') || el.textContent || '').trim().slice(0, 30)}»` : null;
+      });
+      if (r) hidden.push(`${device || 'iphone'}: ${r}`);
+    }
+    await ctx.close();
+  }
+  assert.deepEqual(hidden, []);
+  return { ctx: null, errors: [] };
+});
+
+test('bienvenida en Android con el aviso de Chrome: «Instalar la app» es el botón principal y «Ahora no» el secundario', async () => {
+  const { page, ctx, errors } = await openApp({ state: null, device: 'android', standalone: false, width: 360, height: 740 });
+  await page.waitForSelector('.onboarding.open');
+  await fakeInstallPrompt(page);
+  await page.click('[data-testid="ob-next"]');
+  await page.waitForSelector('.ob-step[data-step="name"]');
+  await page.click('[data-testid="ob-next"]');
+  await page.waitForSelector('.ob-step[data-step="install"] [data-testid="install-prompt"]');
+  assert.match(await page.getAttribute('.ob-step [data-testid="install-prompt"]', 'class'), /btn-primary/);
+  assert.equal(await text(page, '[data-testid="ob-next"]'), 'Ahora no');
+  assert.match(await page.getAttribute('[data-testid="ob-next"]', 'class'), /btn-secondary/);
+  // Todo el paso cabe en 360×740 (sin tener que desplazar)
+  const fits = await page.evaluate(() => { const c = document.querySelector('.ob-content'); return c.scrollHeight <= c.clientHeight + 1; });
+  assert.ok(fits, 'el paso de instalar cabe sin desplazar');
+  await page.click('[data-testid="ob-next"]');
+  await page.waitForSelector('.ob-step[data-step="reminders"]');
+  assert.match(await page.getAttribute('[data-testid="ob-next"]', 'class'), /btn-primary/);
+  assert.equal(await text(page, '[data-testid="ob-next"]'), 'Empezar');
+  return { ctx, errors };
+});
+
+test('Escanear en el ordenador: un solo botón «Elegir fotos del plan» (sin «Tomar foto»)', async () => {
+  const { page, ctx, errors } = await openApp({ state: demoState(), device: 'desktop', width: 1280, height: 800, standalone: false });
+  await tab(page, 'escanear');
+  const labels = await page.locator('#view-escanear .scan-actions label.btn').allInnerTexts();
+  assert.deepEqual(labels.map((t) => t.trim()), ['Elegir fotos del plan']);
+  assert.equal(await page.getAttribute('#view-escanear .scan-actions label.btn', 'for'), 'scan-pick-input');
+  return { ctx, errors };
+});
+
+test('diseño a 360 px: las horas lado a lado pasan una debajo de otra (formato de 12 h)', async () => {
+  const { page, ctx, errors } = await openApp({ state: demoState(), device: 'android', standalone: false, width: 360, height: 740 });
+  await tab(page, 'calendario');
+  await page.click('.day-row[data-key="2026-10-13"]');
+  await sheetOpen(page);
+  await page.click('.sheet-day [data-testid="day-time-edit"]');
+  const [a, b] = await page.evaluate(() => ['day-time-start', 'day-time-end'].map((id) => {
+    const r = document.querySelector(`[data-testid="${id}"]`).getBoundingClientRect(); return { top: r.top, w: r.width };
+  }));
+  assert.ok(b.top > a.top + 20, 'una debajo de otra');
+  assert.ok(a.w > 250, `campo ancho (${a.w} px)`);
   return { ctx, errors };
 });
 

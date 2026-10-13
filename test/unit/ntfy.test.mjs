@@ -199,6 +199,8 @@ test('testNtfy', async () => {
   assert.equal(f.calls[0].url, 'https://ntfy.sh/');
   const body = f.calls[0].json();
   assert.equal(body.topic, TOPIC);
+  assert.equal(body.title, 'Turnos'); // título neutro (lo usan Mauricio y su hermana)
+  assert.doesNotMatch(r.message, /iPhone/);
   assert.equal(body.click, APP);
   assert.equal(body.delay, undefined);
   assert.equal(body.sequence_id, undefined);

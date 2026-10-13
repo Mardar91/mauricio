@@ -8,11 +8,11 @@ import {
 import { upsertCode } from '../../docs/js/core/store.js';
 
 const FIELDS = ['code', 'kind', 'name', 'start', 'end', 'breakMin', 'countsHours', 'creditHours', 'color',
-  'textColor', 'shape', 'place', 'confirmed', 'builtin', 'updatedAt'];
+  'textColor', 'shape', 'place', 'travelMin', 'confirmed', 'builtin', 'updatedAt'];
 
 test('DEFAULT_CODES tiene todos los códigos del plan con todos los campos', () => {
   const expected = ['F1', 'F2', 'F3', 'F6', 'F8', 'S1', 'N1', 'Z1', 'F51', 'F52', 'F53', 'S51', 'S52', 'N51',
-    'S31', 'TS', 'W-', 'U', '-'];
+    'S31', 'TS', 'W-', 'U', 'K', '-'];
   assert.deepEqual(Object.keys(DEFAULT_CODES).sort(), expected.sort());
   for (const def of Object.values(DEFAULT_CODES)) {
     assert.deepEqual(Object.keys(def).sort(), [...FIELDS].sort(), def.code);
@@ -72,7 +72,7 @@ test('guessCode: códigos nuevos por analogía', () => {
   assert.equal(guessCode('Z2').start, '09:30');
   const f54 = guessCode('F54');
   assert.deepEqual([f54.kind, f54.name, f54.color, f54.countsHours], ['place', 'Lugar F54', '#E31CE0', false]);
-  const k = guessCode('K');
+  const k = guessCode('X');
   assert.equal(k.kind, 'other');
   assert.equal(k.countsHours, false);
   assert.equal(k.confirmed, false);
@@ -140,4 +140,20 @@ test('normalizeDayCodes: turnos, eventos, otros, lugares; sin duplicados', () =>
   assert.deepEqual(normalizeDayCodes(s, ['w–', '', null, ' u ']), ['W-', 'U']);
   assert.deepEqual(normalizeDayCodes(s, ['F54', 'F4']), ['F4', 'F54']);
   assert.deepEqual(normalizeDayCodes(s, []), []);
+});
+
+test('K (enfermedad, §13.5): de fábrica, se acredita como vacaciones y va de día completo al calendario', async () => {
+  const { dayMinutes } = await import('../../docs/js/core/hours.js');
+  const { buildICS } = await import('../../docs/js/core/ics.js');
+  const k = DEFAULT_CODES.K;
+  assert.deepEqual([k.kind, k.name, k.shape, k.color, k.textColor, k.builtin, k.countsHours], ['sick', 'Enfermedad', 'text', '#D21F1F', '#D21F1F', true, false]);
+  assert.equal(guessCode('k').kind, 'sick');
+  const s = stateWith({ '2026-10-13': ['K'], '2026-10-17': ['K'] });
+  assert.deepEqual(dayMinutes(s, '2026-10-13'), { worked: 0, credited: 420, total: 420, items: [{ code: 'K', minutes: 420, type: 'credited' }] });
+  assert.equal(dayMinutes(s, '2026-10-17').credited, 0); // sábado: sin objetivo, no acredita
+  const ics = buildICS(s, { now: new Date(2026, 9, 12) }).replace(/\r\n[ \t]/g, '');
+  const ev = ics.split('BEGIN:VEVENT').find((b) => b.includes('UID:2026-10-13-K@'));
+  assert.match(ev, /DTSTART;VALUE=DATE:20261013/);
+  assert.match(ev, /SUMMARY:🤒 Enfermedad/);
+  assert.ok(!ev.includes('VALARM'));
 });

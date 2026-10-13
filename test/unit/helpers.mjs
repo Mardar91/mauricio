@@ -90,6 +90,18 @@ export function fakeGitHub({ empty = false, defaultBranch = 'main', repoStatus =
     gh.commits[commit] = files;
     gh.branches[branch] = commit;
   };
+  // Contenido de una carpeta ('' = raíz) como la API: [{ name, path, type: 'file'|'dir', sha }]
+  gh.listing = (dir, branch = defaultBranch) => {
+    const files = filesOf(branch) || {};
+    const prefix = dir ? `${dir}/` : '';
+    const entries = new Map();
+    for (const [path, f] of Object.entries(files)) {
+      if (!path.startsWith(prefix)) continue;
+      const [first, ...more] = path.slice(prefix.length).split('/');
+      if (!entries.has(first)) entries.set(first, { name: first, path: prefix + first, type: more.length ? 'dir' : 'file', sha: more.length ? `d-${first}` : f.sha });
+    }
+    return [...entries.values()].sort((a, b) => (a.name < b.name ? -1 : 1));
+  };
   // Escrituras (PUT) recibidas, por archivo
   gh.puts = (path) => gh.fetch.calls.filter((c) => c.method === 'PUT' && (!path || c.url.endsWith(`/${path}`)));
   gh.fetch = mockFetch(async (req, calls) => {
@@ -115,6 +127,13 @@ export function fakeGitHub({ empty = false, defaultBranch = 'main', repoStatus =
       gh.branches[name] = sha;
       return { status: 201, body: { ref, object: { sha } } };
     }
+    // Listado de carpetas (API contents): la raíz y subcarpetas
+    if ((m = /^\/repos\/Mardar91\/mauricio-datos\/contents\/?$/.exec(p)) && req.method === 'GET') {
+      if (isEmpty) return { status: 404, body: { message: 'This repository is empty.' } };
+      const branch = u.searchParams.get('ref') || defaultBranch;
+      if (!gh.branches[branch]) return { status: 404, body: { message: `No commit found for the ref ${branch}` } };
+      return { body: gh.listing('', branch) };
+    }
     if ((m = /^\/repos\/Mardar91\/mauricio-datos\/contents\/(.+)$/.exec(p))) {
       const path = m[1];
       if (req.method === 'GET') {
@@ -122,7 +141,10 @@ export function fakeGitHub({ empty = false, defaultBranch = 'main', repoStatus =
         const branch = u.searchParams.get('ref') || defaultBranch;
         if (!gh.branches[branch]) return { status: 404, body: { message: `No commit found for the ref ${branch}` } };
         const f = gh.file(path, branch);
-        if (!f) return { status: 404, body: { message: 'Not Found' } };
+        if (!f) {
+          const list = gh.listing(path.replace(/\/+$/, ''), branch);
+          return list.length ? { body: list } : { status: 404, body: { message: 'Not Found' } };
+        }
         const b64 = Buffer.from(f.text, 'utf8').toString('base64');
         return { body: { path, sha: f.sha, encoding: 'base64', content: b64.match(/.{1,60}/g).join('\n') } };
       }

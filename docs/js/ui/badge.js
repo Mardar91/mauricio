@@ -65,7 +65,7 @@ export function groupCodes(state) {
     if (ia !== ib) return (ia < 0 ? 9 : ia) - (ib < 0 ? 9 : ib);
     return ka.localeCompare(kb);
   };
-  const otherOrder = ['-', 'W-', 'U', 'TS'];
+  const otherOrder = ['-', 'W-', 'U', 'K', 'TS'];
   const oo = (c) => { const i = otherOrder.indexOf(c.code); return i < 0 ? 99 : i; };
   return [
     { id: 'shift', title: 'Turnos', codes: all.filter((d) => d.kind === 'shift').sort(order) },

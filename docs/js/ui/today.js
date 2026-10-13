@@ -1,6 +1,7 @@
 // Pestaña "Hoy": próximo turno, semana actual, próximos días y consejos.
 import {
-  addDays, formatHours, formatLong, formatTime, getAdvice, getCode, isoWeek, weekStart, weekSummary, weekdayShort,
+  addDays, formatHours, formatLong, formatTime, getAdvice, getCode, isoWeek, mapsUrl, travelText, weekStart, weekSummary,
+  weekdayShort,
 } from '../core/index.js';
 import { badge, badgeRow, displayName } from './badge.js';
 import { cap, h, setChildren } from './dom.js';
@@ -10,6 +11,7 @@ import { openInstallSheet } from './install.js';
 import { syncStatusLine } from './syncStatus.js';
 import { countdown, dayLabel, daySummary, nextShift, remaining } from './shifts.js';
 import { dayTimes, workTextOf } from './times.js';
+import { forDevice } from './platform.js';
 
 export function adviceCard(ctx, a) {
   return h('article', { class: ['advice', `advice-${a.level}`] },
@@ -53,10 +55,20 @@ export function createToday(ctx) {
         t.special ? h('span', { class: 'pill pill-special', 'data-testid': 'special-pill' }, 'horario especial') : null)),
       work ? h('div', { class: 'fact' }, icon('hours'), h('span', {}, work)) : null,
     ].filter(Boolean);
+    // Tiempo de viaje (SPEC §13.2): «Sal a las 13:05 hacia F51 (25 min de viaje)»
+    const travel = !current ? travelText(item) : '';
+    if (travel) {
+      const lead = `Sal a las ${formatTime(item.leaveAt)}`;
+      facts.unshift(h('div', { class: 'fact fact-travel', 'data-testid': 'travel-fact' }, icon('navigate'),
+        h('span', {}, h('b', {}, lead), travel.slice(lead.length))));
+    }
     if (places.length) {
       facts.push(h('div', { class: 'fact' }, icon('pin'), h('span', { class: 'fact-place' },
         places.map((p) => [badge(state, p.code, { size: 'sm' }), ' ',
-          p.place ? displayName(p) : h('button', {
+          p.place ? [displayName(p), ' ', h('a', {
+            class: 'link-btn link-inline', href: mapsUrl(p, ctx.platform), target: '_blank', rel: 'noopener',
+            'aria-label': `Abrir ${p.place} en Mapas`, 'data-testid': 'maps-link',
+          }, icon('map'), 'Mapa')] : h('button', {
             class: 'link-btn link-inline', type: 'button', 'aria-label': `Poner la dirección del lugar ${p.code}`,
             on: { click: () => ctx.openCode(p.code) },
           }, 'Poner la dirección')]))));
@@ -82,18 +94,22 @@ export function createToday(ctx) {
         h('span', { class: 'hero-kicker' }, 'Próximo turno'),
         h('span', { class: 'chip chip-countdown' }, `empieza ${countdown(item.start - now, item.start, now)}`));
     }
+    // Tocar la tarjeta abre el día; con teclado o lector de pantalla, el botón del título (así «Mapa»
+    // no queda dentro de otro botón)
     return h('article', {
       class: ['card', 'hero', current && 'hero-current'], style: { '--c': def.color },
-      tabindex: '0', role: 'button',
-      'aria-label': `${current ? 'Trabajando ahora' : 'Próximo turno'}: ${def.name}, ${dayLabel(key, today)}, ${endTxt ? `de ${startTxt} a ${endTxt}` : `desde las ${startTxt}`}${t.special ? ', horario especial' : ''}`,
-      on: { click: (e) => { if (!e.target.closest('button')) ctx.openDay(key); }, keydown: (e) => { if (e.key === 'Enter') ctx.openDay(key); } },
+      on: { click: (e) => { if (!e.target.closest('button, a')) ctx.openDay(key); } },
     },
     top,
-    h('div', { class: 'hero-main' },
-      badge(state, def.code, { size: 'xl' }),
-      h('div', { class: 'hero-titles' },
-        h('p', { class: 'hero-name' }, def.name),
-        h('p', { class: 'hero-when' }, dayLabel(key, today)))),
+    h('button', {
+      class: 'hero-main hero-open', type: 'button', 'data-testid': 'hero-open',
+      'aria-label': `${current ? 'Trabajando ahora' : 'Próximo turno'}: ${def.name}, ${dayLabel(key, today)}, ${endTxt ? `de ${startTxt} a ${endTxt}` : `desde las ${startTxt}`}${t.special ? ', horario especial' : ''}. Ver el día`,
+      on: { click: () => ctx.openDay(key) },
+    },
+    badge(state, def.code, { size: 'xl' }),
+    h('span', { class: 'hero-titles' },
+      h('span', { class: 'hero-name' }, def.name),
+      h('span', { class: 'hero-when' }, dayLabel(key, today)))),
     progress,
     h('div', { class: 'hero-facts' }, facts));
   }
@@ -126,7 +142,10 @@ export function createToday(ctx) {
     else msg = `Faltan ${formatHours(-diff)} para llegar a ${formatHours(w.soll)}.`;
     return h('article', {
       class: 'card week-card', role: 'button', tabindex: '0', 'aria-label': 'Ver esta semana en el calendario',
-      on: { click: () => ctx.go('calendario', { key: today }), keydown: (e) => { if (e.key === 'Enter') ctx.go('calendario', { key: today }); } },
+      on: {
+        click: () => ctx.go('calendario', { key: today }),
+        keydown: (e) => { if ((e.key === 'Enter' || e.key === ' ') && e.target === e.currentTarget) { e.preventDefault(); ctx.go('calendario', { key: today }); } },
+      },
     },
     h('div', { class: 'card-head' },
       h('h2', { class: 'card-title' }, 'Esta semana'),
@@ -195,7 +214,7 @@ export function createToday(ctx) {
     const syncLine = syncStatusLine(ctx, state);
     // «Actualiza la app» ya sale como aviso fijo arriba; y si la línea del calendario ya avisa,
     // no se repite el mismo aviso en los consejos (siguen en Horas)
-    const advice = getAdvice(state, now).filter((a) => !(a.id === 'newer-schema' && state.__newerSchema)
+    const advice = forDevice(getAdvice(state, now, { platform: ctx.platform })).filter((a) => !(a.id === 'newer-schema' && state.__newerSchema)
       && !(syncLine && (a.id === 'sync-error' || a.id === 'read-only')));
     setChildren(el,
       h('header', { class: 'page-head' },

@@ -1,9 +1,10 @@
 // Estado de la app en localStorage: carga/migración, mutaciones puras, copias de seguridad y fusión
 // entre dispositivos (días y códigos con updatedAt + tombstones, ver SPEC §9).
 import { isSyncKey } from './cipher.js';
-import { DEFAULT_BREAK, DEFAULT_CODES, KINDS, MAX_DAY_BREAK, SHAPES, allowsSpecialTimes, baseCode, cleanCode, getCode, guessCode, nominalMinutes, normalizeDayCodes } from './codes.js';
+import { DEFAULT_BREAK, DEFAULT_CODES, KINDS, MAX_DAY_BREAK, MAX_TRAVEL_MIN, SHAPES, allowsSpecialTimes, baseCode, cleanCode, getCode, guessCode, nominalMinutes, normalizeDayCodes } from './codes.js';
 import { isKey, parseHHMM } from './dates.js';
 import { scanToDays } from './diff.js';
+import { BALANCE_DEFAULTS, SUPPLEMENT_DEFAULTS, parseDecimal, sanitizeBalances, sanitizeSupplements } from './hours.js';
 import { clone, hashString, isPlainObject, isSafeKey, stableStringify } from './util.js';
 
 export const STORAGE_KEY = 'turnos-mauricio:v1';
@@ -24,19 +25,29 @@ const MAX_CODES_PER_DAY = 12;
 const SOURCES = ['scan', 'manual', 'import'];
 const LAYOUTS = ['phone-list', 'pc-grid', 'unknown'];
 
+export const MAX_NAME_LEN = 60;
+
 export const DEFAULT_SETTINGS = Object.freeze({
-  name: 'Mauricio',
+  // Nombre de pila (saludo «Hola, Ana»; vacío → «Hola»). Las instalaciones antiguas conservan el suyo.
+  name: '',
+  // Nombre tal como sale en el Dienstplan («Ducuara Ana»): para la tabla del PC (SPEC §11)
+  planName: '',
   weeklyHours: 35,
   workDaysPerWeek: 5,
   holidaysReduceSoll: true,
-  reminders: { eveningBefore: true, eveningTime: '20:00', beforeStart: true, minutesBefore: 60 },
+  // planUpload: evento «📷 Sube el plan de <mes>» en el calendario si el mes siguiente está vacío (§13.1)
+  reminders: { eveningBefore: true, eveningTime: '20:00', beforeStart: true, minutesBefore: 60, planUpload: true },
+  // Suplementos (§13.3) y saldos (§13.4)
+  supplements: SUPPLEMENT_DEFAULTS,
+  balances: BALANCE_DEFAULTS,
   // Última vez que cambió algo que afecta al calendario publicado (recordatorios, lugares)
   calendarUpdatedAt: null,
   // Cuándo se cambiaron los avisos / publishPlaces: al fusionar gana el cambio más reciente
   remindersUpdatedAt: null,
   placesUpdatedAt: null,
   sync: {
-    enabled: false, owner: 'Mardar91', repo: 'mauricio-datos', branch: '', token: '', key: '', deviceId: '',
+    // dir: carpeta de esta persona en el repo de datos ('' = raíz; si no, slug [a-z0-9-]{1,32}, SPEC §11)
+    enabled: false, owner: 'Mardar91', repo: 'mauricio-datos', branch: '', dir: '', token: '', key: '', deviceId: '',
     baseRev: 0, lastPushAt: null, lastPushHash: null, lastIcsHash: null, lastPullAt: null,
     lastError: null, lastErrorCode: null, lastErrorDetail: null, lastErrorSince: null, publishPlaces: false,
     // Dispositivo que publica (el único que escribe en GitHub), tal como se vio en la última lectura
@@ -51,8 +62,21 @@ export const DEFAULT_SETTINGS = Object.freeze({
 
 // Ajustes del usuario que viajan en las copias y en la sincronización (sync/ntfy son del dispositivo;
 // publishPlaces viaja aparte en syncPayload)
-export const USER_SETTINGS = ['name', 'weeklyHours', 'workDaysPerWeek', 'holidaysReduceSoll', 'reminders',
-  'calendarUpdatedAt', 'remindersUpdatedAt', 'placesUpdatedAt'];
+export const USER_SETTINGS = ['name', 'planName', 'weeklyHours', 'workDaysPerWeek', 'holidaysReduceSoll', 'reminders',
+  'supplements', 'balances', 'calendarUpdatedAt', 'remindersUpdatedAt', 'placesUpdatedAt'];
+
+// Apellido de la familia en el Dienstplan («Ducuara Mauricio», «Ducuara Ana»)
+export const FAMILY_NAME = 'Ducuara';
+
+// Nombre del plan que se sugiere (SPEC §11): el guardado; si no hay, «Ducuara <nombre de pila>»; si
+// tampoco hay nombre, ''. Para el primer uso y para las instalaciones antiguas (planName vacío).
+export function suggestPlanName(state) {
+  const st = state?.settings || {};
+  const plan = String(st.planName ?? '').replace(/\s+/g, ' ').trim();
+  if (plan) return plan;
+  const first = String(st.name ?? '').trim().split(/\s+/)[0] || '';
+  return first ? `${FAMILY_NAME} ${first}` : '';
+}
 
 export function createDefaultState() {
   return {
@@ -65,6 +89,18 @@ export function createDefaultState() {
     scans: [],
     changes: [],
   };
+}
+
+// Estado limpio para pasar este dispositivo al calendario de OTRA persona (SPEC §11): sin días, borrados,
+// códigos, escaneos, cambios ni ajustes de la persona anterior (nombre, horas, avisos, suplementos,
+// saldos, lugares). Solo se queda lo del dispositivo: su deviceId, ntfy y el primer uso hecho.
+export function personSwitchState(state) {
+  const out = createDefaultState();
+  const st = isPlainObject(state?.settings) ? state.settings : {};
+  out.settings.sync.deviceId = capStr(st.sync?.deviceId, 40).trim();
+  if (isPlainObject(st.ntfy)) out.settings.ntfy = mergeSettings(DEFAULT_SETTINGS.ntfy, st.ntfy, DEFAULT_SETTINGS.ntfy);
+  out.settings.onboardingDone = st.onboardingDone === true;
+  return out;
 }
 
 const nowIso = (now) => (now instanceof Date ? now : new Date()).toISOString();
@@ -95,6 +131,10 @@ function mergeSettings(base, patch, defaults = DEFAULT_SETTINGS) {
       if (isPlainObject(v)) out[k] = mergeSettings(cur, v, def);
     } else if (v === null && def === null) {
       out[k] = null;
+    } else if (typeof cur === 'number' && typeof v === 'string') {
+      // Número escrito como texto («18,75», «1,5»): se acepta si se puede leer
+      const n = parseDecimal(v);
+      if (n !== null) out[k] = n;
     } else if (cur === null || cur === undefined || typeof cur === typeof v) {
       if (!isPlainObject(v) || cur === null || cur === undefined) out[k] = clone(v);
     }
@@ -115,7 +155,8 @@ function sanitizeScheduled(map) {
 
 // Corrige tipos y longitudes de los ajustes (nunca lanza)
 function fixSettings(st) {
-  st.name = capStr(st.name, 60);
+  st.name = capStr(st.name, MAX_NAME_LEN).trim();
+  st.planName = capStr(st.planName, MAX_NAME_LEN).replace(/\s+/g, ' ').trim();
   for (const k of ['weeklyHours', 'workDaysPerWeek']) {
     const n = Number(st[k]);
     st[k] = Number.isFinite(n) && n > 0 ? Math.min(n, 168) : DEFAULT_SETTINGS[k];
@@ -124,9 +165,14 @@ function fixSettings(st) {
   const r = st.reminders;
   if (parseHHMM(r.eveningTime) === null) r.eveningTime = DEFAULT_SETTINGS.reminders.eveningTime;
   r.minutesBefore = Math.min(1440, Math.max(0, Math.round(Number(r.minutesBefore) || 0)));
+  r.planUpload = r.planUpload !== false;
+  st.supplements = sanitizeSupplements(st.supplements);
+  st.balances = sanitizeBalances(st.balances);
   for (const k of ['calendarUpdatedAt', 'remindersUpdatedAt', 'placesUpdatedAt']) st[k] = isoOrNull(st[k]);
   const s = st.sync;
   for (const [k, n] of [['owner', 39], ['repo', 100], ['branch', 100], ['token', 300], ['key', 64], ['prevKey', 64], ['deviceId', 40]]) s[k] = capStr(s[k], n).trim();
+  // Carpeta: en minúsculas; una no válida NO se cambia por '' (sería la carpeta de otra persona): sync da CONFIG
+  s.dir = capStr(s.dir, 64).trim().toLowerCase();
   s.baseRev = Number.isSafeInteger(s.baseRev) && s.baseRev > 0 ? s.baseRev : 0;
   s.publishPlaces = s.publishPlaces === true;
   s.publisher = typeof s.publisher === 'string' && s.publisher.trim() ? capStr(s.publisher, 40).trim() : null;
@@ -167,6 +213,8 @@ export function sanitizeCodeDef(def, code) {
     || !Number.isFinite(credit) ? null : Math.min(24, Math.max(0, credit));
   out.name = capStr(out.name ?? c, 40) || c;
   out.place = capStr(out.place, 200);
+  const travel = Math.round(Number(out.travelMin));
+  out.travelMin = Number.isFinite(travel) ? Math.min(MAX_TRAVEL_MIN, Math.max(0, travel)) : 0;
   out.color = safeColor(out.color, template.color);
   out.textColor = safeColor(out.textColor, template.textColor);
   out.confirmed = out.confirmed !== false;
@@ -789,7 +837,7 @@ export function importBackup(state, json, { now, force = false } = {}) {
     throw importError('Esta copia está cifrada: recupérala con «Restaurar desde GitHub».', 'ENCRYPTED');
   }
   if (data.app !== undefined && data.app !== 'turnos-mauricio') {
-    throw importError('Este archivo no es una copia de Turnos de Mauricio.', 'INVALID');
+    throw importError('Este archivo no es una copia de Turnos.', 'INVALID');
   }
   if (!isPlainObject(data.days)) throw importError('La copia no contiene días con turnos.', 'INVALID');
   if (data.schema !== undefined && Number(data.schema) > SCHEMA) {
@@ -944,13 +992,40 @@ function unionList(a, b, max) {
 }
 
 // Ajustes que se adoptan del remoto solo en un dispositivo vacío (adoptSettings)
-const ADOPT_SETTINGS = ['name', 'weeklyHours', 'workDaysPerWeek', 'holidaysReduceSoll'];
+const ADOPT_SETTINGS = ['name', 'planName', 'weeklyHours', 'workDaysPerWeek', 'holidaysReduceSoll', 'supplements', 'balances'];
+// Valor de fábrica de cada ajuste adoptable, ya saneado (para saber si aquí se eligió otro)
+const pristineSetting = (k, v) => {
+  if (k === 'supplements') return stableStringify(sanitizeSupplements(v)) === stableStringify(sanitizeSupplements(SUPPLEMENT_DEFAULTS));
+  if (k === 'balances') return stableStringify(sanitizeBalances(v)) === stableStringify(sanitizeBalances(BALANCE_DEFAULTS));
+  return v === undefined || v === DEFAULT_SETTINGS[k];
+};
+const cleanText = (v) => (typeof v === 'string' ? v.replace(/\s+/g, ' ').trim() : '');
+// Primera palabra del nombre, sin mayúsculas ni acentos (para comparar personas)
+export function firstNameKey(v) {
+  return cleanText(v).split(' ')[0].toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+}
+
+// Lo que un dispositivo vacío toma del remoto: solo lo que aquí está vacío o de fábrica, y nunca un
+// texto vacío. Así un nombre escrito en el primer uso no se pierde (ni se cambia por el de quien
+// ayuda). El nombre del plan solo si el nombre de pila es el mismo (o aquí no hay ninguno).
+function adoptedSettings(L, R) {
+  const patch = {};
+  const ln = cleanText(L.name), rn = cleanText(R.name);
+  if (!ln && rn) patch.name = rn;
+  const rp = cleanText(R.planName);
+  if (!cleanText(L.planName) && rp && (!ln || firstNameKey(ln) === firstNameKey(rn))) patch.planName = rp;
+  for (const k of ADOPT_SETTINGS) {
+    if (k === 'name' || k === 'planName' || R[k] === undefined || R[k] === null || R[k] === '') continue;
+    if (pristineSetting(k, L[k])) patch[k] = clone(R[k]);
+  }
+  return patch;
+}
 
 // Ajustes que dan forma al calendario publicado (uno solo para todos): convergen entre dispositivos.
 // Avisos y publishPlaces: gana el cambio más reciente; calendarUpdatedAt: el mayor (nunca retrocede).
 function convergeSettings(L, R, adopt) {
   if (!isPlainObject(R)) return null;
-  const patch = adopt ? pick(R, ADOPT_SETTINGS) : {};
+  const patch = adopt ? adoptedSettings(L, R) : {};
   const lr = tsOf(L.remindersUpdatedAt), rr = tsOf(R.remindersUpdatedAt);
   if (isPlainObject(R.reminders) && (rr > lr || (adopt && rr >= lr))) {
     patch.reminders = clone(R.reminders);
@@ -967,7 +1042,7 @@ function convergeSettings(L, R, adopt) {
 // Fusiona el estado local con uno remoto (ya migrado). Por día y por código gana el updatedAt más
 // reciente (las tombstones cuentan como versión). Ajustes: los del dispositivo, salvo los que dan forma
 // al calendario (avisos, publishPlaces: gana el cambio más reciente); con adoptSettings (dispositivo
-// vacío) se toman además del remoto nombre y horas.
+// vacío) se toman además del remoto nombre y horas, solo si aquí están vacíos o de fábrica.
 // since: ISO de la última sincronización (para contar conflictos: cambiados en los dos lados).
 // → { state, changed, conflictCount, pulledDays: [key], pulledCodes: [code] }
 export function mergeStates(local, remote, { now, since = null, adoptSettings = false } = {}) {

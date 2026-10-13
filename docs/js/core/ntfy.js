@@ -222,7 +222,7 @@ export async function testNtfy(ntfy, fetchImpl = defaultFetch, { appUrl = defaul
   if (!topic) return { ok: false, message: 'Primero elige un nombre de tema (topic).' };
   const payload = {
     topic,
-    title: 'Turnos de Mauricio',
+    title: 'Turnos',
     message: '¡Funciona! Así te llegarán los avisos de tus turnos. 👍',
     tags: ['white_check_mark'],
     priority: 3,
@@ -230,7 +230,7 @@ export async function testNtfy(ntfy, fetchImpl = defaultFetch, { appUrl = defaul
   if (appUrl) payload.click = appUrl;
   try {
     await publish(fetchImpl, serverOf(ntfy), payload);
-    return { ok: true, message: 'Notificación de prueba enviada. Mira tu iPhone.' };
+    return { ok: true, message: 'Notificación de prueba enviada. Mira tu teléfono.' };
   } catch (e) {
     return { ok: false, message: e.message };
   }

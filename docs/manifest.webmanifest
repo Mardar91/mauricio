@@ -1,5 +1,5 @@
 {
-  "name": "Turnos de Mauricio",
+  "name": "Turnos",
   "short_name": "Turnos",
   "description": "Tus turnos de trabajo: foto del plan, recordatorios y horas de la semana.",
   "lang": "es",
@@ -8,7 +8,7 @@
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
-  "orientation": "portrait",
+  "orientation": "any",
   "background_color": "#F7F5F2",
   "theme_color": "#EF8A17",
   "categories": ["productivity", "utilities"],

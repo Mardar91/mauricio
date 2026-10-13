@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   STORAGE_KEY, CORRUPT_PREFIX, createDefaultState, loadState, saveState, createStore, setDay, clearDay, applyScan,
-  upsertCode, deleteCode, updateSettings, exportBackup, importBackup, migrateState, MAX_CHANGES,
+  upsertCode, deleteCode, updateSettings, exportBackup, importBackup, migrateState, MAX_CHANGES, suggestPlanName,
 } from '../../docs/js/core/store.js';
 import { DEFAULT_CODES } from '../../docs/js/core/codes.js';
 
@@ -13,13 +13,19 @@ test('createDefaultState: forma del estado (§3)', () => {
   assert.deepEqual(Object.keys(s).sort(), ['changes', 'codeTombstones', 'codes', 'days', 'scans', 'schema', 'settings', 'tombstones']);
   assert.deepEqual(s.tombstones, {});
   assert.deepEqual(s.codeTombstones, {});
-  assert.equal(s.settings.name, 'Mauricio');
+  assert.equal(s.settings.name, ''); // instalación nueva: sin nombre («Hola 👋»)
+  assert.equal(s.settings.planName, '');
   assert.equal(s.settings.weeklyHours, 35);
   assert.equal(s.settings.workDaysPerWeek, 5);
   assert.equal(s.settings.holidaysReduceSoll, true);
-  assert.deepEqual(s.settings.reminders, { eveningBefore: true, eveningTime: '20:00', beforeStart: true, minutesBefore: 60 });
+  assert.deepEqual(s.settings.reminders, { eveningBefore: true, eveningTime: '20:00', beforeStart: true, minutesBefore: 60, planUpload: true });
+  assert.deepEqual(s.settings.supplements, {
+    night: { from: '23:00', to: '06:00', pct: 26 }, saturday: { from: '13:00', to: '21:00', pct: 0 },
+    sunday: { pct: 33 }, holiday: { pct: 40 }, hourlyWage: null,
+  });
+  assert.deepEqual(s.settings.balances, { overtimeStartMin: 0, overtimeStartMonth: null, vacationDaysPerYear: 30, vacationCarryOver: 0 });
   assert.deepEqual(s.settings.sync, {
-    enabled: false, owner: 'Mardar91', repo: 'mauricio-datos', branch: '', token: '', key: '', deviceId: '', baseRev: 0,
+    enabled: false, owner: 'Mardar91', repo: 'mauricio-datos', branch: '', dir: '', token: '', key: '', deviceId: '', baseRev: 0,
     lastPushAt: null, lastPushHash: null, lastIcsHash: null, lastPullAt: null, lastError: null, lastErrorCode: null,
     lastErrorDetail: null, lastErrorSince: null, publishPlaces: false, publisher: null, publisherSince: null, unpublished: 0,
     prevKey: '', lastSyncStartedAt: null,
@@ -104,7 +110,7 @@ test('createStore: borrador, estado devuelto, suscripción y guardado automátic
   const before = store.get();
   store.set((d) => { d.settings.name = 'Mauricio D.'; });
   assert.equal(store.get().settings.name, 'Mauricio D.');
-  assert.equal(before.settings.name, 'Mauricio'); // el anterior no se toca
+  assert.equal(before.settings.name, ''); // el anterior no se toca
   assert.equal(JSON.parse(storage.getItem(STORAGE_KEY)).settings.name, 'Mauricio D.');
   store.set((s) => setDay(s, '2026-10-12', ['F1']));
   assert.deepEqual(store.get().days['2026-10-12'].codes, ['F1']);
@@ -192,13 +198,16 @@ test('upsertCode y deleteCode', () => {
   assert.equal(s.codes.F6.end, '15:30');
   assert.equal(s.codes.F6.name, 'Mañana');
   assert.equal(s.codes.F6.builtin, true);
-  s = upsertCode(s, { code: 'K', kind: 'sick', name: 'Enfermo', color: '#888888' });
-  assert.equal(s.codes.K.kind, 'sick');
-  assert.equal(s.codes.K.builtin, false);
+  s = upsertCode(s, { code: 'KR', kind: 'sick', name: 'Enfermo', color: '#888888' });
+  assert.equal(s.codes.KR.kind, 'sick');
+  assert.equal(s.codes.KR.builtin, false);
   assert.throws(() => upsertCode(s, { code: '' }), /vacío/);
   assert.throws(() => upsertCode(s, { code: 'F7', start: '25:00' }), /no válida/);
-  s = deleteCode(s, 'K');
-  assert.equal(s.codes.K, undefined);
+  s = deleteCode(s, 'KR');
+  assert.equal(s.codes.KR, undefined);
+  // K (enfermedad) es de fábrica: borrarlo lo restablece
+  s = deleteCode(upsertCode(s, { code: 'K', name: 'Krank' }), 'K');
+  assert.deepEqual([s.codes.K.kind, s.codes.K.name, s.codes.K.builtin], ['sick', 'Enfermedad', true]);
   s = deleteCode(s, 'F6'); // de fábrica → vuelve al original
   assert.equal(s.codes.F6.start, '06:00');
   assert.equal(s.codes.F6.confirmed, false);
@@ -207,7 +216,7 @@ test('upsertCode y deleteCode', () => {
 test('updateSettings: mezcla profunda; el mapa de ntfy se reemplaza entero', () => {
   let s = createDefaultState();
   s = updateSettings(s, { reminders: { minutesBefore: 30 }, sync: { token: 'tok' } });
-  assert.deepEqual(s.settings.reminders, { eveningBefore: true, eveningTime: '20:00', beforeStart: true, minutesBefore: 30 });
+  assert.deepEqual(s.settings.reminders, { eveningBefore: true, eveningTime: '20:00', beforeStart: true, minutesBefore: 30, planUpload: true });
   assert.equal(s.settings.sync.token, 'tok');
   assert.equal(s.settings.sync.owner, 'Mardar91');
   s = updateSettings(s, { ntfy: { scheduled: { a: { at: 'x', hash: '1' }, b: { at: 'y', hash: '2' } } } });
@@ -215,7 +224,7 @@ test('updateSettings: mezcla profunda; el mapa de ntfy se reemplaza entero', () 
   assert.deepEqual(Object.keys(s.settings.ntfy.scheduled), ['b']);
   assert.equal(s.settings.ntfy.server, 'https://ntfy.sh');
   const t = updateSettings(s, { name: 'M' });
-  assert.equal(s.settings.name, 'Mauricio');
+  assert.equal(s.settings.name, '');
   assert.equal(t.settings.name, 'M');
 });
 
@@ -255,7 +264,7 @@ test('importBackup valida y da errores en español', () => {
   const s = createDefaultState();
   assert.throws(() => importBackup(s, 'no es json'), /no es una copia de seguridad válida/);
   assert.throws(() => importBackup(s, '[]'), /no es una copia de seguridad válida/);
-  assert.throws(() => importBackup(s, JSON.stringify({ app: 'otra', days: {} })), /no es una copia de Turnos/);
+  assert.throws(() => importBackup(s, JSON.stringify({ app: 'otra', days: {} })), (e) => e.code === 'INVALID' && e.message === 'Este archivo no es una copia de Turnos.');
   assert.throws(() => importBackup(s, JSON.stringify({ settings: {} })), /no contiene días/);
   assert.throws(() => importBackup(s, JSON.stringify({ days: { '2026-13-01': { codes: [] } } })), /fecha no válida/);
   assert.throws(() => importBackup(s, JSON.stringify({ days: { '2026-10-01': { codes: [1] } } })), /no válidos/);
@@ -264,10 +273,11 @@ test('importBackup valida y da errores en español', () => {
   assert.deepEqual(ok.days['2026-10-01'].codes, ['F1']);
 });
 
-test('updateSettings ignora valores de tipo incorrecto', () => {
-  const s = updateSettings(createDefaultState(), { sync: 'x', reminders: { minutesBefore: '30', eveningBefore: false }, ntfy: { scheduled: [] }, name: 5 });
+test('updateSettings ignora valores de tipo incorrecto (un número escrito como texto sí vale)', () => {
+  const s = updateSettings(updateSettings(createDefaultState(), { name: 'Mauricio' }), { sync: 'x', reminders: { minutesBefore: 'treinta', eveningBefore: false }, ntfy: { scheduled: [] }, name: 5 });
   assert.equal(s.settings.sync.owner, 'Mardar91');
   assert.equal(s.settings.reminders.minutesBefore, 60);
+  assert.equal(updateSettings(s, { reminders: { minutesBefore: ' 30 ' } }).settings.reminders.minutesBefore, 30);
   assert.equal(s.settings.reminders.eveningBefore, false);
   assert.deepEqual(s.settings.ntfy.scheduled, {});
   assert.equal(s.settings.name, 'Mauricio');
@@ -294,4 +304,25 @@ test('migrateState nunca lanza con datos raros', () => {
     assert.equal(s.settings.workDaysPerWeek >= 1, true);
     assert.equal(typeof s.settings.ntfy.scheduled, 'object');
   }
+});
+
+test('nombre: vacío en instalaciones nuevas; las guardadas conservan el suyo; planName sugerido', () => {
+  // Estado guardado por una versión anterior (con name 'Mauricio' y sin planName)
+  const old = memoryStorage({ [STORAGE_KEY]: JSON.stringify({ schema: 1, settings: { name: 'Mauricio', weeklyHours: 35 }, days: {} }) });
+  const s = loadState(old);
+  assert.equal(s.settings.name, 'Mauricio');
+  assert.equal(s.settings.planName, '');
+  assert.equal(suggestPlanName(s), 'Ducuara Mauricio');
+  assert.equal(s.settings.reminders.planUpload, true);
+  assert.equal(s.settings.sync.dir, '');
+  assert.equal(s.codes.K.kind, 'sick'); // código de fábrica nuevo
+  assert.equal(createDefaultState().settings.name, '');
+  assert.equal(suggestPlanName(createDefaultState()), '');
+  assert.equal(suggestPlanName(updateSettings(createDefaultState(), { name: ' Ana María ' })), 'Ducuara Ana');
+  assert.equal(suggestPlanName(updateSettings(createDefaultState(), { name: 'Ana', planName: '  Ducuara   Ana  ' })), 'Ducuara Ana');
+  // Saneado: nombre recortado, planName con espacios normales
+  const t = updateSettings(createDefaultState(), { name: '  Ana  ', planName: 'Ducuara\t Ana' });
+  assert.deepEqual([t.settings.name, t.settings.planName], ['Ana', 'Ducuara Ana']);
+  // Carpeta guardada en mayúsculas → minúsculas (una no válida se queda: sync dará CONFIG)
+  assert.equal(updateSettings(createDefaultState(), { sync: { dir: ' Ana ' } }).settings.sync.dir, 'ana');
 });

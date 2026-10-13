@@ -59,11 +59,24 @@ export function createCalendar(ctx) {
     if (Math.abs(dx) > 70 && Math.abs(dy) < 45) shift(dx < 0 ? 1 : -1);
   });
 
+  // Ordenador: flechas ← → del teclado para cambiar de mes (sin hojas abiertas ni un campo con el foco)
+  document.addEventListener('keydown', (e) => {
+    if (el.hidden || !el.isConnected || e.altKey || e.ctrlKey || e.metaKey) return;
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    if (document.querySelector('.sheet-wrap, .dialog-wrap, .onboarding')) return;
+    if (/^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement?.tagName || '')) return;
+    e.preventDefault();
+    shift(e.key === 'ArrowRight' ? 1 : -1);
+  });
+
   function weekHeader(state, monday) {
     const w = weekSummary(state, monday);
     const pct = w.soll ? Math.min(100, (w.total / w.soll) * 100) : 0;
     const sunday = addDays(monday, 6);
-    const range = `${+monday.slice(8)} ${monthShort(+monday.slice(5, 7))} – ${+sunday.slice(8)} ${monthShort(+sunday.slice(5, 7))}`;
+    // «12–18 oct» en el mismo mes; «31 ago – 6 sept» entre dos meses
+    const m1 = +monday.slice(5, 7), m2 = +sunday.slice(5, 7);
+    const range = m1 === m2 ? `${+monday.slice(8)}–${+sunday.slice(8)} ${monthShort(m1)}`
+      : `${+monday.slice(8)} ${monthShort(m1)} – ${+sunday.slice(8)} ${monthShort(m2)}`;
     const cls = w.total > w.soll + 4 * 60 ? 'heavy' : w.total > w.soll ? 'over' : '';
     return h('header', { class: 'week-sep' },
       h('span', { class: 'week-sep-text' },

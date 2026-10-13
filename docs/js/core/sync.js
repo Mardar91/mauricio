@@ -1,6 +1,7 @@
-// Sincronización segura con GitHub (SPEC §9). En el repo de datos solo hay dos archivos:
+// Sincronización segura con GitHub (SPEC §9). En la carpeta de cada persona del repo de datos (raíz o
+// settings.sync.dir, SPEC §11; cada carpeta con su clave y su dispositivo que publica) hay dos archivos:
 //  - backup.json: { format:'turnos-backup', v:3, meta:{rev,savedAt,deviceId,days,publisher,publisherSince},
-//    enc:{alg,iv,data} } con el estado completo cifrado (AES-GCM 256, clave settings.sync.key; sin token
+//    enc:{alg,iv,data} } con el estado completo cifrado (meta.name: nombre de pila en claro, para listar) (AES-GCM 256, clave settings.sync.key; sin token
 //    ni clave dentro). Los metadatos van autenticados.
 //  - turnos.ics: el calendario (sin notas; lugares solo con publishPlaces).
 // UN SOLO EDITOR: solo el dispositivo meta.publisher escribe en GitHub. Los demás leen y fusionan en
@@ -13,7 +14,7 @@
 // cola (createSyncQueue) y aplica cada resultado con applySyncResult, que descarta los resultados viejos.
 import { decryptText, encryptText, generateSyncKey, isSyncKey, randomId } from './cipher.js';
 import { buildICS } from './ics.js';
-import { SCHEMA, USER_SETTINGS, dataFingerprint, mergeStates, migrateState, syncPayload, updateSettings } from './store.js';
+import { SCHEMA, USER_SETTINGS, dataFingerprint, firstNameKey, mergeStates, migrateState, personSwitchState, syncPayload, updateSettings } from './store.js';
 import { base64ToUtf8, base64UrlDecode, base64UrlEncode, defaultFetch, hashString, isPlainObject, stableStringify, utf8ToBase64 } from './util.js';
 
 export const API = 'https://api.github.com';
@@ -48,6 +49,7 @@ export const SYNC_MESSAGES = Object.freeze({
   EMPTY_LOCAL: 'Aquí no hay turnos guardados, pero en internet sí. No se envió nada para no borrarlos.',
   NO_REMOTE: 'Todavía no hay ninguna copia guardada en internet.',
   RETRY: 'Preparando el calendario. Se volverá a intentar en un momento.',
+  OTHER_PERSON: 'Este enlace es del calendario de otra persona. No se cambió nada.',
 });
 // Errores pasajeros: se reintenta solo; el resto necesita ayuda. RETRY: repetir en cuanto se guarde el
 // resultado (la identidad recién creada ya está a salvo)
@@ -84,6 +86,43 @@ export const isValidOwner = (s) => typeof s === 'string' && OWNER_RE.test(s);
 export const isValidRepo = (s) => typeof s === 'string' && REPO_RE.test(s) && !/^\.+$/.test(s) && !/\.git$/i.test(s);
 export const isValidToken = (s) => typeof s === 'string' && TOKEN_RE.test(s);
 
+// Carpeta de una persona: '' (raíz) o slug [a-z0-9-]{1,32}
+export const MAX_DIR_LEN = 32;
+const DIR_RE = /^[a-z0-9-]{1,32}$/;
+export const isValidDir = (d) => d === '' || (typeof d === 'string' && DIR_RE.test(d));
+const MAX_NAME = 60;
+
+// Nombre de pila limpio (espacios normales, máx. 60) o ''
+export function cleanPersonName(v) {
+  return typeof v === 'string' ? v.replace(/[\u0000-\u001f\u007f]/g, '').replace(/\s+/g, ' ').trim().slice(0, MAX_NAME).trim() : '';
+}
+
+// Nombre que se publica en claro (backup.json meta.name): solo la primera palabra, nunca apellidos
+export function publicName(v) {
+  return cleanPersonName(v).split(' ')[0] || '';
+}
+
+// Texto → slug para carpetas: sin acentos, minúsculas, [a-z0-9-], máx. 32 ('José Ana' → 'jose-ana')
+export function slugify(text, max = MAX_DIR_LEN) {
+  const s = String(text ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/ß/g, 'ss').replace(/[æÆ]/g, 'ae').replace(/[œŒ]/g, 'oe').replace(/[øØ]/g, 'o').replace(/[łŁ]/g, 'l').replace(/[đĐ]/g, 'd')
+    .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  return s.slice(0, max).replace(/-+$/, '');
+}
+
+// Slug que no está en taken: 'ana', 'ana-2', 'ana-3'… (máx. 32 caracteres)
+export function uniqueDir(base, taken = []) {
+  const used = new Set([...taken].map((d) => String(d ?? '').trim().toLowerCase()));
+  const b = slugify(base) || 'persona';
+  if (!used.has(b)) return b;
+  for (let i = 2; i < 1000; i++) {
+    const suffix = `-${i}`;
+    const c = `${b.slice(0, MAX_DIR_LEN - suffix.length).replace(/-+$/, '')}${suffix}`;
+    if (!used.has(c)) return c;
+  }
+  throw syncError('CONFIG', 'No hay nombres de carpeta libres.');
+}
+
 // Nombre de rama válido para git y seguro en URLs ('' = rama por defecto)
 export function isValidBranch(b) {
   if (b === '') return true;
@@ -92,19 +131,39 @@ export function isValidBranch(b) {
   return b.split('/').every((seg) => seg && !seg.startsWith('.'));
 }
 
-// Normaliza { owner, repo, branch, token, key, publishPlaces? } → objeto válido o null
+// Normaliza { owner, repo, branch, dir?, token, key, publishPlaces?, name? } → objeto válido o null.
+// dir: carpeta de la persona ('' = raíz; se pasa a minúsculas). Sin dir (formulario que no lo tiene)
+// el resultado no lo lleva y al aplicarlo se conserva la carpeta del dispositivo; en un enlace,
+// parseSetupLink lo pone a '' (enlace antiguo = raíz). name: nombre de pila que sugiere el enlace.
 export function normalizeSyncConfig(data) {
   if (!isPlainObject(data)) return null;
   const str = (v) => (typeof v === 'string' ? v.trim() : v === undefined || v === null ? '' : null);
   const owner = str(data.owner ?? data.o), repo = str(data.repo ?? data.r), token = str(data.token ?? data.t);
   const branch = str(data.branch ?? data.b), key = str(data.key ?? data.k);
-  if ([owner, repo, token, branch, key].some((v) => v === null)) return null;
-  if (!isValidOwner(owner) || !isValidRepo(repo) || !isValidToken(token) || !isValidBranch(branch)) return null;
+  const hasDir = data.dir !== undefined || data.d !== undefined;
+  const rawDir = str(data.dir ?? data.d);
+  if ([owner, repo, token, branch, key, rawDir].some((v) => v === null)) return null;
+  const dir = rawDir.toLowerCase();
+  if (!isValidOwner(owner) || !isValidRepo(repo) || !isValidToken(token) || !isValidBranch(branch) || !isValidDir(dir)) return null;
   if (key && !isSyncKey(key)) return null;
   const out = { owner, repo, branch, token, key };
+  if (hasDir) out.dir = dir;
   const places = data.publishPlaces ?? data.p;
   if (typeof places === 'boolean') out.publishPlaces = places;
+  const name = cleanPersonName(data.name ?? data.n);
+  if (name) out.name = name;
   return out;
+}
+
+const dirOf = (sync) => String(sync?.dir ?? '').trim().toLowerCase();
+// cfg sin dir → la carpeta actual del dispositivo
+const withDir = (cfg, cur) => (cfg && cfg.dir === undefined ? { ...cfg, dir: dirOf(cur) } : cfg);
+
+// ¿Misma carpeta de datos (owner, repo y carpeta)? Solo entonces se reutiliza la clave guardada.
+// GitHub no distingue mayúsculas en owner y repo.
+const lower = (v) => String(v || '').trim().toLowerCase();
+function sameFolder(a, b) {
+  return Boolean(a && b) && lower(a.owner) === lower(b.owner) && lower(a.repo) === lower(b.repo) && dirOf(a) === dirOf(b);
 }
 
 // Parche para settings.sync al aplicar una configuración nueva (enlace o formulario): activa la sync
@@ -112,23 +171,29 @@ export function normalizeSyncConfig(data) {
 // current (State, opcional): con el mismo repositorio y rama se recuerda quién publicaba (por si
 // backup.json desaparece); si la clave cambia, la anterior queda en prevKey (red de seguridad).
 // El publishPlaces del enlace NO va aquí: lo aplica applySyncConfig (solo si aquí nunca se eligió).
-export function syncConfigPatch(cfg, current = null) {
+// Otra carpeta (otro owner, repo o dir) = otra persona: sin clave en cfg, la clave guardada NO se
+// reutiliza (cada carpeta tiene la suya; se crea una nueva si no hay copia) y no queda en prevKey.
+export function syncConfigPatch(config, current = null) {
   const cur = current?.settings?.sync ?? null;
+  const cfg = withDir(config, cur);
   const branch = String(cfg.branch ?? '').trim();
+  const dir = dirOf(cfg);
   const patch = {
-    owner: cfg.owner, repo: cfg.repo, branch, token: cfg.token, enabled: true,
+    owner: cfg.owner, repo: cfg.repo, branch, dir, token: cfg.token, enabled: true,
     baseRev: 0, lastPushAt: null, lastPushHash: null, lastPullAt: null,
     lastError: null, lastErrorCode: null, lastErrorDetail: null, lastErrorSince: null, unpublished: 0,
   };
-  const same = Boolean(cur) && String(cur.owner || '').trim() === String(cfg.owner).trim()
-    && String(cur.repo || '').trim() === String(cfg.repo).trim() && branchName(cur) === branch;
+  const folder = sameFolder(cur, cfg);
+  const same = folder && branchName(cur) === branch;
   if (!same) Object.assign(patch, { publisher: null, publisherSince: null });
   // Con el mismo destino se recuerda qué calendario publicó este dispositivo (si backup.json
   // desaparece, solo quien escribió el turnos.ics publicado lo vuelve a crear sin preguntar)
   if (cur && !same) patch.lastIcsHash = null;
   if (cfg.key) {
     patch.key = cfg.key;
-    if (isSyncKey(cur?.key) && cur.key !== cfg.key) patch.prevKey = cur.key;
+    if (isSyncKey(cur?.key) && cur.key !== cfg.key) patch.prevKey = folder ? cur.key : '';
+  } else if (cur && !folder) {
+    Object.assign(patch, { key: '', prevKey: '' });
   }
   return patch;
 }
@@ -154,10 +219,12 @@ export function ensureSyncIdentity(state, { getRandomValues, deviceId, key } = {
 // el sello mínimo para que gane cualquier decisión publicada) + ensureSyncIdentity. Lanza SyncError
 // CONFIG si cfg no es válida. options: { now, getRandomValues, deviceId, key } (ver ensureSyncIdentity).
 export function applySyncConfig(state, cfg, { now, getRandomValues, deviceId, key } = {}) {
-  const c = normalizeSyncConfig(cfg);
+  const c = withDir(normalizeSyncConfig(cfg), state?.settings?.sync);
   if (!c) throw syncError('CONFIG', 'Configuración de sincronización no válida.');
   const st = state?.settings || {};
   const patch = { sync: syncConfigPatch(c, state) };
+  // Nombre que trae el enlace («Crear enlace para otra persona»): solo si aquí no hay ninguno
+  if (c.name && !String(st.name ?? '').trim()) patch.name = c.name;
   const neverChose = !st.placesUpdatedAt && !st.sync?.lastPullAt && !st.sync?.lastPushAt;
   if (typeof c.publishPlaces === 'boolean' && neverChose) {
     patch.sync.publishPlaces = c.publishPlaces;
@@ -172,6 +239,8 @@ const enc = encodeURIComponent;
 const repoPath = (sync) => `/repos/${enc(sync.owner)}/${enc(sync.repo)}`;
 const branchName = (sync) => String(sync?.branch ?? '').trim();
 const filePath = (p) => p.split('/').map(enc).join('/');
+// Ruta de un archivo dentro de la carpeta de la persona
+const pathIn = (ctx, name) => (ctx.dir ? `${ctx.dir}/${name}` : name);
 
 function checkConfig(sync) {
   const missing = ['owner', 'repo', 'token'].filter((k) => !String(sync?.[k] || '').trim());
@@ -179,6 +248,7 @@ function checkConfig(sync) {
   if (!isValidOwner(String(sync.owner).trim()) || !isValidRepo(String(sync.repo).trim()) || !isValidBranch(branchName(sync))) {
     throw syncError('CONFIG', 'Usuario, repositorio o rama con caracteres no válidos.');
   }
+  if (!isValidDir(dirOf(sync))) throw syncError('CONFIG', `Carpeta no válida: «${String(sync.dir).slice(0, 40)}» (solo a-z, 0-9 y guiones).`);
 }
 
 function httpError(status, sync, data, headers, what = '') {
@@ -230,7 +300,7 @@ async function gh(ctx, method, path, body, allow = []) {
   throw httpError(res.status, sync, data, res.headers, `${method} ${path.split('?')[0]}`);
 }
 
-const ctxOf = (sync, fetchImpl) => ({ sync: { ...sync, owner: String(sync.owner).trim(), repo: String(sync.repo).trim() }, fetchImpl });
+const ctxOf = (sync, fetchImpl) => ({ sync: { ...sync, owner: String(sync.owner).trim(), repo: String(sync.repo).trim() }, dir: dirOf(sync), fetchImpl });
 
 // Comprueba token y repositorio → { ok, message, detail, code, private, defaultBranch, warning }
 export async function testConnection(sync, fetchArg) {
@@ -281,8 +351,9 @@ async function branchInfo(ctx, create) {
 // Ruta de contenidos con la rama (sin rama = la por defecto; en un repo vacío tampoco)
 const refQuery = (ctx) => (ctx.branch && !ctx.empty ? `?ref=${enc(ctx.branch)}` : '');
 
-async function getFile(ctx, path) {
-  const r = await gh(ctx, 'GET', `${repoPath(ctx.sync)}/contents/${filePath(path)}${refQuery(ctx)}`, null, [404]);
+// Archivo (nombre) de la carpeta de la persona → datos de la API o null
+async function getFile(ctx, name) {
+  const r = await gh(ctx, 'GET', `${repoPath(ctx.sync)}/contents/${filePath(pathIn(ctx, name))}${refQuery(ctx)}`, null, [404]);
   return r.status === 404 ? null : r.data;
 }
 
@@ -296,9 +367,11 @@ async function fileText(ctx, data) {
   return '';
 }
 
-// PUT de un archivo con el sha esperado (null = archivo nuevo) → { conflict } | { sha, commit }
-async function putContents(ctx, path, content, message, sha) {
-  const body = { message, content: utf8ToBase64(content) };
+// PUT de un archivo (nombre, en la carpeta de la persona) con el sha esperado (null = nuevo)
+// → { conflict } | { sha, commit }
+async function putContents(ctx, name, content, message, sha) {
+  const path = pathIn(ctx, name);
+  const body = { message: ctx.dir ? message.replace(/^Turnos:/, `Turnos (${ctx.dir}):`) : message, content: utf8ToBase64(content) };
   if (ctx.branch && !ctx.empty) body.branch = ctx.branch;
   if (sha) body.sha = sha;
   const r = await gh(ctx, 'PUT', `${repoPath(ctx.sync)}/contents/${filePath(path)}`, body, [409, 422]);
@@ -346,6 +419,8 @@ function aadOf(doc) {
 }
 
 // Estado → documento backup.json (objeto). publisher: dispositivo que publica (por defecto deviceId).
+// meta.name: nombre de pila en claro (para «Calendarios de la familia»); no va en los datos autenticados
+// (así las versiones anteriores de la app siguen leyendo la copia).
 export async function encryptBackup(state, { rev, now = new Date(), deviceId = '', key, publisher, publisherSince, getRandomValues } = {}) {
   const payload = syncPayload(state);
   const savedAt = now.toISOString();
@@ -353,6 +428,8 @@ export async function encryptBackup(state, { rev, now = new Date(), deviceId = '
     rev, savedAt, deviceId: String(deviceId || ''), days: Object.keys(payload.days).length,
     publisher: String(publisher || deviceId || ''), publisherSince: publisherSince ?? savedAt,
   };
+  const name = publicName(state?.settings?.name);
+  if (name) meta.name = name;
   const doc = { format: BACKUP_FORMAT, v: BACKUP_VERSION, meta };
   doc.enc = await encryptText(JSON.stringify(payload), key, aadOf(doc), getRandomValues);
   return doc;
@@ -417,11 +494,15 @@ async function readRemote(ctx) {
   return null;
 }
 
-// Eventos del turnos.ics publicado (0 si no hay)
+// Turnos del turnos.ics publicado (0 si no hay). El aviso «Sube el plan» (UID plan-…) no cuenta.
+export function icsEventCount(text) {
+  return (String(text || '').match(/^UID:(?!plan-)/gm) || []).length;
+}
+
 async function publishedEvents(ctx) {
   if (ctx.missing) return 0;
   const f = await getFile(ctx, ICS_FILE);
-  return f ? ((await fileText(ctx, f)).match(/^BEGIN:VEVENT/gm) || []).length : 0;
+  return f ? icsEventCount(await fileText(ctx, f)) : 0;
 }
 
 // Descifra la copia. Si la clave actual no vale pero la anterior (prevKey, de antes de un enlace) sí,
@@ -477,7 +558,7 @@ function newResult(state, now, patch = {}) {
     state, merged: false, pulled: false, pushed: false, icsPushed: false, conflictCount: 0, pulledDays: [],
     unpublishedDays: [], unpublishedCodes: [], unpublishedSettings: false,
     rev: null, remote: null, sync: patch, error: null, startedAt: now.toISOString(),
-    target: { owner: String(sync.owner || '').trim(), repo: String(sync.repo || '').trim(), branch: branchName(sync), keyTag: keyTag(sync.key) },
+    target: { owner: String(sync.owner || '').trim(), repo: String(sync.repo || '').trim(), branch: branchName(sync), dir: dirOf(sync), keyTag: keyTag(sync.key) },
   };
 }
 
@@ -523,6 +604,7 @@ export async function syncNow(state, fetchArg) {
       res.remote = remote ? {
         rev: remote.rev, days: remote.days, legacy: remote.legacy, publisher: remote.publisher?.deviceId ?? null,
         savedAt: remote.doc?.meta?.savedAt ?? null, deviceId: remote.doc?.meta?.deviceId ?? null,
+        name: cleanPersonName(remote.doc?.meta?.name) || null,
       } : null;
       let merged = local, remoteState = null;
       // 1) Si hay copia: siempre descifrar (comprueba la clave) y fusionar por día
@@ -683,7 +765,8 @@ export function applySyncResult(current, res, { now } = {}) {
   if (!res || !current) return current;
   const s = current.settings?.sync || {};
   const t = res.target;
-  if (t && (String(s.owner || '').trim() !== t.owner || String(s.repo || '').trim() !== t.repo || branchName(s) !== t.branch)) return current;
+  if (t && (String(s.owner || '').trim() !== t.owner || String(s.repo || '').trim() !== t.repo || branchName(s) !== t.branch
+    || dirOf(s) !== (t.dir ?? ''))) return current;
   let next = current;
   if (res.merged && res.state && res.state !== current) {
     next = mergeStates(current, res.state, { now, adoptSettings: daysIn(current) === 0 }).state;
@@ -716,26 +799,81 @@ export function applySyncResult(current, res, { now } = {}) {
 // → { ok:true, res, readOnly, publisher, error (pasajero o null), apply(state) → state }
 //   | { ok:false, error, res }
 // apply: store.set((s) => t.apply(s)) guarda configuración + identidad (la probada) + lo leído.
+// Otra persona (SPEC §11): si el enlace es del calendario de otra persona → { ok:false, error OTHER_PERSON,
+// otherPerson } y no cambia nada. Con options.switchPerson: true (tras confirmarlo) el dispositivo pasa a
+// ese calendario desde un estado limpio (personSwitchState): nada de la persona anterior se fusiona ni se
+// publica allí (→ switched: true).
 export async function trySetupConfig(state, cfg, options) {
   const o = opts(options);
   const now = o.now instanceof Date ? o.now : new Date();
-  const c = normalizeSyncConfig(cfg);
-  if (!c) return { ok: false, error: errorInfo(syncError('CONFIG', 'Enlace o configuración no válidos.')), res: null };
   const cur = state?.settings?.sync || {};
+  const c = withDir(normalizeSyncConfig(cfg), cur);
+  if (!c) return { ok: false, error: errorInfo(syncError('CONFIG', 'Enlace o configuración no válidos.')), res: null };
   const deviceId = cur.deviceId || randomId(12, o.getRandomValues);
-  const key = c.key || (isSyncKey(cur.key) ? cur.key : '');
-  // Copia de prueba con la clave que se va a usar (sin la red de seguridad prevKey: se prueba ESTA);
-  // sin clave se prueba sin ninguna (NO_KEY si ya hay copia cifrada)
-  let trial = applySyncConfig(state, c, { now, getRandomValues: o.getRandomValues, deviceId, key: key || false });
-  trial = updateSettings(trial, { sync: { prevKey: '', ...(key ? {} : { key: '' }) } });
-  const res = await pullOnly(trial, { ...o, now });
   const working = Boolean(cur.enabled && (cur.lastPullAt || cur.lastPushAt));
-  if (res.error && (!res.error.retry || working)) return { ok: false, error: res.error, res };
+  // Lee el remoto con una copia de prueba de base (no escribe nada) → { res, key }
+  const probe = async (base) => {
+    const bs = base?.settings?.sync || {};
+    // La clave guardada solo vale para su carpeta: otra persona (otro dir/repo) nunca la hereda
+    const key = c.key || (isSyncKey(bs.key) && sameFolder(bs, c) ? bs.key : '');
+    // Con la clave que se va a usar (sin la red de seguridad prevKey: se prueba ESTA); sin clave se
+    // prueba sin ninguna (NO_KEY si ya hay copia cifrada)
+    let trial = applySyncConfig(base, c, { now, getRandomValues: o.getRandomValues, deviceId, key: key || false });
+    trial = updateSettings(trial, { sync: { prevKey: '', ...(key ? {} : { key: '' }) } });
+    return { res: await pullOnly(trial, { ...o, now }), key };
+  };
+  const failedRead = (res) => res.error && (!res.error.retry || working);
+  let { res, key } = await probe(state);
+  if (failedRead(res)) return { ok: false, error: res.error, res };
+  const other = otherPersonOf(state, c, res);
+  if (other && o.switchPerson !== true) {
+    const error = { ...errorInfo(syncError('OTHER_PERSON', other.detail)), message: otherPersonMessage(other.info) };
+    return { ok: false, error, res, otherPerson: other.info };
+  }
+  const switched = Boolean(other);
+  if (switched) {
+    // Cambio de persona confirmado: se prueba (y luego se guarda) desde un estado limpio
+    ({ res, key } = await probe(personSwitchState(state)));
+    if (failedRead(res)) return { ok: false, error: res.error, res };
+  }
   // Sin clave y sin copia remota: se crea ahora (antes de guardar nada y de publicar)
   const finalKey = key || (res.ok ? generateSyncKey(o.getRandomValues) : false);
   return {
-    ok: true, res, readOnly: res.readOnly, publisher: res.publisher, error: res.error,
-    apply: (s) => applySyncResult(applySyncConfig(s, c, { now, getRandomValues: o.getRandomValues, deviceId, key: finalKey }), res, { now }),
+    ok: true, res, readOnly: res.readOnly, publisher: res.publisher, error: res.error, switched,
+    apply: (s) => applySyncResult(applySyncConfig(switched ? personSwitchState(s) : s, c, { now, getRandomValues: o.getRandomValues, deviceId, key: finalKey }), res, { now }),
+  };
+}
+
+// Mensaje de OTHER_PERSON con los nombres que se conocen
+function otherPersonMessage({ reason, name, current }) {
+  const mine = current?.name;
+  if (name && mine && firstNameKey(name) === firstNameKey(mine)) return 'Este enlace es de otro calendario, no del que usa este dispositivo. No se cambió nada.';
+  if (!name) return SYNC_MESSAGES.OTHER_PERSON;
+  if (reason === 'name') return `Este enlace es del calendario de ${name} y en este dispositivo hay turnos de ${mine}. No se cambió nada.`;
+  return `Este enlace es del calendario de ${name}${mine ? ` y este dispositivo usa el de ${mine}` : ', no del que usa este dispositivo'}. No se cambió nada.`;
+}
+
+// ¿El enlace (c) es del calendario de otra persona? (SPEC §11) Lo es si:
+//  - folder: este dispositivo ya funciona con otra carpeta (otro owner, repo o dir);
+//  - name: aquí hay turnos y un nombre, y el del calendario del enlace (meta.name de la copia o, sin
+//    ella, el del enlace) es otro.
+// Un dispositivo sin conectar y sin nombre (o con el mismo) no se bloquea (p. ej. Ana escanea antes de
+// tener su enlace). → null | { info: { reason, name, dir, current: { name, dir }, working }, detail }
+function otherPersonOf(state, c, res) {
+  const cur = state?.settings?.sync || {};
+  const working = Boolean(cur.enabled && (cur.lastPullAt || cur.lastPushAt));
+  const folder = sameFolder(cur, c);
+  if (working && folder) return null; // la misma carpeta (otra clave, otro token…)
+  const theirs = publicName(res?.remote?.name) || publicName(c.name);
+  const mine = publicName(state?.settings?.name);
+  let reason = null;
+  if (working) reason = 'folder';
+  else if (daysIn(state) > 0 && mine && theirs && firstNameKey(mine) !== firstNameKey(theirs)) reason = 'name';
+  if (!reason) return null;
+  const where = (s) => `${String(s.owner || '').trim()}/${String(s.repo || '').trim()}/${dirOf(s) || '(raíz)'}`;
+  return {
+    info: { reason, name: theirs || null, dir: dirOf(c), current: { name: mine || null, dir: dirOf(cur) }, working },
+    detail: `${reason === 'folder' ? 'Otra carpeta' : 'Otro nombre'}: este dispositivo ${where(cur)}${mine ? ` (${mine})` : ''}; enlace ${where(c)}${theirs ? ` (${theirs})` : ''}.`,
   };
 }
 
@@ -838,29 +976,134 @@ export function contentHash(state, now = new Date()) {
   return hashString(buildICS(state, { now, places: state?.settings?.sync?.publishPlaces === true }) + '\u0000' + dataFingerprint(state));
 }
 
+export const ICSX5_PACKAGE = 'at.bitfire.icsdroid';
+export const ICSX5_PLAY_URL = `https://play.google.com/store/apps/details?id=${ICSX5_PACKAGE}`;
+
 // URLs del calendario para suscribirse (el repositorio debe ser público). Rama '' → HEAD (la por defecto).
+// → { webcal (iPhone), https (copiar / Google Calendar «Desde URL»), webcals,
+//     android: intent:// que abre ICSx⁵ (o su página de Google Play si no está instalada) }
 export function calendarUrls(sync) {
   const branch = branchName(sync) || 'HEAD';
-  const path = ['raw.githubusercontent.com', ...[String(sync.owner).trim(), String(sync.repo).trim(), ...branch.split('/'), ICS_FILE].map(enc)].join('/');
-  return { webcal: `webcal://${path}`, https: `https://${path}` };
+  const dir = dirOf(sync);
+  const parts = [String(sync.owner).trim(), String(sync.repo).trim(), ...branch.split('/'), ...(dir ? [dir] : []), ICS_FILE];
+  const path = ['raw.githubusercontent.com', ...parts.map(enc)].join('/');
+  return {
+    webcal: `webcal://${path}`,
+    https: `https://${path}`,
+    webcals: `webcals://${path}`,
+    // Chrome en Android: abre ICSx⁵ en su pantalla de suscripción (webcals → https); sin la app, Google Play
+    android: `intent://${path}#Intent;scheme=webcals;package=${ICSX5_PACKAGE};S.browser_fallback_url=${enc(ICSX5_PLAY_URL)};end`,
+  };
 }
 
-// '#setup=…' (o una URL completa) → { enabled:true, owner, repo, branch, token, key, publishPlaces? } o null
+// '#setup=…' (o una URL completa) → { enabled:true, owner, repo, branch, dir, token, key, publishPlaces?, name? }
+// o null. Un enlace antiguo (sin dir) es la carpeta raíz.
 export function parseSetupLink(hash) {
   const m = /(?:^|[#&?])setup=([A-Za-z0-9_\-+/=%]+)/.exec(String(hash || ''));
   if (!m || m[1].length > 4000) return null;
   try {
     const cfg = normalizeSyncConfig(JSON.parse(base64UrlDecode(decodeURIComponent(m[1]))));
-    return cfg ? { enabled: true, ...cfg } : null;
+    return cfg ? { enabled: true, ...cfg, dir: cfg.dir ?? '' } : null;
   } catch {
     return null;
   }
 }
 
-// Enlace de configuración: base + '#setup=<base64url(JSON)>' (incluye la clave de cifrado)
+// Enlace de configuración: base + '#setup=<base64url(JSON)>' (incluye la clave de cifrado; dir y name
+// solo si los hay, así el enlace de la raíz es igual que antes)
 export function buildSetupLink(baseUrl, sync) {
   const base = String(baseUrl || '').split('#')[0];
   const payload = { v: 2, owner: sync.owner, repo: sync.repo, branch: branchName(sync), token: sync.token, key: sync.key || '' };
+  const dir = dirOf(sync);
+  if (dir) payload.dir = dir;
   if (sync.publishPlaces === true) payload.publishPlaces = true;
+  const name = cleanPersonName(sync.name);
+  if (name) payload.name = name;
   return `${base}#setup=${base64UrlEncode(JSON.stringify(payload))}`;
+}
+
+// «Crear enlace para otra persona» (SPEC §11): carpeta nueva (slug único del nombre entre
+// existingDirs, la raíz y la carpeta de este dispositivo) + clave NUEVA + mismo owner/repo/rama/token.
+// existingDirs: las carpetas que ya hay (listCalendars(sync).map((c) => c.dir)).
+// → { link, dir, key, name, urls }. Lanza Error (code 'NAME') sin nombre y SyncError CONFIG si la
+// conexión de este dispositivo no está completa.
+export function buildPersonLink(baseUrl, sync, { name, existingDirs = [], getRandomValues } = {}) {
+  const cfg = normalizeSyncConfig({ owner: sync?.owner, repo: sync?.repo, branch: sync?.branch ?? '', token: sync?.token, key: '', dir: '' });
+  if (!cfg) throw syncError('CONFIG', 'Para crear el enlace, primero conecta este dispositivo con GitHub.');
+  const clean = cleanPersonName(name);
+  if (!clean) {
+    const e = new Error('Escribe el nombre de la persona.');
+    e.code = 'NAME';
+    throw e;
+  }
+  const dir = uniqueDir(clean, ['', dirOf(sync), ...(Array.isArray(existingDirs) ? existingDirs : [])]);
+  const key = generateSyncKey(getRandomValues);
+  const target = { ...cfg, dir, key, name: clean };
+  return { link: buildSetupLink(baseUrl, target), dir, key, name: clean, urls: calendarUrls(target) };
+}
+
+const MAX_CALENDARS = 30;
+
+// Contenido de una carpeta del repo (API contents) → [{ type, name }] | null si no existe
+async function listDir(ctx, path) {
+  const r = await gh(ctx, 'GET', `${repoPath(ctx.sync)}/contents${path ? `/${filePath(path)}` : ''}${refQuery(ctx)}`, null, [404]);
+  if (r.status === 404 || !Array.isArray(r.data)) return null;
+  return r.data.filter((e) => isPlainObject(e) && typeof e.name === 'string').map((e) => ({ type: e.type, name: e.name }));
+}
+
+// Nombre desde X-WR-CALNAME («Turnos de Ana» → 'Ana'; «Mis turnos» → null)
+function nameFromIcs(text) {
+  const m = /^X-WR-CALNAME:(.*)$/m.exec(String(text || '').replace(/\r\n[ \t]/g, ''));
+  if (!m) return null;
+  const cal = m[1].replace(/\r$/, '').replace(/\\([\\;,])/g, '$1').replace(/\\n/gi, ' ');
+  const n = /^Turnos de (.+)$/.exec(cal.trim());
+  return n ? cleanPersonName(n[1]) || null : null;
+}
+
+// «Calendarios de la familia» (SPEC §11): carpetas del repo de datos con calendario (la raíz y las
+// carpetas de primer nivel con backup.json o turnos.ics), con el nombre de pila (meta.name de
+// backup.json en claro; si no, el de turnos.ics). Solo lee (necesita el token).
+// → [{ dir, name|null, urls (calendarUrls), updatedAt|null, mine (es la de este dispositivo),
+//      hasBackup, hasCalendar }] (la raíz primero). Repo vacío o rama inexistente → []. Lanza SyncError.
+export async function listCalendars(sync, fetchArg) {
+  const { fetchImpl } = opts(fetchArg);
+  checkConfig(sync);
+  const base = ctxOf({ ...sync, dir: '' }, fetchImpl);
+  const ctx = { ...base, ...(await branchInfo(base, false)) };
+  if (ctx.missing || ctx.empty) return [];
+  const root = await listDir(ctx, '');
+  if (!root) return [];
+  const files = (entries) => ({
+    hasBackup: entries.some((e) => e.type === 'file' && e.name === BACKUP_FILE),
+    hasCalendar: entries.some((e) => e.type === 'file' && e.name === ICS_FILE),
+  });
+  const found = [];
+  const r = files(root);
+  if (r.hasBackup || r.hasCalendar) found.push({ dir: '', ...r });
+  const dirs = root.filter((e) => e.type === 'dir' && DIR_RE.test(e.name)).map((e) => e.name).sort().slice(0, MAX_CALENDARS);
+  for (const d of dirs) {
+    const entries = await listDir(ctx, d);
+    if (!entries) continue;
+    const f = files(entries);
+    if (f.hasBackup || f.hasCalendar) found.push({ dir: d, ...f });
+  }
+  const mine = dirOf(sync);
+  const out = [];
+  for (const f of found) {
+    const c = { ...ctx, dir: f.dir };
+    let name = null, updatedAt = null;
+    if (f.hasBackup) {
+      const file = await getFile(c, BACKUP_FILE);
+      let doc = null;
+      try { doc = file ? JSON.parse(await fileText(c, file)) : null; } catch { doc = null; } // copia dañada: sin nombre
+      name = cleanPersonName(doc?.meta?.name) || null;
+      updatedAt = isoOr(doc?.meta?.savedAt, null);
+    }
+    if (!name && f.hasCalendar) {
+      const file = await getFile(c, ICS_FILE);
+      name = file ? nameFromIcs(await fileText(c, file)) : null;
+    }
+    out.push({ dir: f.dir, name, urls: calendarUrls({ ...sync, dir: f.dir }), updatedAt, mine: f.dir === mine, ...f });
+  }
+  return out;
 }

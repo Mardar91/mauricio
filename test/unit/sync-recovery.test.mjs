@@ -21,7 +21,8 @@ async function step(fn, s, gh, now, extra = {}) {
   return { res, state: applySyncResult(s, res, { now }) };
 }
 const doc = (gh, branch) => JSON.parse(gh.text('backup.json', branch));
-const events = (gh) => (gh.text('turnos.ics')?.match(/BEGIN:VEVENT/g) || []).length;
+// Turnos del calendario publicado (sin el aviso «Sube el plan»)
+const events = (gh) => (gh.text('turnos.ics')?.match(/^UID:(?!plan-)/gm) || []).length;
 const writesSince = (gh, n) => gh.fetch.calls.slice(n).filter((c) => c.method !== 'GET');
 const linkCfg = (sync) => parseSetupLink(buildSetupLink('https://x/', sync));
 

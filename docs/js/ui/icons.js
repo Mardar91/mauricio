@@ -42,6 +42,10 @@ const P = {
   more: S('<circle cx="12" cy="12" r="9"/><circle cx="7.8" cy="12" r="0.6" fill="currentColor"/><circle cx="12" cy="12" r="0.6" fill="currentColor"/><circle cx="16.2" cy="12" r="0.6" fill="currentColor"/>', 'stroke-width="1.9"'),
   toggle: S('<rect x="2.5" y="6.5" width="19" height="11" rx="5.5" fill="#34C759" stroke="#34C759"/><circle cx="16" cy="12" r="4" fill="#fff" stroke="none"/>'),
   special: S('<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/><path d="M19 3.5l.6 1.5 1.5.6-1.5.6-.6 1.5-.6-1.5-1.5-.6 1.5-.6z" fill="currentColor" stroke="none"/>'),
+  navigate: S('<path d="M12 3.5l7 16.5-7-3.6L5 20z"/>'),
+  map: S('<path d="M9 4.5L3.5 6.5v13L9 17.5l6 2 5.5-2v-13L15 6.5z"/><path d="M9 4.5v13M15 6.5v13"/>'),
+  wallet: S('<rect x="3.5" y="6" width="17" height="13" rx="3"/><path d="M3.5 10h17M16 14.5h1.5"/><path d="M6 6l9-2.5 1.2 2.5"/>'),
+  beach: S('<path d="M4 20h16"/><path d="M12 20l-2.2-9"/><path d="M4.5 10.5a8 8 0 0 1 14.6-3.2z"/>'),
   help: S('<circle cx="12" cy="12" r="8.5"/><path d="M9.6 9.6a2.5 2.5 0 1 1 3.6 2.2c-.8.4-1.2 1-1.2 1.8v.4M12 16.8v.2"/>'),
 };
 

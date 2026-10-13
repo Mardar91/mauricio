@@ -2,8 +2,8 @@
 // paleta de códigos, nota e historial.
 import * as core from '../core/index.js';
 import {
-  clearDay, dayMinutes, formatHours, formatLong, formatShort, getCode, holidayName, isReadOnlyDevice, isoWeek,
-  normalizeDayCodes, parseHHMM, setDay,
+  clearDay, dayMinutes, dayTimedItems, formatHours, formatLong, formatShort, getCode, holidayName, isReadOnlyDevice, isoWeek,
+  mapsUrl, normalizeDayCodes, parseHHMM, setDay, travelText,
 } from '../core/index.js';
 import { badge, badgeFromDef, displayName, groupCodes, timeRange } from './badge.js';
 import { append, cap, dateTime, h, nextId, setChildren } from './dom.js';
@@ -13,11 +13,12 @@ import { saveFailedToast, savedToast } from './banners.js';
 import {
   BREAK_OPTIONS, dayTimes, dayTimesSupported, nominalOf, normalTimes, overnight, rangeText, sameTimes, workTextOf,
 } from './times.js';
+import { calendarPhrase } from './platform.js';
 
 const FREE = ['off', 'wish', 'vacation', 'sick'];
 const TIMELESS = ['place', 'off', 'wish', 'vacation', 'sick'];
 // Siempre a mano en la paleta (el resto, si no se usa, en «Más códigos»)
-const CORE = ['F1', 'S1', 'N1', 'Z1', '-', 'W-', 'U', 'TS'];
+const CORE = ['F1', 'S1', 'N1', 'Z1', '-', 'W-', 'U', 'K', 'TS'];
 
 // Aplica la selección de un código con reglas sencillas (un turno y un lugar por día)
 export function toggleCode(state, codes, code) {
@@ -152,7 +153,8 @@ export function openDayEditor(ctx, key, opts = {}) {
   function updateSummary(cards) {
     const m = codes.length ? dayMinutes(tempState(), key) : null;
     const n = cards ?? selected.querySelectorAll('.de-time').length;
-    const show = codes.length && (n !== 1 || (m && m.credited));
+    // Con una sola tarjeta ya se ve su «X h de trabajo»; un día libre o solo un lugar no dice «0 h»
+    const show = codes.length && (n > 1 || Boolean(m && m.credited));
     summaryEl.hidden = !show;
     if (show) {
       setChildren(summaryEl, n > 1 ? 'Total del día: ' : '', h('b', {}, m && m.total ? formatHours(m.total) : '0 h'),
@@ -172,6 +174,8 @@ export function openDayEditor(ctx, key, opts = {}) {
     const timeEl = h('span', { class: 'de-time-range' });
     const pill = h('span', { class: 'pill pill-special', hidden: true }, 'horario especial');
     const workEl = h('span', { class: 'de-time-work' });
+    // «Sal a las 13:05 hacia S51 (25 min de viaje)»: solo en el primer turno del día (viaje de ida)
+    const travelEl = h('span', { class: 'de-time-travel', 'data-testid': 'day-travel', hidden: true });
     const nightEl = h('p', { class: 'hint de-time-night', hidden: true }, '🌙 Termina al día siguiente.');
     const card = h('div', { class: 'de-time', dataset: { code: c }, 'data-testid': 'day-time' });
 
@@ -183,6 +187,10 @@ export function openDayEditor(ctx, key, opts = {}) {
       const work = countsWork(def) ? workTextOf(t) : '';
       workEl.textContent = work;
       workEl.hidden = !work;
+      const trip = draftMode ? null : dayTimedItems(tempState(), key).find((x) => x.code === c && x.travelMin > 0);
+      const tt = trip ? travelText(trip) : '';
+      travelEl.textContent = tt;
+      travelEl.hidden = !tt;
       nightEl.hidden = !(open && overnight(t));
       updateSummary();
     };
@@ -191,7 +199,7 @@ export function openDayEditor(ctx, key, opts = {}) {
       badge(state, c, { size: 'sm', title: false }),
       h('span', { class: 'de-time-main' },
         h('span', { class: 'de-time-line' }, timeEl, pill),
-        workEl));
+        workEl, travelEl));
 
     let panel = null;
     if (open) {
@@ -230,6 +238,9 @@ export function openDayEditor(ctx, key, opts = {}) {
     }
 
     const actions = [];
+    // «Abrir en Mapas» en el primer turno del día, si el lugar tiene dirección
+    const maps = draftMode ? null : mapsLinkFor(c);
+    if (maps) actions.push(maps);
     if (canEdit && !open) {
       actions.push(h('button', {
         class: 'btn btn-tinted btn-sm de-time-edit', type: 'button', 'data-testid': 'day-time-edit',
@@ -250,6 +261,22 @@ export function openDayEditor(ctx, key, opts = {}) {
     append(card, [head, panel, actions.length ? h('div', { class: 'de-time-actions' }, actions) : null]);
     update();
     return card;
+  }
+
+  // Enlace al lugar del día (el destino del viaje, o el primer lugar con dirección), en la tarjeta
+  // del primer turno con hora
+  function mapsLinkFor(c) {
+    const items = dayTimedItems(tempState(), key);
+    if (!items.length) return null;
+    const first = items.reduce((a, b) => (b.start < a.start ? b : a));
+    if (first.code !== c) return null;
+    const dest = (first.travelTo && first.places.find((p) => p.code === first.travelTo && p.place)) || first.places.find((p) => p.place);
+    const url = dest ? mapsUrl(dest, ctx.platform) : null;
+    if (!url) return null;
+    return h('a', {
+      class: 'link-btn de-maps', href: url, target: '_blank', rel: 'noopener', 'data-testid': 'day-maps',
+      'aria-label': `Abrir ${dest.place} en Mapas`,
+    }, icon('map'), `Abrir en Mapas (${dest.code})`);
   }
 
   function renderSelected() {
@@ -341,13 +368,13 @@ export function openDayEditor(ctx, key, opts = {}) {
   const readOnly = !draftMode && isReadOnlyDevice(store.get().settings.sync);
   const body = h('div', { class: 'day-editor' },
     readOnly ? h('div', { class: 'notice notice-info small' }, icon('info'), h('p', {},
-      'Este dispositivo solo lee: este cambio se queda aquí y no llegará al Calendario del iPhone.')) : null,
+      `Este dispositivo solo lee: este cambio se queda aquí y no llegará al ${calendarPhrase()}.`)) : null,
     opts.onPhoto ? h('button', { class: 'btn btn-tinted btn-sm de-photo-btn', type: 'button', on: { click: () => opts.onPhoto() } }, icon('photos'), 'Ver la foto') : null,
     holiday ? h('p', { class: 'holiday-banner' }, `🎉 Festivo en Berlín: ${holiday}`) : null,
     selected,
     palette,
     draftMode ? null : h('label', { class: 'field' }, h('span', { class: 'label' }, 'Nota'), noteInput,
-      h('span', { class: 'hint' }, 'La nota no sale en el Calendario del iPhone. Aun así, no escribas nombres de pacientes ni de compañeros.')),
+      h('span', { class: 'hint' }, `La nota no sale en el ${calendarPhrase()}. Aun así, no escribas nombres de pacientes ni de compañeros.`)),
     draftMode ? null : history());
 
   async function save() {

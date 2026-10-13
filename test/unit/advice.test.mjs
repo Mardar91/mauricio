@@ -126,9 +126,9 @@ test('regla 7: horario sin confirmar (F6)', () => {
   const confirmed = upsertCode(s, { code: 'F6', confirmed: true });
   assert.equal(find(getAdvice(confirmed, NOW), 'unconfirmed-'), undefined);
   // Código nuevo: turno por analogía y código desconocido
-  const fresh = getAdvice(stateWith({ '2026-10-13': ['F4'], '2026-10-14': ['K'] }), NOW);
+  const fresh = getAdvice(stateWith({ '2026-10-13': ['F4'], '2026-10-14': ['X'] }), NOW);
   assert.match(find(fresh, 'unconfirmed-F4').title, /Confirma el horario de F4/);
-  assert.match(find(fresh, 'unconfirmed-K').title, /Código nuevo: K/);
+  assert.match(find(fresh, 'unconfirmed-X').title, /Código nuevo: X/);
 });
 
 test('regla 8: faltan datos', () => {
@@ -233,6 +233,20 @@ test('U4: si el calendario no se actualiza, aviso en Hoy (pasajeros solo si dura
   const old = updateSettings(recent, { sync: { lastPushAt: new Date(NOW.getTime() - 3 * 24 * 3600e3).toISOString() } });
   assert.equal(find(getAdvice(old, NOW), 'sync-error').level, 'warn');
   assert.equal(find(getAdvice(updateSettings(auth, { sync: { enabled: false } }), NOW), 'sync-error'), undefined);
+});
+
+test('consejos: «Calendario del iPhone» solo en iOS; fuera, «calendario del teléfono» (SPEC §12)', () => {
+  const s = stateWith(REAL_WEEK);
+  assert.match(find(getAdvice(s, NOW, { platform: 'ios' }), 'reminders-off').text, /el iPhone te avise/);
+  assert.match(find(getAdvice(s, NOW, { platform: 'android' }), 'reminders-off').text, /el teléfono te avise/);
+  assert.doesNotMatch(find(getAdvice(s, NOW), 'reminders-off').text, /iPhone/); // sin platform: neutro
+  const auth = updateSettings(s, { sync: { enabled: true, lastError: 'x', lastErrorCode: 'AUTH', lastPushAt: NOW.toISOString() } });
+  assert.match(find(getAdvice(auth, NOW, { platform: 'ios' }), 'sync-error').text, /Calendario del iPhone/);
+  assert.match(find(getAdvice(auth, NOW, { platform: 'android' }), 'sync-error').text, /calendario del teléfono/);
+  const ro = updateSettings(s, { sync: { enabled: true, deviceId: 'a', publisher: 'b', unpublished: 2 } });
+  assert.match(find(getAdvice(ro, NOW, { platform: 'desktop' }), 'read-only').text, /calendario del teléfono lo actualiza otro dispositivo/);
+  // Ningún consejo usa «bienvenido» ni «¿Seguro?» (lo usa también su hermana)
+  for (const a of getAdvice(auth, NOW)) assert.doesNotMatch(`${a.title} ${a.text}`, /bienvenid|seguro\?/i);
 });
 
 test('datos de una versión más nueva → "Actualiza la app"', () => {

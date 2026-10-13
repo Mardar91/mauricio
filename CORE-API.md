@@ -1,38 +1,58 @@
 # API de `docs/js/core` para la UI
 
-API final de la lógica (SPEC §9, §9.1 y §10). Todo se importa desde `docs/js/core/index.js`, que también reexporta `cipher.js`. Este archivo está en la raíz del repo y no dentro de `docs/`, porque `docs/` se publica en GitHub Pages.
+API final de la lógica (SPEC §9–§13). Todo se importa desde `docs/js/core/index.js`, que también reexporta `cipher.js`. Este archivo está en la raíz del repo y no dentro de `docs/`, porque `docs/` se publica en GitHub Pages.
 
-> **`docs/sw.js`:** esta ronda no añade módulos, pero cambió el código de `js/core/*`. Al publicar hay que **subir `VERSION`** en `sw.js` y `APP_VERSION` en `js/app.js`.
+## Lo nuevo de esta ronda (SPEC §11 y §13)
 
-## Lo nuevo de esta ronda
+> **`docs/sw.js`:** no hay módulos nuevos (suplementos y saldos están en `hours.js`), pero cambió el código de `js/core/*`: al publicar hay que **subir `VERSION`** en `sw.js` y `APP_VERSION` en `js/app.js`.
 
-1. **Horario especial de un día** (decisión del propietario). Un día puede tener otro horario para uno de sus códigos sin cambiar el código en los demás días: `DayEntry.times = { S1: { start: '15:00', end: '20:00', breakMin?: 0 } }`. Se guarda con `setDay(state, key, codes, { times })` y se lee con `effectiveTimes(state, key, code)` (§6.1). Todo lo que calcula horarios lo usa: intervalos, horas del día/semana/mes, noches, descanso entre turnos, recordatorios, ntfy y `.ics`.
-2. **Si `backup.json` desaparece, solo el dispositivo que escribió el `turnos.ics` publicado vuelve a crear `backup.json` sin preguntar.** Cualquier otro (quien publicó antes y no vio la toma de control, un teléfono nuevo, una copia vieja de Safari) queda en **solo lectura** con `publisher: '?'` (`UNKNOWN_PUBLISHER`) hasta «Usar este dispositivo». `trySetupConfig` y `pullOnly` también devuelven `readOnly: true`, así que la UI pregunta antes (§3.1).
-   - Cambio visible: `syncNow` en un dispositivo vacío que nunca publicó devuelve ahora `ok` + `readOnly` (sin escribir) en vez de `EMPTY_LOCAL`. `becomePublisher` sigue dando `EMPTY_LOCAL`.
-   - `syncConfigPatch` ya no olvida `lastIcsHash` con el mismo repositorio y rama: quien publica vuelve a crear `backup.json` también tras aplicar un enlace con la clave nueva (§4.2).
-3. **Borrar a propósito los últimos días** en el dispositivo que publica ya no da `EMPTY_LOCAL`: si cada día de la copia tiene aquí un borrado más nuevo, se publica (y el calendario se vacía).
-4. **Identidad sin guardar** (almacenamiento lleno): si el `deviceId` o la clave recién creados no se pudieron guardar, la cola **no escribe en GitHub** (ni al reintentar) y devuelve `RETRY` sin conectarse, hasta que se puedan guardar. Leer (`q.pull`) sí se puede.
-5. **Los lugares que sugiere un enlace** ya no cambian `calendarUpdatedAt` (no hay salto de `SEQUENCE`/`DTSTAMP` al pasar a publicar). `updateSettings` respeta un `calendarUpdatedAt` explícito en el parche.
-6. **«Usar este dispositivo» con la respuesta perdida** (el PUT llegó, pero hubo error de red): el resultado no trae `publisher` en el parche; la siguiente lectura dice quién publica.
-7. **Resultados que empezaron antes pero publicaron:** `applySyncResult` no descarta un resultado con `pushed`/`tookOver` y una `rev` mayor que la `baseRev` guardada, y `lastSyncStartedAt` nunca va hacia atrás (§3.3).
-8. **Textos:** `SYNC_MESSAGES` y los consejos, en español neutro y sin jerga («ya no funciona», «No se envió nada», «toma una foto», «no manejes»…). El balance del mes ya no dice «(0 h)» (§7).
+1. **Varias personas (§11).** Cada persona tiene su **carpeta** en el mismo repo de datos: `settings.sync.dir` (`''` = raíz = Mauricio, sin cambios; si no, slug `[a-z0-9-]{1,32}`, p. ej. `ana`). Archivos: `<dir>/backup.json` y `<dir>/turnos.ics`. Cada carpeta tiene **su clave** y **su dispositivo que publica**. El enlace `#setup=` lleva `dir` (y `name`). Funciones nuevas: `listCalendars`, `buildPersonLink`, `slugify`, `uniqueDir`, `isValidDir`, `publicName`, `cleanPersonName`, `icsEventCount` (§3.6).
+   - **Otra carpeta nunca hereda la clave guardada** (antes, un formulario sin clave reutilizaba la del dispositivo aunque fuera para otro repo): sin clave en el enlace o formulario se crea una nueva (o `NO_KEY` si allí ya hay copia), y la anterior no queda en `prevKey`.
+   - Un formulario **sin** `dir` conserva la carpeta del dispositivo; un enlace sin `dir` (antiguo) es la raíz.
+2. **Nombre (§11).** `settings.name` es `''` en instalaciones nuevas (las guardadas conservan el suyo, p. ej. `'Mauricio'`). `settings.planName` = nombre tal como sale en el Dienstplan («Ducuara Ana»); `suggestPlanName(state)` sugiere «Ducuara <nombre>». El calendario se llama «Turnos de <nombre de pila>» o «Mis turnos» (`calendarName`); `PRODID:-//Turnos//ES`. ntfy: título «Turnos», sin «iPhone».
+3. **«📷 Sube el plan de <mes>» (§13.1)** en el `.ics` si el mes siguiente está vacío: `planUploadReminder(state, now)`, `settings.reminders.planUpload` (por defecto `true`) (§6.3).
+4. **Tiempo de viaje (§13.2):** `CodeDef.travelMin` (0–180). El aviso «antes» se adelanta el viaje con «Sal a las 13:05 hacia F51 (25 min de viaje)» en recordatorios, `.ics` y ntfy. `dayTravel`, `travelText`, `mapsUrl` (§6.2).
+5. **Suplementos (§13.3):** `settings.supplements`, `monthSummary(...).supplements`, `daySupplements`, `monthSupplements` (§6.4, en `hours.js`).
+6. **Saldos (§13.4):** `settings.balances`, `overtimeBalance`, `vacationSummary` (§6.5, en `hours.js`).
+7. **Enfermedad (§13.5):** código de fábrica `K` (`kind: 'sick'`, «Enfermedad», texto rojo, forma `'text'`): se acredita como las vacaciones (§6).
+8. **Android (§12):** `calendarUrls(sync)` trae también `webcals` y `android` (enlace `intent://` que abre ICSx⁵ o su página de Google Play). `getAdvice(state, now, { platform })` dice «Calendario del iPhone» solo en iOS (sin `platform`: «calendario del teléfono»).
+
+### Correcciones tras la revisión (esta ronda)
+
+- **Enlace de otra persona (§3.2):** `trySetupConfig` (y `q.setup`) devuelve `{ ok:false, error.code: 'OTHER_PERSON', otherPerson }` si el enlace es del calendario de otra persona: el dispositivo ya funciona con otra carpeta (otro owner, repo o `dir`), o aún no está conectado pero tiene turnos y un nombre distinto del calendario del enlace (`meta.name` de la copia o, sin ella, el `name` del enlace). No cambia nada. Tras confirmarlo, `q.setup(cfg, { switchPerson: true })` pasa el dispositivo a ese calendario **desde un estado limpio** (`personSwitchState`): nada de la persona anterior se fusiona ni se publica allí.
+- **Dispositivo vacío al fusionar:** solo adopta del remoto lo que aquí está **vacío o de fábrica**, y nunca un texto vacío. El nombre escrito en el primer uso se queda (antes lo pisaba el de quien ayuda, o `''`). `planName` solo si el nombre de pila coincide (o aquí no hay).
+- **«Sube el plan» (§6.3):** pasado el 20, el aviso es **hoy** a las 19:00 si aún no ha llegado; si no, mañana. Antes siempre iba a mañana y, como se republica cada mañana, nunca sonaba.
+- **Números como texto:** `updateSettings` e `importBackup` aceptan «18,75», «1,5» o «30» también cuando ya había un número guardado (antes solo la primera vez).
+- **UID de una carpeta:** `turnos-dir-<dir>` (antes `turnos-<dir>`, que en una carpeta `mauricio` coincidía con la raíz). Aún no se había publicado ningún calendario de carpeta.
+- **Importar:** «Este archivo no es una copia de Turnos.» (sin «de Mauricio»).
+- **Tabla del PC (reconocedor, `recognize/pc/`):** con una sola fila (la impresión filtrada de euregon), si se lee el apellido pero falta el nombre de pila del plan («Ducuara Ana» en la hoja de Mauricio), los días se devuelven con `confidence` ≤ 0,4 (la revisión no los marca) y el aviso «Esta hoja parece de otra persona: no veo «Ana» en el nombre. Revisa antes de guardar.» (empieza por `OTHER_SHEET_WARNING`, exportado en `recognize/pc/calendar.js`). Con varias filas y solo el apellido (`employeeName` de una palabra, p. ej. `FAMILY_NAME`) no se elige ninguna fila: «… Pon tu nombre como sale en el plan (Ajustes → Tu nombre).». Los nombres de ≤ 4 letras («Ana») tienen que leerse tal cual: «Juana», «Diana» o restos de OCR («A» + «na») ya no valen.
 
 ### Pendiente en la UI
 
-- **Horario especial (§6.1):** mostrar las horas de cada día con `effectiveTimes`/`getDayCode` (no con `def.start`/`def.end`): Hoy (tarjeta «Próximo turno», «hasta las…», `aria-label`), Calendario (fila del día), editor del día y `shifts.js`. `dayTimedItems` ya trae el horario del día (`item.start`, `item.end`, `item.special`).
-- **Deshacer en el editor del día:** pasar también los horarios: `setDay(s, key, before.codes, { note: before.note, source: before.source, times: before.times ?? null })`. Sin `times`, `setDay` conserva los que haya.
-- **Opciones avanzadas → «Publica»:** con `publisher === UNKNOWN_PUBLISHER` mostrar «otro dispositivo (desconocido)» en vez de `otro (?)`.
-- **Cambiar la clave (§4.2):** el formulario avanzado no tiene campo de clave. Hace falta una acción «Cambiar la clave» en el dispositivo que publica (o reescribir el paso en la guía).
+- **Enlace de otra persona** (`setup.js`, `runSetup`): si `t.error.code === 'OTHER_PERSON'`, en vez de «No se pudo conectar», preguntar con `t.error.message` (ya dice de quién es cada calendario si se sabe; `t.otherPerson = { reason: 'folder'|'name', name, dir, current: { name, dir }, working }`), p. ej. «¿Pasar este dispositivo al calendario de Ana? Sus turnos se verán aquí; los que hay ahora en este dispositivo no se pasan a su calendario.» → antes `saveBeforeImport(store.get(), localStorage)` (para poder deshacer) → `syncQueue.setup(cfg, { switchPerson: true })` (`t.switched === true`) y seguir el flujo de §4.2 (paso 5). En el dispositivo de quien ayuda, lo normal es «Cancelar».
+- **«Crear enlace para <nombre>»** (`settings.js`): poner el nombre también en el enlace de la raíz, para que el diálogo diga «para Mauricio» y el guardián tenga el nombre: `buildSetupLink(location.href, { ...sync, name: publicName(settings.name) })` (ya lo admite).
+- **Primer uso en el ordenador** (`onboarding.js`): no preguntar «¿Cómo te llamas?» si `platform() === 'desktop'` (lo usa quien ayuda; su nombre acabaría en el calendario publicado), o preguntar «¿De quién son estos turnos?».
+- **Escanear** (`scan.js`): un aviso que empieza por `OTHER_SHEET_WARNING` («Esta hoja parece de otra persona») va como `notice-warn`, no `notice-info`.
+- **`sw.js` / `app.js`:** subir `VERSION` y `APP_VERSION` (no hay archivos nuevos que precachear).
+- **Primer uso / Ajustes:** pedir `name` (nombre de pila) y `planName` (como en el Dienstplan), saltables. Si `planName` está vacío, proponer `suggestPlanName(state)` (instalación antigua de Mauricio → «Ducuara Mauricio»). Saludo: `name` vacío → «Hola 👋» (ya no caer en `'Mauricio'`, p. ej. `onboarding.js`).
+- **Escanear:** `employeeName: state.settings.planName || suggestPlanName(state) || 'Ducuara'` (hoy es una constante). Con solo el apellido, una hoja de varias filas no da ninguna (avisa «Pon tu nombre como sale en el plan»).
+- **Calendario en Android:** botón «Ver mis turnos en el calendario» → `calendarUrls(sync).android`; siempre también «Copiar enlace» con `calendarUrls(sync).https` (Google Calendar «Desde URL» se configura desde un ordenador). En iOS sigue `webcal`.
+- **Editor de códigos:** campo «Tiempo de viaje (min)» (`travelMin`, 0–180), sobre todo en lugares. En Hoy/editor del día: «Sal a las …» con `travelText(item)` y «Abrir en Mapas» con `mapsUrl(def, platform)` si el lugar tiene dirección.
+- **Paleta:** `K` (Enfermedad) en «Otros».
+- **Recordatorios:** interruptor «Recordarme subir el plan del mes siguiente» (`reminders.planUpload`).
+- **Horas:** suplementos del mes (`monthSummary(...).supplements`, con `SUPPLEMENT_NOTE` «comprueba tu contrato»), saldo de horas (`overtimeBalance`) y vacaciones del año (`vacationSummary`); en Ajustes, sus valores (`supplements`, `balances`).
+- **Ajustes → «Calendarios de la familia»:** `listCalendars(sync)`; cada uno con «Ver sus turnos en mi calendario» (`c.urls`). **Opciones avanzadas → «Crear enlace para otra persona»:** pedir el nombre → `buildPersonLink(location.href, sync, { name, existingDirs })` (§3.6).
+- **Consejos:** pasar `{ platform }` a `getAdvice` (Hoy y Horas).
 
 ### Rondas anteriores (resumen)
 
+- **Horario especial de un día:** `DayEntry.times` (§6.1), con `setDay(..., { times })`, `effectiveTimes` y `getDayCode`; todo lo que calcula horarios lo usa.
+- **Sin `backup.json`:** solo el dispositivo que escribió el `turnos.ics` publicado lo vuelve a crear; los demás quedan en solo lectura con `publisher: '?'` (`UNKNOWN_PUBLISHER`) hasta «Usar este dispositivo» (§3.1). `syncNow` en un dispositivo vacío que nunca publicó da `ok` + `readOnly`.
+- Borrar a propósito los últimos días sí se publica; con la identidad sin guardar la cola no escribe (`RETRY`); los lugares de un enlace no cambian `calendarUpdatedAt`; un resultado que publicó una `rev` más nueva no se descarta.
 - La identidad (`deviceId` y clave) se crea **antes** de la primera petición de red (`ensureSyncIdentity`); si `syncNow` tiene que crearla, devuelve `RETRY` sin escribir y la cola repite sola.
 - Los enlaces se comprueban antes de guardarlos (`trySetupConfig`); una clave buena sustituida queda en `sync.prevKey`.
-- Los lugares de un enlace solo se aplican en un dispositivo que nunca eligió, con el sello mínimo `LINK_PLACES_AT`.
 - Quien dejó de publicar no pisa el calendario: antes de escribir `turnos.ics` se comprueba que `backup.json` sigue igual (si no, `CONFLICT`).
-- `mergeStates`, `upsertCode` y `deleteCode` dejan el orden canónico de los códigos de cada día.
-- Cada resultado lleva `startedAt`; **todas** las llamadas de sincronización pasan por **una sola cola** (`createSyncQueue`).
-- `pushData` está obsoleto (exige clave y `deviceId`).
+- Cada resultado lleva `startedAt`; **todas** las llamadas de sincronización pasan por **una sola cola** (`createSyncQueue`). `pushData` está obsoleto.
 
 ---
 
@@ -47,19 +67,28 @@ API final de la lógica (SPEC §9, §9.1 y §10). Todo se importa desde `docs/js
 | `DayEntry.times` | Opcional: horario especial de ese día, `{ CODE: { start: 'HH:MM', end: 'HH:MM', breakMin?: 0..240 } }`, solo de códigos de ese día (§6.1). Si no hay, el campo no existe. Viaja con el día (copia, importación, fusión). |
 | `settings.calendarUpdatedAt` | Cambia cuando cambian `reminders` o `sync.publishPlaces`. Hace que el sello y la `SEQUENCE` del `.ics` nunca retrocedan. |
 | `settings.remindersUpdatedAt` / `settings.placesUpdatedAt` | Cuándo se cambiaron los avisos o `publishPlaces`. Al fusionar dispositivos gana el cambio más reciente. `LINK_PLACES_AT` (`1970-01-01T00:00:00.001Z`) es una sugerencia de un enlace: pierde ante cualquier decisión real. |
+| `settings.name` | Nombre de pila (saludo). `''` en instalaciones nuevas; se recorta (máx. 60). Públicamente (calendario y `meta.name`) solo va la **primera palabra**. |
+| `settings.planName` | Nombre como en el Dienstplan («Ducuara Ana»), para `employeeName` del reconocedor. `''` por defecto; `suggestPlanName(state)` propone uno. |
+| `settings.reminders` | `{ eveningBefore, eveningTime, beforeStart, minutesBefore, planUpload }`. `planUpload` (nuevo, `true`): evento «Sube el plan» (§6.3). |
+| `settings.supplements` | `{ night: { from, to, pct }, saturday: { from, to, pct }, sunday: { pct }, holiday: { pct }, hourlyWage }` (§6.4). Se sanea siempre (`sanitizeSupplements`). |
+| `settings.balances` | `{ overtimeStartMin, overtimeStartMonth, vacationDaysPerYear, vacationCarryOver }` (§6.5). Se sanea siempre (`sanitizeBalances`). |
+| `CodeDef.travelMin` | Minutos de viaje (entero 0–180, por defecto 0), sobre todo en lugares (§6.2). Viaja con el código (copia, fusión, importación). |
+
+`name`, `planName`, `supplements` y `balances` son **ajustes del usuario**: viajan en la copia de seguridad y en `backup.json` (`USER_SETTINGS`). Un dispositivo vacío (sin días) los adopta al fusionar **solo si aquí están vacíos o de fábrica** (nunca un texto vacío; `planName` solo si el nombre de pila coincide o aquí no hay); si no, cada dispositivo conserva los suyos (como `weeklyHours`).
 
 Estos sellos los pone `updateSettings`. Si el parche trae `remindersUpdatedAt` o `placesUpdatedAt` explícitos, se respetan. La UI no tiene que tocarlos.
 
 ### `settings.sync`
 
 ```js
-{ enabled:false, owner:'Mardar91', repo:'mauricio-datos', branch:'', token:'', key:'', deviceId:'',
+{ enabled:false, owner:'Mardar91', repo:'mauricio-datos', branch:'', dir:'', token:'', key:'', deviceId:'',
   baseRev:0, lastPushAt:null, lastPushHash:null, lastIcsHash:null, lastPullAt:null,
   lastError:null, lastErrorCode:null, lastErrorDetail:null, lastErrorSince:null, publishPlaces:false,
   publisher:null, publisherSince:null, unpublished:0, prevKey:'', lastSyncStartedAt:null }
 ```
 
 - `branch: ''` es la rama por defecto del repo. `repo` es un repo **solo de datos**, nunca el de la app.
+- `dir`: carpeta de esta persona en el repo de datos (`''` = raíz). Se guarda en minúsculas; una carpeta no válida **no** se cambia por `''` (sería la de otra persona): la sincronización da `CONFIG` sin conectarse.
 - `key`: clave AES-GCM en base64url (43 caracteres). `deviceId`: identificador de este dispositivo. Se crean con `ensureSyncIdentity` al configurar (§4.2).
 - `lastError` es el mensaje para Mauricio y `lastErrorCode` su código (§3.4). `lastErrorDetail` es técnico (solo en «Opciones avanzadas»). `lastErrorSince` dice desde cuándo falla.
 - `publishPlaces`: interruptor «Publicar lugares en el calendario». Se comparte entre dispositivos (gana el cambio más reciente).
@@ -111,7 +140,7 @@ ensureSyncIdentity(state, { deviceId?, key?, getRandomValues? })  // → state (
 applySyncConfig(state, cfg, { now?, deviceId?, key? })              // → state: configuración + lugares del enlace + identidad
 syncConfigPatch(cfg, state?)                                       // → parche de settings.sync (bajo nivel; sin publishPlaces)
 // Comprobar un enlace o formulario antes de guardarlo (lee; no escribe)
-await trySetupConfig(state, cfg, { fetchImpl?, now? })   // → { ok:true, res, readOnly, publisher, error, apply(state) } | { ok:false, error, res }
+await trySetupConfig(state, cfg, { fetchImpl?, now?, switchPerson? })   // → { ok:true, res, readOnly, publisher, error, switched, apply(state) } | { ok:false, error, res, otherPerson? }
 // Sincronizar (nunca lanzan; devuelven el resultado de §3.3)
 await syncNow(state, { fetchImpl?, now?, force?, allowEmpty? })  // lee + fusiona; publica SOLO si es el que publica
 await pullOnly(state, opts)                                      // lee + fusiona; NUNCA escribe (alias: restoreFromRemote)
@@ -119,20 +148,29 @@ await becomePublisher(state, opts)                               // «Usar este 
 applySyncResult(current, res, { now })                           // → state: SIEMPRE con store.set, también si res.ok es false
 // La cola única que usa la UI (§4.0): hace las llamadas de arriba y aplica cada resultado
 const q = createSyncQueue(store, { fetchImpl?, clock? });
-q.sync(opts?)  q.pull(opts?)  q.becomePublisher(opts?)  q.setup(cfg)  q.idle()
+q.sync(opts?)  q.pull(opts?)  q.becomePublisher(opts?)  q.setup(cfg, { switchPerson? }?)  q.idle()
+personSwitchState(state)                                         // (store.js) estado limpio para otra persona: solo deviceId, ntfy y onboardingDone
 isReadOnlyDevice(sync)                                           // true → otro dispositivo publica
 ```
 
-- `cfg` es lo que devuelve `parseSetupLink(hash)`, o `normalizeSyncConfig(form)` en el formulario avanzado.
+- `cfg` es lo que devuelve `parseSetupLink(hash)`, o `normalizeSyncConfig(form)` en el formulario avanzado. Con `dir` va a esa carpeta; **sin** `dir` (formulario que no lo tiene) se queda en la del dispositivo.
+- **Otra carpeta** (otro owner, repo o `dir`) = otra persona: la clave guardada **no** se reutiliza. Sin clave en `cfg`, `trySetupConfig` prueba sin clave (`NO_KEY` si allí hay copia cifrada; si no, `apply` crea una nueva) y la anterior no queda en `prevKey`. En la misma carpeta, sin clave en el formulario se sigue usando la del dispositivo (como antes).
+- Un `cfg.name` (enlace de «Crear enlace para otra persona») se guarda en `settings.name` **solo** si el dispositivo no tiene nombre.
 - **`trySetupConfig`** prueba la configuración nueva con una **copia** del estado:
   - Responde `{ ok:false, error }` (y no se guarda nada) si:
     - la clave no descifra la copia (`DECRYPT`);
     - hay copia y no hay clave (`NO_KEY`);
     - el token o el repo fallan (`AUTH`, `FORBIDDEN`, `NOT_FOUND`…);
-    - no hay red (`NETWORK`…) y el dispositivo ya tenía una configuración que funcionaba.
+    - no hay red (`NETWORK`…) y el dispositivo ya tenía una configuración que funcionaba;
+    - el enlace es del calendario de **otra persona** (`OTHER_PERSON`, ver abajo). Un error al leer va antes.
   - Sin red en un dispositivo **sin configurar**, responde `ok:true` con `error` pasajero: se guarda y se reintentará solo.
   - `apply(state)` guarda la configuración, la identidad probada (o una clave nueva si no había copia remota) y lo leído (`applySyncResult`).
   - Con el mismo repo y rama, recuerda quién publicaba. Con otro repo, empieza de cero.
+- **Otra persona (`OTHER_PERSON`, SPEC §11):**
+  - **`folder`**: el dispositivo ya funciona (`enabled` y ya leyó o publicó) con otra carpeta (otro owner, repo o `dir`; owner y repo sin distinguir mayúsculas). Volver a aplicar un enlace de la **misma** carpeta (otra clave, otro token) nunca se bloquea.
+  - **`name`**: aún no funciona, tiene turnos y un nombre, y el calendario del enlace es de otro nombre (`res.remote.name` = `meta.name` de la copia; sin copia, el `name` del enlace). Se compara la primera palabra, sin mayúsculas ni acentos. Un dispositivo sin turnos o sin nombre no se bloquea (Ana escanea antes de tener su enlace; un teléfono recién instalado).
+  - Respuesta: `{ ok:false, error: { code:'OTHER_PERSON', message, detail, retry:false }, res, otherPerson: { reason, name, dir, current: { name, dir }, working } }`. `message`: «Este enlace es del calendario de Ana y este dispositivo usa el de Mauricio. No se cambió nada.» / «… y en este dispositivo hay turnos de Mauricio. …» / sin nombres, `SYNC_MESSAGES.OTHER_PERSON`.
+  - Con `switchPerson: true` (solo tras confirmarlo): vuelve a leer y `apply` guarda desde `personSwitchState(s)`: sin días, borrados, códigos, escaneos, cambios, nombre, `planName`, horas, avisos, suplementos ni saldos de la persona anterior (se adoptan los del calendario nuevo; el `name` del enlace si lo trae). Se quedan el `deviceId`, ntfy y `onboardingDone`. `t.switched === true`. Sin motivo (`otherPerson` null), `switchPerson` se ignora. El calendario anterior queda como estaba (su `backup.json` sigue diciendo que publica este dispositivo, hasta que otro haga «Usar este dispositivo»).
 - **`syncNow` sin identidad:** si tiene que crear el `deviceId` o la clave, no escribe nada y devuelve `error.code === 'RETRY'` con la identidad en `res.sync`. Al aplicarla, la siguiente llamada publica. La cola lo hace sola. Un dispositivo que solo lee sí termina bien en esa misma llamada (no escribe).
 - **Identidad sin guardar:** si al aplicar un resultado o un enlace (`q.setup`) la identidad nueva no se pudo guardar (`store.saveOk() === false`), la cola no repite y, mientras siga sin guardarse, `q.sync()` y `q.becomePublisher()` devuelven `RETRY` **sin conectarse** (antes intentan guardar otra vez). `q.pull()` sí lee. La UI ya muestra el banner `SAVE_ERROR`; el `RETRY` es pasajero y la sincronización de fondo reintenta sola.
 
@@ -150,17 +188,17 @@ isReadOnlyDevice(sync)                                           // true → otr
   conflictCount,   // días cambiados en los dos lados desde la última sincronización
   pulledDays,      // ['YYYY-MM-DD', …] que vinieron del remoto
   unpublishedDays, unpublishedCodes, unpublishedSettings, // solo si readOnly: lo de aquí que no está publicado
-  rev, remote: { rev, days, savedAt, deviceId, publisher, legacy } | null,
+  rev, remote: { rev, days, savedAt, deviceId, publisher, legacy, name } | null,   // name: meta.name o null
   startedAt,       // ISO: cuándo empezó (para descartar resultados viejos)
   sync,            // PARCHE para settings.sync (aplicar con applySyncResult)
   error: { code, message, detail, status, retry } | null,
-  target: { owner, repo, branch, keyTag }
+  target: { owner, repo, branch, dir, keyTag }
 }
 ```
 
 **`applySyncResult(current, res, { now })`** fusiona `res.state` con el estado **actual**, sin perder lo editado mientras se sincronizaba, y aplica `res.sync` con estas excepciones:
 
-- `owner`, `repo` o `branch` cambiaron entre medias → no aplica nada;
+- `owner`, `repo`, `branch` o `dir` cambiaron entre medias → no aplica nada (un resultado sin `target.dir`, de antes de esta versión, es de la raíz);
 - **resultado viejo** (`res.startedAt` anterior a `sync.lastSyncStartedAt`) → solo fusiona los datos. No toca `publisher`, `baseRev`, `unpublished`, `lastPull/PushAt`, hashes, errores ni `prevKey`. Una marca en el futuro (reloj adelantado) no cuenta;
 - **no es viejo** uno que empezó antes pero **publicó** (`pushed` o `tookOver`) una `rev` mayor que la `baseRev` guardada (p. ej. «Usar este dispositivo» mientras otra pestaña leía la copia anterior). Se aplica entero, pero `lastSyncStartedAt` no va hacia atrás;
 - un `deviceId` o una `key` del resultado solo **rellenan** los que falten. La excepción es la clave anterior recuperada (`keyRestored`), si la sincronización empezó con la clave que sigue guardada;
@@ -198,6 +236,7 @@ Cada error trae `message` (humano, sin jerga), `detail` (técnico) y `retry` (`t
 | `BAD_REMOTE` / `NEWER_REMOTE` / `NEWER_LOCAL` | copia dañada / de una versión más nueva / estado de una versión más nueva | no |
 | `EMPTY_LOCAL` | publicar dejaría 0 días encima de una copia con días (salvo que cada día de la copia tenga aquí un borrado más nuevo: eso es borrar a propósito y sí se publica), o (sin `backup.json`) encima de un `turnos.ics` con eventos | no |
 | `NO_REMOTE` | solo en `fetchRemoteBackup` y `pullBackup` | no |
+| `OTHER_PERSON` | solo en `trySetupConfig` / `q.setup`: el enlace es del calendario de otra persona (§3.2). No se guardó nada | no |
 
 - **Hoy:** el consejo `sync-error` ya avisa (§7).
 - **Ajustes → Calendario del iPhone:** si `lastErrorCode` no es pasajero, mostrar `lastError` y el botón **«Tengo un enlace nuevo»**.
@@ -209,9 +248,31 @@ Cada error trae `message` (humano, sin jerga), `detail` (técnico) y `retry` (`t
 - `pullBackup(sync, fetch)` devuelve un string JSON en claro (compatibilidad).
 - `pushData` está **obsoleto**: lanza `NO_KEY` sin clave y `CONFIG` sin `deviceId`, y no pasa a publicar nunca. Usar la cola.
 - `testConnection(sync, fetch)` devuelve `{ ok, message, detail, code?, private?, defaultBranch?, warning? }`. `warning` aparece si el repo publica GitHub Pages: mostrarlo.
-- `ensureBranch`, `calendarUrls(sync)` (`branch ''` → `HEAD`), `encryptBackup`, `decryptBackup`, `UNKNOWN_PUBLISHER` (`'?'`) y, en `cipher.js`, `generateSyncKey`, `isSyncKey`, `randomId`.
-- `parseSetupLink(hash)` devuelve `{ enabled:true, owner, repo, branch, token, key, publishPlaces? }` o `null`. Valida cada campo: `owner` y `repo` con las reglas de GitHub; `branch` como rama de git; `token` con `ghp_` o `github_pat_`; `key` en base64url de 43 caracteres, o vacía. `normalizeSyncConfig(obj)` hace lo mismo para el formulario.
-- `buildSetupLink(baseUrl, sync)` incluye `key` (y `publishPlaces` si está activado).
+- `ensureBranch`, `encryptBackup`, `decryptBackup`, `UNKNOWN_PUBLISHER` (`'?'`) y, en `cipher.js`, `generateSyncKey`, `isSyncKey`, `randomId`.
+- `calendarUrls(sync)` (`branch ''` → `HEAD`; con la carpeta) → `{ webcal, https, webcals, android }`:
+  - `webcal`: iPhone («Suscribirme»);
+  - `https`: para «Copiar enlace» (Google Calendar «Desde URL», o pegarlo en ICSx⁵);
+  - `android`: `intent://raw.githubusercontent.com/…/turnos.ics#Intent;scheme=webcals;package=at.bitfire.icsdroid;S.browser_fallback_url=<Google Play>;end`. En Chrome abre ICSx⁵ en su pantalla de suscripción (que guarda las alarmas del `.ics`); sin la app, su página de Google Play. No usar el enlace `https` para tocar: raw.githubusercontent.com lo sirve como `text/plain` y Chrome solo muestra el texto. `ICSX5_PACKAGE` y `ICSX5_PLAY_URL` están exportados.
+- `parseSetupLink(hash)` devuelve `{ enabled:true, owner, repo, branch, dir, token, key, publishPlaces?, name? }` o `null` (sin `dir` en el enlace → `''`, la raíz). Valida cada campo: `owner` y `repo` con las reglas de GitHub; `branch` como rama de git; `dir` `''` o `[a-z0-9-]{1,32}` (se pasa a minúsculas); `token` con `ghp_` o `github_pat_`; `key` en base64url de 43 caracteres, o vacía; `name` se ignora si no es texto. `normalizeSyncConfig(obj)` hace lo mismo para el formulario, pero **sin** `dir` en la entrada tampoco lo pone en la salida (se conserva la carpeta del dispositivo).
+- `buildSetupLink(baseUrl, sync)` incluye `key` (y `publishPlaces` si está activado, `dir` si no es la raíz y `name` si `sync.name` existe). El enlace de la raíz es igual que antes.
+- `backup.json` lleva `meta.name` (nombre de pila en claro, solo la primera palabra, solo si hay nombre). **No** va en los datos autenticados: las versiones anteriores siguen leyendo la copia (sigue siendo v3).
+- `icsEventCount(text)`: turnos de un `.ics` (sin el aviso «Sube el plan»). La protección «no vaciar un calendario con eventos» (§3.1) ya no cuenta ese aviso.
+
+### 3.6 Varias personas: carpetas, «Calendarios de la familia» y «Crear enlace para otra persona»
+
+```js
+const cals = await listCalendars(sync, { fetchImpl? });
+// → [{ dir: '' | 'ana', name: 'Mauricio' | null, urls: calendarUrls(...), updatedAt: ISO | null,
+//      mine: boolean (es la carpeta de este dispositivo), hasBackup, hasCalendar }]   (la raíz primero)
+const p = buildPersonLink(location.href, sync, { name: 'Ana', existingDirs: cals.map((c) => c.dir) });
+// → { link, dir: 'ana', key, name: 'Ana', urls }
+```
+
+- **`listCalendars`** solo lee (necesita el token; API *contents*): la raíz y las carpetas de primer nivel con nombre válido que tienen `backup.json` o `turnos.ics`. `name` sale de `meta.name` de `backup.json`; si no lo hay (copias de antes de esta versión), de `X-WR-CALNAME` del `.ics` («Turnos de Mauricio» → `'Mauricio'`; «Mis turnos» → `null`). Repo vacío o rama inexistente → `[]`. Errores de GitHub: lanza `SyncError` (`AUTH`, `NETWORK`…; `error.message` para la persona). Para mostrar un calendario sin nombre: «Calendario principal» (raíz) o el `dir`.
+- **`buildPersonLink`** (síncrono): carpeta = `uniqueDir(slugify(name), ['', sync.dir, ...existingDirs])` (`'ana'`, `'ana-2'`…), clave **nueva** (`generateSyncKey`), mismo owner/repo/rama/token. No cambia nada en este dispositivo. Lanza `Error` con `code: 'NAME'` («Escribe el nombre de la persona.») y `SyncError` `CONFIG` si este dispositivo no tiene la conexión completa. **Llamar antes a `listCalendars`** para no repetir una carpeta.
+- En el teléfono de la otra persona el enlace se abre como cualquier otro (§4.2): la carpeta está vacía, así que su dispositivo pasa a publicar en `<dir>/`. Su nombre se guarda si no tenía.
+- **`slugify(text)`**: sin acentos (`'José María'` → `'jose-maria'`, `ß` → `ss`), minúsculas, `[a-z0-9-]`, máx. 32. `uniqueDir(base, taken)`, `isValidDir(dir)`, `cleanPersonName(text)` (espacios normales, máx. 60) y `publicName(text)` (primera palabra).
+- Los UID del `.ics` de una carpeta llevan su dominio (`…@turnos-dir-ana`; la raíz sigue con `@turnos-mauricio`, y una carpeta `mauricio` es `@turnos-dir-mauricio`): dos calendarios suscritos en el mismo teléfono no chocan.
 
 ---
 
@@ -241,6 +302,7 @@ const syncQueue = createSyncQueue(store);   // fetchImpl = fetch; clock = () => 
   2. Si no hay copia remota, `trySetupConfig` acepta y `apply` crea la clave **antes** de publicar. Después, `syncQueue.sync()` publica y **este dispositivo pasa a publicar**.
   3. Si ya hay copia y no tiene la clave → `NO_KEY`: el enlace se crea desde el teléfono que publica.
 - **Crear el enlace:** `buildSetupLink(location.href, store.get().settings.sync)`, en «Opciones avanzadas → Crear enlace de configuración». Solo si `isSyncKey(sync.key)`.
+- **Enlace para otra persona** (la hermana): «Opciones avanzadas → Crear enlace para otra persona» → `buildPersonLink` (§3.6). No hace falta otro repo ni otro token.
 
 ### 4.2 Abrir un enlace `#setup=`
 
@@ -256,7 +318,7 @@ Al arrancar (`app.js`): `const cfg = parseSetupLink(location.hash)`. Después, l
    if (!t.ok) { alertDialog({ title: 'No se pudo conectar', text: t.error.message }); return; } // nada cambió
    ```
 
-   Errores típicos: `DECRYPT` (el enlace trae otra clave: «pide un enlace nuevo»), `NO_KEY`, `AUTH` (token caducado), y `NETWORK` si ya estaba conectado («inténtalo con internet»).
+   Errores típicos: `DECRYPT` (el enlace trae otra clave: «pide un enlace nuevo»), `NO_KEY`, `AUTH` (token caducado), y `NETWORK` si ya estaba conectado («inténtalo con internet»). `OTHER_PERSON`: el enlace es de otra persona → preguntar y, si dice que sí, `syncQueue.setup(cfg, { switchPerson: true })` (§3.2).
 5. Según quién publica:
    - `t.readOnly` (ya publica otro, p. ej. el navegador de quien ayuda) → `confirmDialog`: «¿Usar este iPhone para actualizar el calendario? El otro dispositivo (por ejemplo, el de quien te ayuda) dejará de hacerlo. Primero se juntan los turnos de los dos.» (Recomendado si este es tu iPhone.)
      - **Sí:** `const r = await syncQueue.becomePublisher()`. Si `!r.ok`, mostrar `r.error.message`.
@@ -352,14 +414,14 @@ if (backupKey) toast('Copia restaurada', { action: { label: 'Deshacer', run: () 
 
 - **`exportBackup(state, { now })`:**
   - No lleva token, clave, `settings.sync` ni `settings.ntfy`.
-  - Lleva los ajustes del usuario, `publishPlaces`, `onboardingDone`, `codes`, `days` (con sus `times`), `tombstones`, `codeTombstones`, `scans` y `changes`.
+  - Lleva los ajustes del usuario (`name`, `planName`, horas, `reminders` con `planUpload`, `supplements`, `balances`…), `publishPlaces`, `onboardingDone`, `codes` (con `travelMin`), `days` (con sus `times`), `tombstones`, `codeTombstones`, `scans` y `changes`.
   - Con `__newerSchema` lanza un `Error` con `code: 'NEWER'`.
 - **`importBackup(state, jsonOrObject, { now, force })`:**
-  - No toca `settings.sync` (incluidos `publishPlaces` y la clave), `settings.ntfy` ni un `onboardingDone: true`.
+  - No toca `settings.sync` (incluidos `publishPlaces`, la carpeta y la clave), `settings.ntfy` ni un `onboardingDone: true`.
   - En un teléfono **ya conectado** (sync activa que ya leyó o publicó), lo importado pasa a ser lo más nuevo: se sella con `now` y los días que faltan quedan como borrados. Un día cuenta como igual solo si coinciden códigos, nota y horario especial.
   - En uno **sin conectar** se conservan las fechas de la copia.
   - Un borrado nunca retrocede.
-  - Lanza `INVALID`, `NEWER`, `ENCRYPTED` o `EMPTY_BACKUP`.
+  - Lanza `INVALID` (p. ej. «Este archivo no es una copia de Turnos.»), `NEWER`, `ENCRYPTED` o `EMPTY_BACKUP`.
 - **`saveBeforeImport` / `listBeforeImport` / `undoImport`:**
   - `saveBeforeImport` guarda como mucho 3 copias y devuelve `null` si no pudo guardar.
   - `undoImport` **exige** la `key` de esa importación; devuelve `null` si falta o si la copia ya no existe.
@@ -378,14 +440,16 @@ if (backupKey) toast('Copia restaurada', { action: { label: 'Deshacer', run: () 
 - `deleteCode(state, code, { now })`: uno de fábrica vuelve a su definición original; uno propio deja una tombstone (y una definición supuesta si algún día lo usa). También reordena los días.
 - `updateSettings(state, patch, { now })`:
   - es una mezcla profunda; `null` borra los campos que por defecto son `null`;
+  - un número escrito como texto («18,75», «1,5», «30») vale para un campo numérico (también si ya tenía un número); un texto que no es un número se ignora. Igual al importar una copia;
   - los sellos de avisos y lugares se ponen solos, salvo que vengan explícitos;
   - si una clave buena se sustituye, la anterior queda en `prevKey`, salvo que el parche diga qué hacer con `prevKey`.
-- `mergeStates(local, remote, { now, since, adoptSettings })`: por día y por código gana el `updatedAt` más reciente (el día entero, con su nota y su horario especial, es la unidad). Al final deja el orden canónico de los días, con los tipos ya fusionados.
+- `mergeStates(local, remote, { now, since, adoptSettings })`: por día y por código gana el `updatedAt` más reciente (el día entero, con su nota y su horario especial, es la unidad). Al final deja el orden canónico de los días, con los tipos ya fusionados. Con `adoptSettings` toma del remoto nombre, `planName`, horas, suplementos y saldos solo donde aquí están vacíos o de fábrica (§1).
 - **Saneado de lo importado o cargado:**
   - colores solo `#RGB` o `#RRGGBB`;
   - de los códigos solo los campos conocidos;
   - longitudes máximas;
   - sin las claves `__proto__`, `constructor` ni `prototype`.
+- **Códigos de fábrica:** los del SPEC §2 y **`K`** (Enfermedad: `kind 'sick'`, texto rojo `#D21F1F`, forma `'text'`, sin horario). Como las vacaciones, acredita el objetivo del día en días con objetivo (`dayMinutes` → `credited`), va al `.ics` como evento de día completo sin alarma y no es día libre en los consejos. Borrarlo lo restablece. Un `K` guardado antes por el usuario (p. ej. como código supuesto) se conserva tal cual. Ojo: `Object.keys(state.codes)` (los `knownCodes` del escaneo) ahora incluye `K`.
 - **`guessCode`:**
   - letra + 1 dígito → `shift` (F, S, N y Z copian F1, S1, N1 y Z1);
   - letra + 2 dígitos → `place`;
@@ -396,6 +460,9 @@ if (backupKey) toast('Copia restaurada', { action: { label: 'Deshacer', run: () 
   - el rango empieza en `defaultIcsFrom(now)`, el día 1 del mes de hace 2 meses;
   - `DTSTAMP` y `LAST-MODIFIED` son estables y `SEQUENCE` nunca retrocede (un horario especial cambia el `updatedAt` del día: sube la `SEQUENCE` solo de ese día);
   - con horario especial, el evento va a esa hora, las alarmas se calculan desde ella y la descripción dice «Horario especial de este día»;
+  - `X-WR-CALNAME`: `calendarName(state)` = «Turnos de <primera palabra de name>» o «Mis turnos»; `PRODID:-//Turnos//ES`; UID con `uidDomain(state)` (`turnos-mauricio` en la raíz, `turnos-dir-<dir>` en otra carpeta);
+  - con viaje, la alarma «antes» se adelanta (§6.2) y la descripción dice «Viaje: sal a las …»;
+  - incluye el aviso «Sube el plan» (§6.3) si toca;
   - para el `.ics` manual de Ajustes, usar `buildICS(state, { now })`.
 
 ### 6.1 Horario especial de un día (`DayEntry.times`)
@@ -423,9 +490,78 @@ allowsSpecialTimes(def)            // false para lugares, libres, «W-», vacaci
 - **Qué lo usa:** `shiftInterval`, `timedInterval`, `dayTimedItems`, `dayMinutes`, `weekSummary`, `monthSummary` (horas y noches), `getAdvice` (descanso, solapes, noches, rachas; un turno sin confirmar con horario especial ese día no pide confirmar), `upcomingReminders`, `syncNtfy` (mismo `sequence_id`: se reprograma) y `buildICS`.
 - **Saneado al cargar o importar:** se descartan los de códigos que no están en el día, las horas inválidas o iguales, y las pausas fuera de rango.
 
+### 6.2 Tiempo de viaje y mapas (SPEC §13.2)
+
+```js
+upsertCode(state, { code: 'F51', place: 'Karl-Marx-Str. 1', travelMin: 25 })   // 0..180 (se recorta)
+dayTravel(state, '2026-10-13')   // → { minutes: 25, code: 'F51', def, to: CodeDef del lugar | null }
+dayTimedItems(state, key)        // cada item lleva travelMin, leaveAt (Date | null), travelTo ('F51' | null)
+travelText(item)                 // → 'Sal a las 13:05 hacia F51 (25 min de viaje)'  ('' sin viaje)
+travelText(item, { places: false })   // → 'Sal a las 13:05 (25 min de viaje)'
+mapsUrl(def | 'dirección', platform)   // iOS → https://maps.apple.com/?q=…; resto → Google Maps; null sin dirección
+```
+
+- **Viaje del día** = el mayor `travelMin` de sus códigos (lugar o turno). El destino («hacia F51») es ese código si es un lugar; si no, el primer lugar del día.
+- Se aplica **solo al primer turno o evento con hora del día** (el que empieza antes): es el viaje de ida. Los demás del mismo día llevan `travelMin: 0`.
+- **Aviso «antes»:** a la hora `inicio − viaje − minutesBefore` (con `minutesBefore: 0`, a la hora de salir):
+  - `upcomingReminders` (y ntfy): `title` «Sal a las 13:05 hacia F51 (25 min de viaje)», `body` «… · empieza a las 13:30 · 📍 F51», etiqueta `walking`. El aviso de la víspera no cambia de hora y añade «· Sal a las 13:05».
+  - `.ics`: `TRIGGER` = viaje + `minutesBefore`; texto «Sal a las 13:05 hacia F51 (25 min de viaje) · S1 Tarde a las 13:30». **Sin** `publishPlaces` no dice adónde (ni el código del lugar ni la dirección).
+- El `id` del recordatorio no cambia (`…-pre`): al cambiar el viaje, ntfy lo reprograma.
+
+### 6.3 Aviso «📷 Sube el plan de <mes>» (SPEC §13.1)
+
+```js
+planUploadReminder(state, now)
+// → null | { id: 'plan-2026-11', year: 2026, month: 11, key: '2026-10-20', start, end, moved, stamp,
+//            title: '📷 Sube el plan de noviembre', body }
+```
+
+- Solo si `reminders.planUpload !== false` y el mes siguiente **no tiene ningún día cargado** (los borrados no cuentan como cargados).
+- El día 20 del mes actual a las 19:00, 15 min. Si eso ya pasó: **hoy** a las 19:00 si aún no ha llegado; si no, **mañana** a las 19:00, si mañana sigue siendo este mes (`moved: true`). Así la sincronización de cada mañana deja un aviso que suena ese mismo día, también el último del mes (pasadas sus 19:00, nada).
+- En el `.ics`: `UID:plan-YYYY-MM@<dominio>` (estable por mes), `TRANSP:TRANSPARENT`, una alarma al inicio (`-PT0M`). Del 1 al 20 (hasta las 19:00) el contenido es estable; después cambia una vez al día, a las 19:00, cuando el aviso pasa al día siguiente (`stamp` = las 19:00 del día anterior al aviso: sube la `SEQUENCE` y nunca es futuro). Desaparece al cargar ese mes.
+- No cuenta como turno para la protección «no vaciar el calendario» (`icsEventCount`). No se manda por ntfy.
+
+### 6.4 Suplementos (SPEC §13.3)
+
+```js
+monthSummary(state, 2026, 10).supplements   // = monthSupplements(state, 2026, 10)
+// → { night: { minutes, pct, from, to, euros }, saturday: { minutes, pct, from, to, euros },
+//     sunday: { minutes, pct, euros }, holiday: { minutes, pct, euros },
+//     hourlyWage: number | null, euros: number | null }      // euros: null sin salario por hora
+daySupplements(state, key)      // → { night, saturday, sunday, holiday } (minutos enteros)
+supplementSettings(state)       // ajustes completos (con los valores por defecto)
+SUPPLEMENT_DEFAULTS, SUPPLEMENT_NOTE, sanitizeSupplements(obj), intervalSupplementMs(start, end, cfg)
+updateSettings(s, { supplements: { night: { pct: 25 }, hourlyWage: 18.5 } })   // null borra el salario
+```
+
+- **Por defecto** (orientativos; mostrar `SUPPLEMENT_NOTE`: «Valores orientativos (promedio de Berlín en el sector de los cuidados). Comprueba tu contrato.»): noche 23:00–06:00 **26 %**, sábado 13:00–21:00 **0 %**, domingo **33 %**, festivo **40 %**, sin salario. Son los promedios de Berlín de los suplementos típicos de los cuidados (lista de las cajas de cuidados según el §82c SGB XI, a 30/09/2026): noche como mínimo de 23 a 6 h; festivo con día libre a cambio (sin él, 134 %). El sábado no es obligatorio.
+- **Qué cuenta:** los turnos que cuentan horas (`countsAsWork`, con su horario especial). Cada minuto según su hora real y su **día de calendario**: una noche de domingo a lunes es domingo hasta las 24:00; un festivo que cae en sábado o domingo cuenta solo como festivo; la noche se suma aparte (se combina con las demás). Festivos de Berlín (`isHoliday`).
+- **Pausa** descontada en proporción: minutos × (trabajo / duración). Ej.: N1 de domingo (22–6 h, pausa 30): domingo 120 × 450/480 = 113, noche 420 × 450/480 = 394.
+- **Cambio de hora:** se mide tiempo real (la noche del 25 oct dura 9 h; la del 29 mar, 7 h).
+- El mes suma los turnos que **empiezan** ese mes y redondea al final (puede diferir en 1 min de sumar los días redondeados).
+- **€** = horas × salario × % (al céntimo). `pct` admite un decimal (0–300); `hourlyWage` hasta 500 (admite «18,75»). Las franjas aceptan `HH:MM`; si `to <= from` cruza la medianoche; `from === to` = sin franja.
+
+### 6.5 Saldos (SPEC §13.4)
+
+```js
+overtimeBalance(state, { now, through? })
+// → { startMonth: 'YYYY-MM' | null, auto, startMin, through: 'YYYY-MM-DD', balance (minutos),
+//     months: [{ month, year, month1, from, to, days, daysKnown, complete, current, total, soll, diff, cumulative }] }
+vacationSummary(state, year, { now })
+// → { year, entitlement, carryOver, total, used, planned, remaining, usedDays: [key], plannedDays: [key] }
+updateSettings(s, { balances: { overtimeStartMin: 90, overtimeStartMonth: '2026-09', vacationDaysPerYear: 30, vacationCarryOver: 2.5 } })
+BALANCE_DEFAULTS, sanitizeBalances(obj), balanceSettings(state), isMonthKey('2026-10'), nextMonthKey('2026-12')
+```
+
+- **Saldo de horas:** empieza con `overtimeStartMin` (puede ser negativo) en `overtimeStartMonth` (sin él: el primer mes con plan, `auto: true`) y suma mes a mes `total − objetivo` hasta **hoy incluido** (`through`). Solo cuentan los **días con plan**: un día sin cargar no suma horas ni resta su objetivo (no se inventan horas); `complete: false` lo indica. El mes en curso va hasta hoy (`current: true`). Un mes inicial en el futuro → `months: []` y `balance = overtimeStartMin`.
+- **Vacaciones:** usadas = días con un código de vacaciones (`kind 'vacation'`, p. ej. `U`) que tienen objetivo (laborable y no festivo), hasta hoy incluido; planificadas = después de hoy. `remaining = vacationDaysPerYear + vacationCarryOver − usadas − planificadas`. La enfermedad (`K`) no gasta vacaciones. El arrastre se suma al año que se consulta (la UI muestra el año en curso).
+- Valores: `vacationDaysPerYear` y `vacationCarryOver` 0–366 en medios días (admiten «1,5»); `overtimeStartMin` entero (±100 000 h).
+
 ---
 
 ## 7. Consejos (`getAdvice`)
+
+`getAdvice(state, now, { platform })`: con `platform: 'ios'` los textos dicen «Calendario del iPhone» / «el iPhone»; con `'android'`, `'desktop'` o sin indicar, «calendario del teléfono» / «el teléfono». Pasar la plataforma que detecta la UI.
 
 `action.section` es `'calendar'` (= `#set-calendar`). La UI llama a `go(tab, { section })`; Ajustes hace scroll a `#set-<section>`.
 
@@ -445,6 +581,8 @@ allowsSpecialTimes(def)            // false para lugares, libres, «W-», vacaci
 ## 8. ntfy (opcional)
 
 - El aviso «mantener recordatorios» se titula «Abre la app Turnos» y no lleva enlace.
+- `testNtfy`: título «Turnos» y «Mira tu teléfono» (lo usan las dos personas). `randomTopic()` sigue dando `turnos-mauricio-xxxxxxxxxxxx`.
+- Con viaje, el aviso «antes» sale antes y dice «Sal a las …» (§6.2).
 - En iPhone/iPad, `syncNtfy` y `testNtfy` no añaden `click` salvo que se pase `{ appUrl }`.
 
 ---
@@ -456,7 +594,8 @@ Los mocks de GitHub deben simular:
 - `backup.json` **v3** (`meta.publisher`, `meta.publisherSince`), con PUT que exige el `sha`;
 - `turnos.ics` sin `?ref=` cuando `branch` es `''`. El que publica hace GET de `turnos.ics` en cada sincronización. Si difiere, hace **otro GET de `backup.json`** y después el PUT;
 - `commit.sha` y `content.sha` en las respuestas de PUT;
-- `409`/`404` en `git/ref` para repos vacíos.
+- `409`/`404` en `git/ref` para repos vacíos;
+- con carpeta (`dir`), las mismas rutas con el prefijo (`contents/ana/backup.json`, `contents/ana/turnos.ics`), y para `listCalendars` el listado de carpetas (`GET contents` y `GET contents/<dir>` → `[{ type: 'file'|'dir', name }]`; `404` en un repo vacío).
 
 Además:
 
@@ -464,4 +603,6 @@ Además:
 - la primera sincronización de un estado sin `deviceId` o sin clave no escribe nada (`RETRY`) si no se usa `ensureSyncIdentity` o la cola;
 - los enlaces de prueba usan un token con formato real (`` `github_pat_${'A'.repeat(22)}_${'B'.repeat(59)}` ``).
 
-`test/unit/helpers.mjs` (`fakeGitHub`) es una referencia completa. Los escenarios de sincronización de esta ronda están en `test/unit/sync-recheck3.test.mjs` (y los de la anterior en `sync-recovery.test.mjs`); los del horario especial, en `test/unit/day-times.test.mjs`.
+`test/unit/helpers.mjs` (`fakeGitHub`, con listado de carpetas) es una referencia completa. Los escenarios de esta ronda: varias personas en `test/unit/people.test.mjs` y `person-switch.test.mjs` (enlace de otra persona, adopción de ajustes), la tabla del PC con la foto real y `employeeName` en `recognize-pc-photo.test.mjs` (Chromium; se salta sin Playwright), suplementos en `supplements.test.mjs`, saldos en `balances.test.mjs`, viaje y «Sube el plan» en `travel-plan.test.mjs`. Los de rondas anteriores: `sync-recheck3.test.mjs`, `sync-recovery.test.mjs` y `day-times.test.mjs` (horario especial).
+
+Un `.ics` puede llevar ahora el evento «Sube el plan» (`UID:plan-…`): al contar turnos en un test, no contarlo (`icsEventCount`).

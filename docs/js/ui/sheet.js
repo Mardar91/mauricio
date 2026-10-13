@@ -1,6 +1,7 @@
 // Hojas inferiores (estilo iOS) y diálogos de confirmación.
 import { h, nextId } from './dom.js';
 import { icon } from './icons.js';
+import { onBack } from './back.js';
 
 const stack = [];
 const root = () => document.getElementById('overlays') || document.body;
@@ -43,6 +44,7 @@ export function openSheet({
   const wrap = h('div', { class: 'sheet-wrap' }, backdrop, panel);
   let closed = false;
   let asking = false;
+  let offBack = null;
 
   const api = {
     el: panel, body: content,
@@ -66,6 +68,7 @@ export function openSheet({
       panel.addEventListener('transitionend', done, { once: true });
       setTimeout(done, 380);
       document.removeEventListener('keydown', onKey, true);
+      offBack?.();
       if (prevFocus && prevFocus.focus && document.contains(prevFocus)) prevFocus.focus({ preventScroll: true });
       onClose?.(result);
     },
@@ -95,6 +98,7 @@ export function openSheet({
   dragToClose(header, panel, () => api.requestClose());
 
   stack.push(api);
+  offBack = onBack(() => api.requestClose());
   root().append(wrap);
   lockScroll();
   requestAnimationFrame(() => {
@@ -154,11 +158,13 @@ export function confirmDialog({ title, text = '', ok = 'Aceptar', cancel = 'Canc
     const wrap = h('div', { class: 'dialog-wrap' }, h('div', { class: 'backdrop' }), box);
     const api = { close: (v) => finish(v) };
     let done = false;
+    let offBack = null;
     function finish(v) {
       if (done) return;
       done = true;
       const i = stack.indexOf(api);
       if (i >= 0) stack.splice(i, 1);
+      offBack?.();
       document.removeEventListener('keydown', onKey, true);
       wrap.classList.remove('open');
       lockScroll();
@@ -178,6 +184,7 @@ export function confirmDialog({ title, text = '', ok = 'Aceptar', cancel = 'Canc
     cancelBtn?.addEventListener('click', () => finish(false));
     document.addEventListener('keydown', onKey, true);
     stack.push(api);
+    offBack = onBack(() => finish(false));
     root().append(wrap);
     lockScroll();
     // Si se cerró antes del primer fotograma (respuesta muy rápida), no se vuelve a abrir
@@ -198,6 +205,7 @@ export function busyDialog(text) {
   const api = { close: () => {} };
   let done = false;
   stack.push(api);
+  const offBack = onBack(() => {});
   root().append(wrap);
   lockScroll();
   requestAnimationFrame(() => { if (done) return; wrap.classList.add('open'); box.focus({ preventScroll: true }); });
@@ -206,6 +214,7 @@ export function busyDialog(text) {
     done = true;
     const i = stack.indexOf(api);
     if (i >= 0) stack.splice(i, 1);
+    offBack();
     wrap.classList.remove('open');
     lockScroll();
     setTimeout(() => wrap.remove(), 200);

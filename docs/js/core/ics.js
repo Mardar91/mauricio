@@ -1,7 +1,7 @@
-// Calendario iCalendar (RFC 5545) para suscribirse desde el iPhone.
+// Calendario iCalendar (RFC 5545) para suscribirse desde el teléfono (iPhone, ICSx⁵, Google…).
 import { codeEmoji, getCode, nominalMinutes } from './codes.js';
-import { addDays, atTime, formatHHMM, formatHours, parseHHMM, toKey } from './dates.js';
-import { dayTimedItems } from './reminders.js';
+import { addDays, atTime, formatHHMM, formatHours, formatTime, parseHHMM, toKey } from './dates.js';
+import { dayTimedItems, planUploadReminder, travelText } from './reminders.js';
 
 const CRLF = '\r\n';
 
@@ -67,6 +67,21 @@ function utcStamp(d) {
 
 const dateValue = (key) => key.replace(/-/g, '');
 
+// Nombre del calendario: «Turnos de <nombre de pila>» o «Mis turnos» (SPEC §11). El calendario es
+// público: solo la primera palabra del nombre (nunca apellidos).
+export function calendarName(state) {
+  const name = String(state?.settings?.name ?? '').replace(/\s+/g, ' ').trim().split(' ')[0];
+  return name ? `Turnos de ${name}` : 'Mis turnos';
+}
+
+// Dominio de los UID: el de siempre en la carpeta raíz (no cambia nada en el calendario de Mauricio);
+// en la carpeta de otra persona, el suyo (así dos calendarios suscritos en un teléfono no chocan).
+// 'turnos-dir-<carpeta>' nunca coincide con el de la raíz (ni con una carpeta llamada «mauricio»).
+export function uidDomain(state) {
+  const dir = String(state?.settings?.sync?.dir ?? '').trim();
+  return /^[a-z0-9-]{1,32}$/.test(dir) ? `turnos-dir-${dir}` : 'turnos-mauricio';
+}
+
 // Hora de pared en Berlín a partir de la clave y 'HH:MM' (no depende del huso del dispositivo)
 function wallTime(key, hhmm) {
   const m = parseHHMM(hhmm);
@@ -83,8 +98,8 @@ export function triggerDuration(ms) {
 
 // Sello estable del evento: lo más reciente entre el día, sus códigos (también si se borraron) y los
 // ajustes del calendario. Nunca "ahora": el mismo contenido da siempre el mismo ICS.
-function stampFor(state, key, entry) {
-  let best = 0;
+function stampFor(state, key, entry, base = null) {
+  let best = base instanceof Date ? base.getTime() : 0;
   const codes = entry?.codes || [];
   const vals = [entry?.updatedAt, state?.settings?.calendarUpdatedAt,
     ...codes.map((c) => getCode(state, c).updatedAt), ...codes.map((c) => state?.codeTombstones?.[c])];
@@ -129,13 +144,14 @@ export function buildICS(state, { from, to, now = new Date(), notes = false, pla
   const r = state?.settings?.reminders || {};
   const start = from ?? defaultIcsFrom(now);
   const end = to ?? lastDayKey(state);
+  const domain = uidDomain(state);
   const lines = [
     'BEGIN:VCALENDAR',
     'VERSION:2.0',
-    'PRODID:-//Turnos de Mauricio//ES',
+    'PRODID:-//Turnos//ES',
     'CALSCALE:GREGORIAN',
     'METHOD:PUBLISH',
-    'X-WR-CALNAME:Turnos de Mauricio',
+    `X-WR-CALNAME:${escapeText(calendarName(state))}`,
     'X-WR-TIMEZONE:Europe/Berlin',
     'X-APPLE-CALENDAR-COLOR:#EF8A17',
     'REFRESH-INTERVAL;VALUE=DURATION:PT1H',
@@ -159,12 +175,13 @@ export function buildICS(state, { from, to, now = new Date(), notes = false, pla
         desc.push(`Pausa: ${def.breakMin} min (${formatHours(Math.max(0, nominal - def.breakMin))} de trabajo)`);
       }
       if (item.special) desc.push('Horario especial de este día');
+      if (item.travelMin) desc.push(`Viaje: ${travelText(item, { places }).replace(/^Sal a las /, 'sal a las ')}`);
       if (places && item.placeText) desc.push(`Lugar: ${item.placeText}`);
       if (def.confirmed === false) desc.push('Horario sin confirmar');
       if (notes && entry.note) desc.push(`Nota: ${entry.note}`);
       lines.push(
         'BEGIN:VEVENT',
-        `UID:${key}-${def.code}@turnos-mauricio`,
+        `UID:${key}-${def.code}@${domain}`,
         `DTSTAMP:${stamp}`,
         `LAST-MODIFIED:${stamp}`,
         `SEQUENCE:${seq}`,
@@ -177,12 +194,17 @@ export function buildICS(state, { from, to, now = new Date(), notes = false, pla
       if (r.eveningBefore !== false && parseHHMM(r.eveningTime) !== null) {
         const eve = atTime(addDays(key, -1), r.eveningTime);
         if (eve < item.start) {
-          lines.push(...alarm(`Mañana: ${def.code} ${def.name} a las ${def.start}`, item.start - eve));
+          const leave = item.travelMin ? ` (sal a las ${formatTime(item.leaveAt)})` : '';
+          lines.push(...alarm(`Mañana: ${def.code} ${def.name} a las ${def.start}${leave}`, item.start - eve));
         }
       }
       if (r.beforeStart !== false) {
         const min = Math.max(0, Math.round(Number(r.minutesBefore) || 0));
-        lines.push(...alarm(`${def.code} ${def.name} empieza a las ${def.start}`, min * 60000));
+        // Con viaje: X min antes de salir (inicio − viaje − minutesBefore)
+        const text = item.travelMin
+          ? `${travelText(item, { places })} · ${def.code} ${def.name} a las ${def.start}`
+          : `${def.code} ${def.name} empieza a las ${def.start}`;
+        lines.push(...alarm(text, (min + item.travelMin) * 60000));
       }
       lines.push('END:VEVENT');
     }
@@ -194,7 +216,7 @@ export function buildICS(state, { from, to, now = new Date(), notes = false, pla
       if (!allDay) continue;
       lines.push(
         'BEGIN:VEVENT',
-        `UID:${key}-${def.code}@turnos-mauricio`,
+        `UID:${key}-${def.code}@${domain}`,
         `DTSTAMP:${stamp}`,
         `LAST-MODIFIED:${stamp}`,
         `SEQUENCE:${seq}`,
@@ -205,6 +227,26 @@ export function buildICS(state, { from, to, now = new Date(), notes = false, pla
       if (notes && entry.note) lines.push(`DESCRIPTION:${escapeText(`Nota: ${entry.note}`)}`);
       lines.push('TRANSP:TRANSPARENT', 'END:VEVENT');
     }
+  }
+  // «📷 Sube el plan de <mes>» si el mes siguiente está vacío (SPEC §13.1); UID estable por mes
+  const plan = planUploadReminder(state, now);
+  if (plan && plan.key >= start && (!to || plan.key <= to)) {
+    const when = stampFor(state, plan.key, null, plan.stamp);
+    const stamp = utcStamp(when);
+    lines.push(
+      'BEGIN:VEVENT',
+      `UID:${plan.id}@${domain}`,
+      `DTSTAMP:${stamp}`,
+      `LAST-MODIFIED:${stamp}`,
+      `SEQUENCE:${sequenceOf(when)}`,
+      `DTSTART;TZID=Europe/Berlin:${wallTime(plan.key, formatTime(plan.start))}`,
+      `DTEND;TZID=Europe/Berlin:${wallTime(plan.key, formatTime(plan.end))}`,
+      `SUMMARY:${escapeText(plan.title)}`,
+      `DESCRIPTION:${escapeText(plan.body)}`,
+      'TRANSP:TRANSPARENT',
+      ...alarm(plan.title, 0),
+      'END:VEVENT',
+    );
   }
   lines.push('END:VCALENDAR');
   return lines.map(foldLine).join(CRLF) + CRLF;
