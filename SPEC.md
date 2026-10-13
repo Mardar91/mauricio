@@ -75,12 +75,14 @@ State = {
     workDaysPerWeek: 5,                 // Soll diario = weeklyHours / workDaysPerWeek
     holidaysReduceSoll: true,           // festivos de Berlín (lun–vie) reducen el Soll
     reminders: { eveningBefore: true, eveningTime: '20:00', beforeStart: true, minutesBefore: 60 },
-    sync: { enabled: false, owner: 'Mardar91', repo: 'mauricio', branch: 'datos', token: '', lastPushAt: null, lastPushHash: null, lastError: null },
+    sync: { enabled: false, owner: 'Mardar91', repo: 'mauricio-datos', branch: '', token: '', key: '', deviceId: '', baseRev: 0, lastPushAt: null, lastPushHash: null, lastPullAt: null, lastError: null, publishPlaces: false },
+    //   repo de DATOS separado y público (recomendado 'mauricio-datos'); branch '' = rama por defecto del repo. key = clave AES-GCM (base64url) del backup cifrado.
     ntfy: { enabled: false, server: 'https://ntfy.sh', topic: '', scheduled: {} /* seqId -> {at, hash} */, lastRunAt: null, lastError: null },
     onboardingDone: false,
   },
   codes: { [code: string]: CodeDef },
   days: { ['YYYY-MM-DD']: DayEntry },
+  tombstones: { ['YYYY-MM-DD']: ISO },   // días borrados (para fusionar entre dispositivos); se podan a los 120 días
   scans: [ { at: ISO, layout, month, year, daysFound } ],          // últimos 30
   changes: [ { at: ISO, dayKey, before: string[], after: string[], source: 'scan'|'manual'|'import' } ], // últimos 300
 }
@@ -99,6 +101,7 @@ CodeDef = {
   place: '',                      // dirección/nombre del lugar (sobre todo kind 'place')
   confirmed: true,                // false → horario supuesto; la UI pide confirmarlo
   builtin: true,
+  updatedAt: ISO | null,          // para fusionar entre dispositivos
 }
 
 DayEntry = { codes: string[], note: '', source: 'scan'|'manual'|'import', updatedAt: ISO }
@@ -225,3 +228,29 @@ Pestañas inferiores (estilo iOS): **Hoy · Calendario · [📷 Escanear, botón
 ## 8. Publicación
 
 GitHub Pages → *Deploy from a branch* → carpeta `/docs`. El repo debe ser público (Pages gratis). Sin GitHub Actions propias.
+
+## 9. Sincronización segura (decisiones tras la revisión)
+
+Problema: en iOS Safari y la app instalada tienen almacenamientos distintos; una copia vacía o vieja (pestaña de Safari, otro móvil, un enlace de configuración abierto en Safari) **nunca** debe sobrescribir los datos buenos publicados.
+
+- Archivos en el repo de datos (público): `turnos.ics` (calendario: SIN notas; SUMMARY con código + nombre; LOCATION solo si `publishPlaces` está activado, y si no, nada; rango estable: desde el día 1 del mes de hace 2 meses, para que el contenido no cambie cada día) y `backup.json` = `{ format: 'turnos-backup', v: 2, meta: { rev, savedAt, deviceId, days }, enc: { alg: 'AES-GCM', iv, data } }` con el estado completo **cifrado** (WebCrypto AES-GCM 256, clave `sync.key`; sin token). Nada más (no publicar changes/scans en claro).
+- `rev` es un contador monotónico. El dispositivo guarda `sync.baseRev` = último rev que publicó o fusionó.
+- **Antes de publicar** (y al abrir la app con sync activo): leer `backup.json` remoto. Si existe y `meta.rev !== baseRev` → descifrar y **fusionar por día** (gana el `updatedAt` más reciente; las tombstones cuentan como versión; códigos: gana el `updatedAt` más reciente; settings: se conservan los del dispositivo), aplicar el resultado en local, y después publicar con `rev = remoto.rev + 1`. Si el remoto no se puede descifrar (otra clave) → NO publicar; error claro en español.
+- Nunca publicar un estado con 0 días si el remoto tiene días (eso solo puede ser una copia vacía): fusionar primero (= restaurar).
+- Configurar la sync (enlace o a mano) en un dispositivo → primero leer y fusionar el remoto, luego publicar.
+- Repo vacío (recién creado): crear los archivos en su rama por defecto (la API de contents crea el primer commit). Si `branch` está indicada y no existe en un repo con commits → crearla desde la rama por defecto.
+- Enlace de configuración `#setup=` (incluye owner, repo, branch, token y key): si se abre en **Safari de iOS sin instalar** (`!navigator.standalone`), NO configurar ese almacenamiento: mostrar "Copia este enlace y pégalo dentro de la app Turnos (Ajustes → Tengo un enlace)" con botón Copiar. En la app instalada / otros navegadores: confirmar → fusionar → publicar → llevar al paso "Suscribirme en el iPhone".
+- Pestañas múltiples: escuchar el evento `storage` y recargar el estado; cada escritura parte del último estado guardado.
+- `importBackup` NO toca `settings.sync` ni `settings.ntfy` del dispositivo. Antes de importar o restaurar se guarda una copia local de seguridad (`turnos-mauricio:before-import:<ts>`, máx. 3) y se puede deshacer.
+
+## 10. Ajustes (estructura final, pensada para Mauricio)
+
+1. **Calendario del iPhone** (arriba del todo): estado claro (Conectado ✓ · última actualización / No configurado / Error con mensaje humano), botón grande "Suscribirme en el iPhone" (webcal), guía corta paso a paso (incluye desactivar «Eliminar alertas»); si no está configurado: "Pide el enlace de configuración a quien te ayuda" + botón "Tengo un enlace" (pegar desde el portapapeles con un toque).
+2. **Mis turnos y horarios**: códigos usados + F1/S1/N1/Z1; cada uno editable (inicio, fin, pausa, lugar); los demás en "Ver todos los códigos". Los no confirmados solo se resaltan si se usan.
+3. **Horas de contrato** y **Recordatorios** (víspera a las HH:MM, antes del turno).
+4. **Copia de seguridad** (exportar / importar archivo).
+5. **Instalar en la pantalla de inicio** (solo si no está instalada).
+6. **Opciones avanzadas** (plegado): conexión con GitHub (owner/repo/rama/token, probar, crear enlace de configuración para Mauricio), publicar lugares en el calendario, ntfy (opcional), archivo .ics manual, restaurar desde GitHub, borrar todos los datos.
+7. Acerca de.
+
+Notificaciones: la vía principal es el **calendario del iPhone** (suscripción). ntfy queda como opción avanzada, desactivada por defecto.
