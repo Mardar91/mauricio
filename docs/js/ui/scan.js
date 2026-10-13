@@ -1,7 +1,8 @@
 // Pestaña "Escanear": fotos → reconocimiento → revisión → guardar. Con plan B a mano.
 // La revisión se guarda como borrador (sobrevive a que iOS recargue la app o a «Actualizar»).
 import {
-  applyScan, daysInMonth, diffScan, formatMonth, getCode, makeKey, mergeScans, monthName, setDay, toKey, weekdayShort,
+  FAMILY_NAME, applyScan, daysInMonth, diffScan, formatMonth, getCode, makeKey, mergeScans, monthName, setDay, suggestPlanName, toKey,
+  weekdayShort,
 } from '../core/index.js';
 import { badgeRow } from './badge.js';
 import { ago, cap, h, listText, plural, safeStorage, setChildren } from './dom.js';
@@ -9,9 +10,9 @@ import { icon } from './icons.js';
 import { banners, saveFailedToast } from './banners.js';
 import { confirmDialog, openSheet } from './sheet.js';
 import { dayTimes, rangeText } from './times.js';
+import { OTHER_SHEET_WARNING } from '../recognize/pc/calendar.js';
 
 const LOW_CONFIDENCE = 0.7;
-const EMPLOYEE = 'Ducuara';
 export const DRAFT_KEY = 'turnos-mauricio:scan-draft';
 const DRAFT_MAX_AGE = 24 * 3600 * 1000;
 const KIND_WORDS = { vacation: 'vacaciones', off: 'libre', wish: 'libre deseado', sick: 'enfermedad', event: 'reunión' };
@@ -171,7 +172,9 @@ export function createScan(ctx) {
     setChildren(el,
       h('header', { class: 'page-head' },
         h('h1', { class: 'large-title' }, 'Escanear'),
-        h('p', { class: 'page-sub' }, 'Toma una foto de tu plan y la app anota tus turnos.')),
+        h('p', { class: 'page-sub' }, ctx.platform === 'desktop'
+          ? 'Elige las fotos del plan (o capturas de pantalla) y la app anota los turnos.'
+          : 'Toma una foto de tu plan y la app anota tus turnos.')),
       banners(ctx, state, 'escanear'),
       h('div', { class: 'card scan-hero' },
         h('div', { class: 'scan-illus', 'aria-hidden': 'true' }, scanArt()),
@@ -180,9 +183,12 @@ export function createScan(ctx) {
           tip('Que se vea el mes arriba (p. ej. «Oktober 2026»)'),
           tip('Puedes tomar varias fotos del mismo mes'),
           tip('También sirve la hoja impresa del PC'))),
-      h('div', { class: 'scan-actions' },
-        fileButton(camInput, 'Tomar foto', 'camera', 'btn-primary btn-lg btn-block'),
-        fileButton(pickInput, 'Elegir fotos', 'photos', 'btn-secondary btn-lg btn-block'),
+      // En el ordenador no hay cámara: un solo botón para elegir los archivos
+      h('div', { class: ['scan-actions', ctx.platform === 'desktop' && 'scan-actions-single'] },
+        ctx.platform === 'desktop' ? null : fileButton(camInput, 'Tomar foto', 'camera', 'btn-primary btn-lg btn-block'),
+        ctx.platform === 'desktop'
+          ? fileButton(pickInput, 'Elegir fotos del plan', 'photos', 'btn-primary btn-lg btn-block')
+          : fileButton(pickInput, 'Elegir fotos', 'photos', 'btn-secondary btn-lg btn-block'),
         h('button', { class: 'btn btn-plain btn-block', type: 'button', 'data-testid': 'scan-manual', on: { click: () => startManual() } }, icon('pencil'), 'Escribir el plan a mano')),
       scans.length ? h('section', { class: 'section' },
         h('h2', { class: 'section-title' }, 'Últimos escaneos'),
@@ -274,7 +280,8 @@ export function createScan(ctx) {
           tesseract: tesseractPaths(),
           knownCodes: Object.keys(state.codes || {}),
           codeKinds,
-          employeeName: EMPLOYEE,
+          // Fila de la tabla del PC: el nombre tal como sale en el plan («Ducuara Ana»)
+          employeeName: state.settings.planName || suggestPlanName(state) || FAMILY_NAME,
           onProgress: (f, label) => {
             if (id !== runId) return;
             p.progress = Math.max(p.progress, Math.min(1, Number(f) || 0));
@@ -590,7 +597,12 @@ export function createScan(ctx) {
         counts.doubtful ? h('span', { class: 'rc rc-doubt' }, `${counts.doubtful} por revisar`) : null,
         counts.unread ? h('span', { class: 'rc rc-doubt' }, `${counts.unread} sin leer`) : null) : null);
 
-    for (const w of shownWarnings) notices.push(h('div', { class: 'notice notice-info' }, icon('info'), h('p', {}, w)));
+    // «Esta hoja parece de otra persona»: aviso fuerte (sus días van sin marcar), antes que los demás
+    // (detrás de «Tu plan ya estaba al día», que va arriba)
+    const otherSheet = (w) => w.startsWith(OTHER_SHEET_WARNING);
+    notices.push(...shownWarnings.filter(otherSheet)
+      .map((w) => h('div', { class: 'notice notice-warn', 'data-testid': 'other-sheet' }, icon('warning'), h('p', {}, w))));
+    for (const w of shownWarnings.filter((x) => !otherSheet(x))) notices.push(h('div', { class: 'notice notice-info' }, icon('info'), h('p', {}, w)));
     if (counts.unread) {
       const list = rows.filter((r) => r.unread && !r.present);
       notices.push(h('div', { class: 'notice notice-alert', 'data-testid': 'unread-notice' }, icon('help'), h('p', {},

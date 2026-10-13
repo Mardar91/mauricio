@@ -1,13 +1,15 @@
 // Capturas de todas las vistas y estados (iPhone 390×844 @3x, claro y oscuro) en test/e2e/out/ para
-// revisar el diseño, y comprobación de que nada se sale por los lados a 360 px (con capturas w360-*).
-// Uso: node test/e2e/screens.mjs [--only nombre] [--theme light|dark] [--scale 3]
+// revisar el diseño, y las pantallas clave en varios tamaños (SPEC §14): Android 360×740, iPhone 390×844
+// y 430×932 (claro y oscuro), iPad 820×1180 y 1180×820 y ordenador 1280×800 (r-<tamaño>-*), comprobando
+// que nada se sale por los lados.
+// Uso: node test/e2e/screens.mjs [--only nombre] [--theme light|dark] [--scale 3]   (--only responsive: solo tamaños)
 import fs from 'node:fs';
 import path from 'node:path';
 import { chromium } from 'playwright';
 import { startServer } from '../tools/serve.mjs';
 import {
-  KEY, NOW, OUT, OWNER, REPO, SYNC, TOKEN, core, demoState, ensureOut, fakeGitHub, findOverflow, iphoneContext, mockNetwork,
-  preparePage, seedRemote,
+  KEY, NOW, OTHER_KEY, OUT, OWNER, REPO, SYNC, TOKEN, core, demoState, ensureOut, fakeGitHub, findOverflow, iphoneContext,
+  mockNetwork, preparePage, seedRemote,
 } from './helpers.mjs';
 
 const args = process.argv.slice(2);
@@ -71,6 +73,27 @@ function specialState(extra = {}) {
   s = core.setDay(s, '2026-10-29', ['S1', 'S54'], { source: 'manual', times: { S1: { start: '14:00', end: '20:00', breakMin: 0 } }, now: new Date('2026-10-12T20:00:00+02:00') });
   return s;
 }
+// Con lo nuevo de §11–§13: nombre, viaje al lugar S51 (25 min, con dirección), salario por hora,
+// saldo inicial y vacaciones del año pasado, y un día de enfermedad (K)
+function richState(extra = {}) {
+  let s = demoState(extra);
+  s = core.upsertCode(s, { ...core.getCode(s, 'S51'), place: 'Karl-Marx-Straße 101, Berlín', travelMin: 25 });
+  s = core.updateSettings(s, {
+    name: 'Mauricio', planName: 'Ducuara Mauricio',
+    supplements: { hourlyWage: 18.5 }, balances: { overtimeStartMin: 300, overtimeStartMonth: '2026-06', vacationCarryOver: 2 },
+  });
+  s = core.setDay(s, '2026-10-08', ['K'], { source: 'manual', now: new Date('2026-10-08T07:00:00+02:00') });
+  return s;
+}
+// GitHub con dos calendarios: el de Mauricio (raíz) y el de Ana (carpeta «ana»)
+async function familyGitHub() {
+  const gh = fakeGitHub();
+  await seedRemote(gh, demoState(), { deviceId: 'iphone1', name: 'Mauricio' });
+  let ana = core.updateSettings(core.createDefaultState(), { onboardingDone: true });
+  for (const [k, c] of [['2026-10-13', ['F1']], ['2026-10-14', ['S1']], ['2026-10-15', ['-']]]) ana = core.setDay(ana, k, c, { now: new Date('2026-10-10T10:00:00Z') });
+  await seedRemote(gh, ana, { deviceId: 'android-ana', dir: 'ana', key: OTHER_KEY, name: 'Ana' });
+  return gh;
+}
 const SUBSCRIBED = `webcal://raw.githubusercontent.com/${OWNER}/${REPO}/HEAD/turnos.ics`;
 async function markSubscribed(page) {
   await page.addInitScript((url) => localStorage.setItem('turnos-mauricio:subscribed', JSON.stringify({ url, at: '2026-10-02T18:00:00.000Z' })), SUBSCRIBED);
@@ -108,6 +131,9 @@ scenario('onboarding', async (ctx, theme) => {
   const page = await open(ctx, { state: null, standalone: false });
   await page.waitForSelector('.onboarding.open');
   await snap(page, '01-onboarding-1', { theme });
+  await page.click('.ob-bottom .btn-primary');
+  await page.fill('[data-testid="ob-name"]', 'Mauricio');
+  await snap(page, '01-onboarding-2-nombre', { theme });
   await page.click('.ob-bottom .btn-primary');
   await snap(page, '01-onboarding-2-instalar', { theme });
   await page.click('.ob-bottom .btn-primary');
@@ -342,6 +368,130 @@ scenario('revision-al-dia', async (ctx, theme) => {
   return page;
 });
 
+scenario('nuevo', async (ctx, theme) => {
+  // Hoy con tiempo de viaje, Horas con suplementos y saldos, Ajustes «Contrato y nómina», editor del lugar
+  const page = await open(ctx, { state: richState({ sync: true }) });
+  await snap(page, '26-hoy-viaje', { theme });
+  await tab(page, 'horas');
+  await page.evaluate(() => document.getElementById('hours-supplements')?.scrollIntoView({ block: 'start' }));
+  await snap(page, '26-horas-suplementos-saldos', { theme });
+  await snap(page, '26-horas-completo', { theme, full: true });
+  await tab(page, 'ajustes');
+  await page.click('[data-testid="payroll"] > summary');
+  await page.evaluate(() => document.getElementById('set-payroll')?.scrollIntoView({ block: 'start' }));
+  await snap(page, '26-ajustes-nomina', { theme });
+  await page.evaluate(() => document.getElementById('set-reminders')?.scrollIntoView({ block: 'start' }));
+  await snap(page, '26-ajustes-avisos-nombre', { theme });
+  await page.click('[data-testid="places"] > summary');
+  await page.click('.code-row[data-code="S51"]');
+  await sheet(page);
+  await snap(page, '26-lugar-viaje-mapas', { theme });
+  await closeSheet(page);
+  await tab(page, 'calendario');
+  await page.click('.day-row[data-key="2026-10-20"]');
+  await sheet(page);
+  await snap(page, '26-editar-dia-con-K', { theme });
+  return page;
+});
+
+scenario('familia', async (ctx, theme) => {
+  const gh = await familyGitHub();
+  const st = core.updateSettings(demoState(), { name: 'Mauricio', sync: { ...SYNC, deviceId: 'iphone1' } });
+  const page = await open(ctx, { state: st, gh });
+  await page.waitForFunction(() => JSON.parse(localStorage.getItem('turnos-mauricio:v1')).settings.sync.lastPullAt, null, { timeout: 10000 });
+  await tab(page, 'ajustes');
+  await page.waitForSelector('#set-family', { timeout: 10000 });
+  await page.evaluate(() => document.getElementById('set-family').scrollIntoView({ block: 'start' }));
+  await snap(page, '27-calendarios-familia', { theme });
+  // iPhone: «Ver sus turnos» primero avisa «deja ACTIVADO Eliminar alertas»
+  await page.click('#set-family [data-dir="ana"] [data-testid="family-subscribe"]');
+  await page.waitForSelector('.dialog-wrap.open');
+  await page.waitForTimeout(250);
+  await snap(page, '27-familia-ios-solo-mirar', { theme });
+  await page.click('.dialog-wrap.open .btn-secondary');
+  await page.waitForSelector('.dialog-wrap', { state: 'detached' });
+  await page.click('[data-testid="advanced"] > summary');
+  await page.click('[data-testid="make-person-link"]');
+  await sheet(page);
+  await snap(page, '27-enlace-otra-persona', { theme });
+  await page.fill('[data-testid="person-name"]', 'Lucía');
+  await page.click('[data-testid="person-create"]');
+  await page.waitForSelector('[data-testid="person-result"]:not([hidden])');
+  await snap(page, '27-enlace-otra-persona-listo', { theme });
+  return page;
+});
+
+scenario('android', async (_ctx, theme) => {
+  // La hermana: Android (Chrome), conectada a la carpeta «ana»
+  const ctx = await iphoneContext(browser, { theme, scale, device: 'android', width: 360, height: 740 });
+  const gh = await familyGitHub();
+  let st = core.updateSettings(demoState(), { name: 'Ana', planName: 'Ducuara Ana', sync: { ...SYNC, key: OTHER_KEY, dir: 'ana', deviceId: 'android-ana' } });
+  st = core.upsertCode(st, { ...core.getCode(st, 'S51'), place: 'Karl-Marx-Straße 101, Berlín', travelMin: 25 });
+  const page = await open(ctx, { state: st, gh, standalone: false });
+  await page.waitForFunction(() => JSON.parse(localStorage.getItem('turnos-mauricio:v1')).settings.sync.lastPullAt, null, { timeout: 10000 });
+  await snap(page, '28-android-hoy', { theme });
+  await tab(page, 'ajustes');
+  await snap(page, '28-android-ajustes', { theme });
+  await page.click('details[data-fkey="guide-icsx5"] > summary');
+  await snap(page, '28-android-ajustes-completo', { theme, full: true });
+  await page.waitForSelector('#set-family');
+  await page.click('#set-family [data-testid="family-subscribe"]');
+  await sheet(page);
+  await snap(page, '28-android-ver-sus-turnos', { theme });
+  await ctx.close();
+  // Primer uso en Android (Chrome, con el botón «Instalar la app» de Chrome)
+  const ctx2 = await iphoneContext(browser, { theme, scale, device: 'android', width: 360, height: 740 });
+  const p2 = await open(ctx2, { state: null, standalone: false });
+  await p2.evaluate(() => { const e = new Event('beforeinstallprompt'); e.prompt = async () => {}; e.userChoice = Promise.resolve({ outcome: 'dismissed' }); window.dispatchEvent(e); });
+  await p2.waitForSelector('.onboarding.open');
+  await p2.click('.ob-bottom .btn-primary');
+  await p2.fill('[data-testid="ob-name"]', 'Ana');
+  await snap(p2, '28-android-bienvenida-nombre', { theme });
+  await p2.click('.ob-bottom .btn-primary');
+  await snap(p2, '28-android-bienvenida-instalar', { theme });
+  // Enlace abierto en Chrome → último paso con ICSx⁵
+  const ctx3 = await iphoneContext(browser, { theme, scale, device: 'android', width: 360, height: 740 });
+  const hash = core.buildPersonLink(APP, { owner: OWNER, repo: REPO, branch: '', token: TOKEN }, { name: 'Ana', existingDirs: [] }).link.slice(APP.length);
+  const p3 = await open(ctx3, { state: core.updateSettings(core.createDefaultState(), { onboardingDone: true }), hash, standalone: false });
+  await p3.waitForSelector('.dialog-wrap.open');
+  await snap(p3, '28-android-enlace-confirmar', { theme });
+  await p3.click('.dialog-wrap.open .btn-primary');
+  await p3.waitForSelector('[data-testid="subscribe-step"]', { timeout: 15000 });
+  await p3.waitForSelector('.sheet-subscribe [data-testid="webcal"][aria-disabled="false"]', { timeout: 15000 });
+  await snap(p3, '28-android-ultimo-paso', { theme });
+  for (const p of [p2, p3]) for (const e of p.__errors) problems.push(`[android/${theme}] ${e}`);
+  await ctx2.close();
+  await ctx3.close();
+  return page;
+});
+
+scenario('viaje-dia', async (ctx, theme) => {
+  // Editor del día con viaje y mapa; «Restablecer» un lugar con dirección
+  let st = demoState();
+  st = core.upsertCode(st, { ...core.getCode(st, 'S51'), place: 'Karl-Marx-Straße 101, Berlín', travelMin: 25 });
+  const page = await open(ctx, { state: st });
+  await snap(page, '29-hoy-viaje', { theme });
+  await tab(page, 'calendario');
+  await page.click('.day-row[data-key="2026-10-13"]');
+  await sheet(page);
+  await snap(page, '29-editar-dia-viaje-mapas', { theme });
+  await closeSheet(page);
+  await page.click('.day-row[data-key="2026-10-03"]');
+  await sheet(page);
+  await snap(page, '29-editar-dia-libre', { theme });
+  await closeSheet(page);
+  await tab(page, 'ajustes');
+  await page.click('[data-testid="places"] > summary');
+  await page.click('.code-row[data-code="S51"]');
+  await sheet(page);
+  await page.click('.sheet-code .btn-danger-plain');
+  await page.waitForSelector('.dialog-wrap.open');
+  await page.waitForTimeout(250);
+  await snap(page, '29-restablecer-lugar', { theme });
+  await page.click('.dialog-wrap.open .btn-secondary');
+  return page;
+});
+
 scenario('horas', async (ctx, theme) => {
   const page = await open(ctx, { state: demoState() });
   await tab(page, 'horas');
@@ -497,6 +647,64 @@ scenario('importar', async (ctx, theme) => {
   return page;
 });
 
+scenario('v142', async (_ctx, theme) => {
+  // Teléfono (Android) con el calendario de Mauricio que abre el enlace de Ana: pregunta antes de cambiar
+  const ctx = await iphoneContext(browser, { theme, scale, device: 'android', width: 360, height: 740 });
+  const gh = await familyGitHub();
+  const st = core.updateSettings(demoState(), { name: 'Mauricio', sync: { ...SYNC, deviceId: 'android1' } });
+  const page = await open(ctx, { state: st, gh, standalone: false });
+  await page.waitForFunction(() => JSON.parse(localStorage.getItem('turnos-mauricio:v1')).settings.sync.lastPullAt, null, { timeout: 10000 });
+  const anaHash = core.buildSetupLink(APP, { owner: OWNER, repo: REPO, branch: '', token: TOKEN, key: OTHER_KEY, dir: 'ana', name: 'Ana' }).slice(APP.length);
+  await page.evaluate((hsh) => { location.hash = hsh; }, anaHash);
+  await page.waitForSelector('.dialog-wrap.open');
+  await page.click('.dialog-wrap.open .btn-primary');
+  await page.waitForSelector('.dialog-wrap.open .dialog-title:text("¿Cambiar al calendario de Ana?")', { timeout: 15000 });
+  await snap(page, '30-cambiar-calendario', { theme });
+  await page.click('.dialog-wrap.open .btn-primary');
+  await page.waitForSelector('.dialog-wrap.open .dialog-title:text("¿Usar este teléfono para actualizar el calendario?")', { timeout: 15000 });
+  await page.click('.dialog-wrap.open .btn-secondary');
+  await page.waitForSelector('[data-testid="subscribe-step"]', { timeout: 15000 });
+  await page.waitForSelector('.sheet-subscribe [data-testid="webcal"][aria-disabled="false"]', { timeout: 15000 });
+  await snap(page, '30-cambiado-ultimo-paso', { theme });
+  for (const e of page.__errors) problems.push(`[v142/${theme}] ${e}`);
+  await ctx.close();
+  // Ordenador de quien ayuda: guardar sin internet
+  const ctx2 = await iphoneContext(browser, { theme, scale: 1, device: 'desktop', width: 1280, height: 800 });
+  const gh2 = fakeGitHub({ empty: true });
+  const p2 = await open(ctx2, { state: core.updateSettings(core.createDefaultState(), { onboardingDone: true }), gh: gh2, standalone: false });
+  await p2.route('https://api.github.com/**', (r) => r.abort('internetdisconnected'));
+  await tab(p2, 'ajustes');
+  await p2.click('[data-testid="advanced"] > summary');
+  await p2.fill('[data-fkey="gh-owner"]', OWNER);
+  await p2.fill('[data-fkey="gh-repo"]', REPO);
+  await p2.fill('[data-fkey="gh-token"]', TOKEN);
+  await p2.click('[data-fkey="btn-connect"]');
+  await p2.waitForSelector('.dialog-wrap.open .dialog-title:text("Guardado, sin conexión")', { timeout: 15000 });
+  await snap(p2, '30-quien-ayuda-sin-conexion', { theme });
+  await ctx2.close();
+  // «Crear enlace» no disponible (la clave ya no vale)
+  const ctx3 = await iphoneContext(browser, { theme, scale });
+  const gh3 = fakeGitHub();
+  await seedRemote(gh3, demoState(), { deviceId: 'iphone1', key: OTHER_KEY });
+  const p3 = await open(ctx3, { state: core.updateSettings(demoState(), { name: 'Mauricio', sync: { ...SYNC, deviceId: 'pc1', lastPullAt: '2026-10-12T08:00:00.000Z' } }), gh: gh3 });
+  await p3.waitForFunction(() => JSON.parse(localStorage.getItem('turnos-mauricio:v1')).settings.sync.lastErrorCode === 'DECRYPT', null, { timeout: 10000 });
+  await tab(p3, 'ajustes');
+  await p3.click('[data-testid="advanced"] > summary');
+  await p3.locator('[data-testid="make-link-blocked"]').scrollIntoViewIfNeeded();
+  await p3.evaluate(() => window.scrollBy(0, 120));
+  await snap(p3, '30-crear-enlace-no-disponible', { theme });
+  await ctx3.close();
+  // Revisión: hoja de otra persona (aviso naranja)
+  const p4 = await open(_ctx, { state: demoState() });
+  await p4.evaluate((r) => window.__turnosTest.injectScanResult(r), {
+    layout: 'pc-table', month: 11, year: 2026, days: [{ day: 2, codes: ['F1'], confidence: 0.4 }, { day: 3, codes: ['S1'], confidence: 0.4 }, { day: 4, codes: ['-'], confidence: 0.4 }],
+    warnings: ['Esta hoja parece de otra persona: no veo «Mauricio» en el nombre. Revisa antes de guardar.'],
+  });
+  await p4.waitForSelector('.review-list');
+  await snap(p4, '30-revision-otra-hoja', { theme });
+  return p4;
+});
+
 scenario('avisos-fijos', async (ctx, theme) => {
   const st = demoState();
   st.schema = 99;
@@ -514,7 +722,7 @@ scenario('avisos-fijos', async (ctx, theme) => {
 
 for (const theme of themes) {
   for (const sc of scenarios) {
-    if (only && !sc.name.includes(only)) continue;
+    if (only && (only === 'responsive' || !sc.name.includes(only))) continue;
     const ctx = await iphoneContext(browser, { theme, scale });
     try {
       const page = await sc.fn(ctx, theme);
@@ -526,35 +734,94 @@ for (const theme of themes) {
   }
 }
 
-// Desbordamientos a 360 px (y 390) en las vistas principales
-if (!only || only === 'overflow') {
-  for (const width of [360, 390]) {
-    const ctx = await iphoneContext(browser, { width, height: 740, scale: width === 360 ? 2 : 1 });
-    const page = await open(ctx, { state: demoState({ sync: true, ntfy: true }), standalone: false });
-    for (const t of ['hoy', 'calendario', 'escanear', 'horas', 'ajustes']) {
-      await tab(page, t);
+// Tamaños de SPEC §14: pantallas clave, desbordamientos y ancho de la columna central
+const SIZES = [
+  { id: 'a360', width: 360, height: 740, device: 'android', themes: ['light', 'dark'], scale: 2 },
+  { id: 'i390', width: 390, height: 844, device: 'iphone', themes: ['light', 'dark'], scale: 2 },
+  { id: 'i430', width: 430, height: 932, device: 'iphone', themes: ['light', 'dark'], scale: 2 },
+  { id: 't820', width: 820, height: 1180, device: 'ipad', themes: ['light'], scale: 1 },
+  { id: 't1180', width: 1180, height: 820, device: 'ipad', themes: ['light'], scale: 1 },
+  { id: 'd1280', width: 1280, height: 800, device: 'desktop', themes: ['light', 'dark'], scale: 1 },
+];
+if (!only || only === 'responsive' || only === 'overflow') {
+  for (const size of SIZES) {
+    for (const theme of themes.filter((t) => size.themes.includes(t))) {
+      const ctx = await iphoneContext(browser, { theme, width: size.width, height: size.height, scale: size.scale, device: size.device });
+      const page = await open(ctx, { state: richState({ sync: true, ntfy: true }), standalone: size.device !== 'android' });
+      const name = (n) => `r-${size.id}-${n}`;
+      const check = async (where) => { for (const o of await findOverflow(page)) problems.push(`[${size.id} ${where}] ${o}`); };
+      for (const t of ['hoy', 'calendario', 'escanear', 'horas', 'ajustes']) {
+        await tab(page, t);
+        await page.waitForTimeout(200);
+        if (t === 'ajustes') {
+          await page.click('#set-advanced > summary');
+          await page.click('[data-testid="payroll"] > summary');
+          await page.waitForTimeout(150);
+        }
+        await check(t);
+        await snap(page, name(t), { theme });
+        if (t !== 'escanear') await snap(page, name(`${t}-completo`), { theme, full: true });
+        await page.evaluate(() => window.scrollTo(0, 0));
+      }
+      // Columna central y barra de pestañas: centradas y sin estirarse en pantallas anchas
+      const layout = await page.evaluate(() => {
+        const r = (sel) => document.querySelector(sel)?.getBoundingClientRect();
+        const v = r('#views'), t = r('.tabbar');
+        return { vw: innerWidth, views: [Math.round(v.left), Math.round(v.right)], tabbar: [Math.round(t.left), Math.round(t.right)] };
+      });
+      if (size.width >= 700) {
+        const w = layout.views[1] - layout.views[0];
+        if (w > 740) problems.push(`[${size.id}] la columna mide ${w} px (máx. ~720)`);
+        if (Math.abs(layout.views[0] - (layout.vw - layout.views[1])) > 2) problems.push(`[${size.id}] la columna no está centrada ${JSON.stringify(layout)}`);
+        if (Math.abs(layout.tabbar[0] - (layout.vw - layout.tabbar[1])) > 2 || layout.tabbar[1] - layout.tabbar[0] > 600) problems.push(`[${size.id}] la barra de pestañas no está centrada ${JSON.stringify(layout)}`);
+      }
+      // Septiembre: el mes más largo y la semana entre dos meses («31 ago – 6 sept»)
+      await tab(page, 'calendario');
+      await page.click('[aria-label="Mes anterior"]');
+      await page.waitForTimeout(150);
+      await check('calendario-septiembre');
+      await snap(page, name('calendario-septiembre'), { theme });
+      await page.click('[aria-label="Mes siguiente"]');
+      // Hoja (editar día) y diálogo
+      await tab(page, 'calendario');
+      await page.click('.day-row[data-key="2026-10-26"]');
+      await page.waitForSelector('.sheet-wrap.open');
+      await page.waitForTimeout(420);
+      await check('editar-dia');
+      await snap(page, name('editar-dia'), { theme });
+      const sh = await page.evaluate(() => { const b = document.querySelector('.sheet').getBoundingClientRect(); return { l: b.left, r: b.right, vw: innerWidth }; });
+      if (size.width >= 700 && (sh.r - sh.l > 640 || Math.abs(sh.l - (sh.vw - sh.r)) > 2)) problems.push(`[${size.id}] la hoja no está centrada ${JSON.stringify(sh)}`);
+      await page.click('.sheet .tile[data-code="S1"]');
+      await page.keyboard.press('Escape');
+      await page.waitForSelector('.dialog-wrap.open');
+      await page.waitForTimeout(250);
+      await snap(page, name('dialogo'), { theme });
+      await page.keyboard.press('Escape');
       await page.waitForTimeout(200);
-      if (t === 'ajustes') { await page.click('#set-advanced > summary'); await page.waitForTimeout(150); }
-      const of = await findOverflow(page);
-      for (const o of of) problems.push(`[${width}px ${t}] ${o}`);
-      if (width === 360) await page.screenshot({ path: path.join(OUT, `w360-${t}.png`), fullPage: true });
+      await page.keyboard.press('Escape');
+      await page.waitForSelector('.dialog-wrap.open');
+      await page.click('.dialog-wrap.open .btn-danger');
+      await page.waitForSelector('.sheet-wrap', { state: 'detached' });
+      // Revisión de un escaneo
+      await page.evaluate((r) => window.__turnosTest.injectScanResult(r), HARD_RESULT);
+      await page.waitForSelector('.review-list');
+      await page.selectOption('.review-month select >> nth=0', '11');
+      await page.waitForTimeout(400);
+      await check('revision');
+      await snap(page, name('revision'), { theme });
+      for (const e of page.__errors) problems.push(`[${size.id}/${theme}] ${e}`);
+      await ctx.close();
+      // Bienvenida (paso del nombre)
+      const ctx2 = await iphoneContext(browser, { theme, width: size.width, height: size.height, scale: size.scale, device: size.device });
+      const p2 = await open(ctx2, { state: null, standalone: true });
+      await p2.waitForSelector('.onboarding.open');
+      await p2.click('.ob-bottom .btn-primary');
+      await p2.waitForTimeout(300);
+      for (const o of await findOverflow(p2)) problems.push(`[${size.id} bienvenida] ${o}`);
+      await snap(p2, name('bienvenida-nombre'), { theme });
+      for (const e of p2.__errors) problems.push(`[${size.id}/${theme} bienvenida] ${e}`);
+      await ctx2.close();
     }
-    await tab(page, 'calendario');
-    await page.click('.day-row[data-key="2026-10-26"]');
-    await page.waitForSelector('.sheet-wrap.open');
-    await page.waitForTimeout(400);
-    for (const o of await findOverflow(page)) problems.push(`[${width}px editar-dia] ${o}`);
-    if (width === 360) await page.screenshot({ path: path.join(OUT, 'w360-editar-dia.png') });
-    await page.keyboard.press('Escape');
-    await page.waitForSelector('.sheet-wrap', { state: 'detached' });
-    await page.evaluate((r) => window.__turnosTest.injectScanResult(r), HARD_RESULT);
-    await page.waitForSelector('.review-list');
-    await page.selectOption('.review-month select >> nth=0', '11');
-    await page.waitForTimeout(500);
-    for (const o of await findOverflow(page)) problems.push(`[${width}px revision] ${o}`);
-    if (width === 360) await page.screenshot({ path: path.join(OUT, 'w360-revision.png'), fullPage: true });
-    for (const e of page.__errors) problems.push(`[${width}px] ${e}`);
-    await ctx.close();
   }
 }
 

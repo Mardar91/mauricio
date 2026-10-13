@@ -4,6 +4,7 @@ import { exportBackup, toKey } from '../core/index.js';
 import { h, isIOS, isStandalone, shareOrDownload } from './dom.js';
 import { icon } from './icons.js';
 import { openInstallSheet } from './install.js';
+import { deviceWord } from './platform.js';
 
 export const inSafariTab = () => isIOS() && !isStandalone();
 
@@ -19,7 +20,7 @@ function banner(cls, ic, title, text, action, testid) {
 export async function exportNow(ctx) {
   try {
     const json = exportBackup(ctx.store.get(), { now: ctx.now() });
-    const res = await shareOrDownload(`turnos-mauricio-${toKey(ctx.now())}.json`, json, 'application/json');
+    const res = await shareOrDownload(`turnos-${toKey(ctx.now())}.json`, json, 'application/json');
     if (res === 'downloaded') ctx.toast('Copia descargada', { type: 'ok' });
   } catch (e) {
     ctx.toast(e.message || 'No se pudo exportar la copia.', { type: 'error' });
@@ -28,7 +29,7 @@ export async function exportNow(ctx) {
 
 // No se pudo guardar: aviso con «Exportar copia» a mano (el aviso rojo puede quedar fuera de la vista)
 export function saveFailedToast(ctx) {
-  ctx.toast(`No se pudo guardar en este ${isIOS() ? 'iPhone' : 'dispositivo'}. Exporta una copia y pide ayuda.`, {
+  ctx.toast(`No se pudo guardar en este ${deviceWord()}. Exporta una copia y pide ayuda.`, {
     type: 'error', duration: 10000, action: { label: 'Exportar copia', run: () => exportNow(ctx) },
   });
 }
@@ -47,7 +48,7 @@ export function savedToast(ctx, text, opts = {}) {
 export function banners(ctx, state, where) {
   const out = [];
   if (ctx.saveError?.()) {
-    const dev = isIOS() ? 'iPhone' : 'dispositivo';
+    const dev = deviceWord();
     out.push(banner('banner-alert', 'warning', `No se pudo guardar en este ${dev}`,
       'Tus últimos cambios se pueden perder al cerrar la app. Exporta una copia y pide ayuda.',
       { label: 'Exportar copia', run: () => exportNow(ctx) }, 'banner-save'));

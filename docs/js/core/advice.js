@@ -259,13 +259,17 @@ function freeDaysRule(state, today, out) {
   }
 }
 
-function remindersRule(state, out) {
+// «Calendario del iPhone» en iOS; «calendario del teléfono» en los demás (SPEC §12)
+const phoneCal = (platform) => (platform === 'ios' ? 'Calendario del iPhone' : 'calendario del teléfono');
+const phoneWord = (platform) => (platform === 'ios' ? 'el iPhone' : 'el teléfono');
+
+function remindersRule(state, out, platform) {
   const s = state?.settings || {};
   if (s.sync?.enabled || s.ntfy?.enabled) return;
   out.push({
     id: 'reminders-off', prio: 2, level: 'info', icon: '🔔',
     title: 'Activa los recordatorios',
-    text: 'Para que el iPhone te avise la noche anterior y un rato antes de cada turno, pide el enlace de configuración a quien te ayuda con la app.',
+    text: `Para que ${phoneWord(platform)} te avise la noche anterior y un rato antes de cada turno, pide el enlace de configuración a quien te ayuda con la app.`,
     action: { tab: 'ajustes', section: 'calendar', label: 'Ver cómo' },
   });
 }
@@ -274,7 +278,7 @@ const TRANSIENT = ['NETWORK', 'SERVER', 'RATE_LIMIT', 'CONFLICT', 'RETRY'];
 const DAY_MS = 24 * 3600 * 1000;
 
 // El calendario no se actualiza (token caducado, clave distinta…): avisar en Hoy
-function syncRule(state, now, out) {
+function syncRule(state, now, out, platform) {
   const s = state?.settings?.sync || {};
   if (!s.enabled || !s.lastError) return;
   const action = { tab: 'ajustes', section: 'calendar', label: 'Ver en Ajustes' };
@@ -298,18 +302,18 @@ function syncRule(state, now, out) {
     id: 'sync-error', prio: 0, level: transient ? 'warn' : 'alert', icon: '⚠️',
     title: 'Tu calendario no se está actualizando',
     text: transient
-      ? 'Hace tiempo que tus turnos no llegan al Calendario del iPhone. Abre la app con internet; si sigue igual, pide ayuda a quien te configuró la app.'
-      : 'Los turnos nuevos o cambiados no llegan al Calendario del iPhone y no tendrán aviso. Pide ayuda a quien te configuró la app.',
+      ? `Hace tiempo que tus turnos no llegan al ${phoneCal(platform)}. Abre la app con internet; si sigue igual, pide ayuda a quien te configuró la app.`
+      : `Los turnos nuevos o cambiados no llegan al ${phoneCal(platform)} y no tendrán aviso. Pide ayuda a quien te configuró la app.`,
     action,
   });
 }
 
 // Este dispositivo solo lee (el calendario lo publica otro) y tiene cambios propios (sin publicar en
-// la última lectura, o hechos después): esos cambios no llegarán al Calendario del iPhone.
-function readOnlyRule(state, out) {
+// la última lectura, o hechos después): esos cambios no llegarán al calendario del teléfono.
+function readOnlyRule(state, out, platform) {
   const s = state?.settings?.sync || {};
   if (!s.enabled || !s.publisher || !s.deviceId || s.publisher === s.deviceId || s.lastError) return;
-  if (s.unpublished > 0) return pushReadOnly(out);
+  if (s.unpublished > 0) return pushReadOnly(out, platform);
   const since = tsOf(s.lastPullAt);
   const newer = (v) => tsOf(v) > since;
   const st = state.settings || {};
@@ -318,14 +322,14 @@ function readOnlyRule(state, out) {
     || Object.values(state.codes || {}).some((c) => newer(c?.updatedAt))
     || Object.values(state.codeTombstones || {}).some(newer)
     || newer(st.remindersUpdatedAt) || newer(st.placesUpdatedAt);
-  if (edited) pushReadOnly(out);
+  if (edited) pushReadOnly(out, platform);
 }
 
-function pushReadOnly(out) {
+function pushReadOnly(out, platform) {
   out.push({
     id: 'read-only', prio: 1, level: 'warn', icon: '📵',
     title: 'Estos cambios no llegan al calendario',
-    text: 'Cambiaste algo en este dispositivo, pero el Calendario del iPhone lo actualiza otro dispositivo (por ejemplo, el de quien te ayuda). Haz los cambios allí, o en Ajustes elige «Usar este dispositivo».',
+    text: `Cambiaste algo en este dispositivo, pero el ${phoneCal(platform)} lo actualiza otro dispositivo (por ejemplo, el de quien te ayuda). Haz los cambios allí, o en Ajustes elige «Usar este dispositivo».`,
     action: { tab: 'ajustes', section: 'calendar', label: 'Ver en Ajustes' },
   });
 }
@@ -340,7 +344,9 @@ function newerSchemaRule(state, out) {
   });
 }
 
-export function getAdvice(state, now = new Date()) {
+// options: { platform: 'ios' | 'android' | 'desktop' } (solo cambia «Calendario del iPhone» por
+// «calendario del teléfono» fuera de iOS; sin platform, la forma neutra)
+export function getAdvice(state, now = new Date(), { platform } = {}) {
   const today = toKey(now);
   const out = [];
   restRules(state, now, today, out);
@@ -352,9 +358,9 @@ export function getAdvice(state, now = new Date()) {
   missingDataRule(state, today, out);
   gapsRule(state, today, out);
   freeDaysRule(state, today, out);
-  remindersRule(state, out);
-  syncRule(state, now, out);
-  readOnlyRule(state, out);
+  remindersRule(state, out, platform);
+  syncRule(state, now, out, platform);
+  readOnlyRule(state, out, platform);
   newerSchemaRule(state, out);
   return out
     .sort((a, b) => LEVEL[b.level] - LEVEL[a.level] || a.prio - b.prio || String(a.key ?? '').localeCompare(String(b.key ?? '')))

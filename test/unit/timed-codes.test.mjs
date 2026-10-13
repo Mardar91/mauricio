@@ -109,8 +109,10 @@ test('C8: LAST-MODIFIED y SEQUENCE suben si cambia el horario del código o los 
   const s2 = updateSettings(s1, { reminders: { minutesBefore: 90 } }, { now: new Date(T0.getTime() + 2 * DAY) });
   assert.ok(seq(s2) > seq(s1));
   assert.equal(prop(ev(s2), 'LAST-MODIFIED'), 'LAST-MODIFIED:20261003T080000Z');
-  // Cambiar otra cosa (el nombre) no toca el calendario
-  assert.equal(buildICS(updateSettings(s2, { name: 'X' }), { now: NOW }), buildICS(s2, { now: NOW }));
+  // Cambiar otra cosa (las horas de contrato) no toca el calendario; el nombre solo cambia X-WR-CALNAME
+  assert.equal(buildICS(updateSettings(s2, { weeklyHours: 38 }), { now: NOW }), buildICS(s2, { now: NOW }));
+  assert.equal(buildICS(updateSettings(s2, { name: 'Ana' }), { now: NOW }),
+    buildICS(s2, { now: NOW }).replace('X-WR-CALNAME:Mis turnos', 'X-WR-CALNAME:Turnos de Ana'));
 });
 
 test('ICS: opción places=false quita lugar de SUMMARY, LOCATION y DESCRIPTION', () => {

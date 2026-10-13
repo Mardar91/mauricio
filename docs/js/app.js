@@ -16,9 +16,13 @@ import { openCodeEditor } from './ui/codeEditor.js';
 import { showOnboarding } from './ui/onboarding.js';
 import { createBackground } from './ui/background.js';
 import { attentionCount } from './ui/attention.js';
+import { initInstallPrompt, onInstallChange } from './ui/install.js';
+import { platform } from './ui/platform.js';
+import { inSafariTab } from './ui/banners.js';
+import { createOcrPrefetch } from './ui/prefetch.js';
 
 // Debe coincidir con VERSION en sw.js
-export const APP_VERSION = '1.3.0';
+export const APP_VERSION = '1.4.3';
 
 const TABS = [
   { id: 'hoy', label: 'Hoy', icon: 'today' },
@@ -47,6 +51,7 @@ const ctx = {
   store,
   syncQueue,
   version: APP_VERSION,
+  platform: platform(), // 'ios' | 'android' | 'desktop'
   now: () => new Date(),
   today: () => toKey(new Date()),
   toast,
@@ -110,6 +115,7 @@ function go(tab, opts) {
     if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
   }
   document.body.dataset.tab = tab;
+  document.documentElement.dataset.tab = tab; // scroll-padding del calendario (barra del mes fija)
   updateChrome();
   const handled = v.onShow?.(opts, prev === tab);
   if (!handled) window.scrollTo(0, prev === tab ? 0 : (scrollPos[tab] || 0));
@@ -255,6 +261,7 @@ function exposeTestHooks() {
     version: APP_VERSION,
     injectScanResult: (result) => { go('escanear'); return views.escanear.showReview(result, { source: 'test' }); },
     background: () => ctx.background,
+    prefetch: () => ctx.prefetch,
   };
 }
 
@@ -265,7 +272,11 @@ function onReturn() {
   if (!sheetsOpen()) renderKeepingFocus(views[current], store.get());
 }
 
+// Botón «Instalar la app» de Chrome (Android): el aviso puede llegar en cualquier momento
+initInstallPrompt(ctx);
+
 function start() {
+  document.documentElement.dataset.platform = ctx.platform;
   // Identidad de la sincronización antes de la primera petición (dispositivos ya conectados)
   const s0 = store.get().settings.sync;
   if (s0.enabled && !s0.deviceId) store.set((s) => ensureSyncIdentity(s, { key: false }));
@@ -275,6 +286,7 @@ function start() {
   updateTabDot(store.get());
   ctx.background = createBackground(ctx);
   ctx.background.onBusy(() => { if (current === 'ajustes' && !sheetsOpen()) renderKeepingFocus(views[current], store.get()); });
+  onInstallChange(() => { views.ajustes.dirty = true; if (current === 'ajustes' && !sheetsOpen()) renderKeepingFocus(views[current], store.get()); });
   exposeTestHooks();
   const state = store.get();
 
@@ -312,6 +324,13 @@ function start() {
     showOnboarding(ctx);
   }
   ctx.background.start();
+
+  // Lector de fotos sin conexión: descarga en segundo plano lo que usará el primer escaneo. No en
+  // Safari sin instalar (su almacenamiento no es el de la app). __turnosPrefetch: solo para tests
+  // (false = no; { delay } = antes).
+  ctx.prefetch = createOcrPrefetch({ isBusy: () => Boolean(views.escanear && views.escanear.mode !== 'home') });
+  const pf = window.__turnosPrefetch;
+  if (pf !== false && !inSafariTab()) ctx.prefetch.start(pf && typeof pf.delay === 'number' ? { delay: pf.delay } : undefined);
 }
 
 window.addEventListener('hashchange', () => { if (/setup=/.test(location.hash)) handleSetupLink(); });

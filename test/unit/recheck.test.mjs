@@ -23,7 +23,8 @@ async function takeover(s, gh, now) {
   return { res, state: applySyncResult(s, res, { now }) };
 }
 const doc = (gh) => JSON.parse(gh.text('backup.json'));
-const triggers = (ics) => (ics.match(/TRIGGER:[^\r]+/g) || []);
+// Alarmas de los turnos (sin el aviso «Sube el plan»)
+const triggers = (ics) => ics.split('BEGIN:VEVENT').filter((b) => !b.includes('UID:plan-')).flatMap((b) => b.match(/TRIGGER:[^\r]+/g) || []);
 const event = (ics, uid) => (ics.split('BEGIN:VEVENT').find((b) => b.includes(`UID:${uid}@`)) || '');
 const seqOf = (ics, uid) => Number(/SEQUENCE:(\d+)/.exec(event(ics, uid))?.[1]);
 
@@ -80,7 +81,7 @@ test('publicar lugares (privacidad): el cambio más reciente gana también en el
 });
 
 test('mergeStates: avisos y lugares por fecha de cambio; calendarUpdatedAt nunca retrocede', () => {
-  const local = updateSettings(createDefaultState(), { reminders: { minutesBefore: 30 } }, { now: at(2 * DAY) });
+  const local = updateSettings(createDefaultState(), { name: 'Mauricio', reminders: { minutesBefore: 30 } }, { now: at(2 * DAY) });
   const older = updateSettings(createDefaultState(), { reminders: { minutesBefore: 90 }, sync: { publishPlaces: true } }, { now: at(DAY) });
   const m1 = mergeStates(local, older, { now: T0 }).state;
   assert.equal(m1.settings.reminders.minutesBefore, 30); // lo local es más nuevo
@@ -324,7 +325,7 @@ test('versión más nueva: se conservan tipos desconocidos, la copia intacta se 
 // ---------- Ajustes: null borra los campos que por defecto son null ----------
 
 test('updateSettings/applySyncResult: un error se borra al ir bien (null borra campos anulables)', async () => {
-  let s = updateSettings(createDefaultState(), { sync: { lastError: 'x', lastErrorCode: 'NETWORK', lastPushAt: T0.toISOString(), publisher: 'a' } });
+  let s = updateSettings(createDefaultState(), { name: 'Mauricio', sync: { lastError: 'x', lastErrorCode: 'NETWORK', lastPushAt: T0.toISOString(), publisher: 'a' } });
   s = updateSettings(s, { sync: { lastError: null, lastErrorCode: null, lastPushAt: null, publisher: null, token: null }, name: null });
   assert.equal(s.settings.sync.lastError, null);
   assert.equal(s.settings.sync.lastErrorCode, null);
@@ -368,7 +369,7 @@ test('importar no hace retroceder un borrado: se queda la tombstone más recient
   const r2 = importBackup({ ...deleted, tombstones: { '2026-10-12': early.toISOString() } }, exportBackup({ ...c, tombstones: { '2026-10-12': late.toISOString() } }), { now: new Date('2026-10-01T09:00:00.000Z') });
   assert.equal(r2.tombstones['2026-10-12'], late.toISOString());
   // Lo mismo con los códigos borrados
-  const withCode = { ...deleted, codeTombstones: { K: late.toISOString() } };
-  const r3 = importBackup(withCode, exportBackup({ ...c, codeTombstones: { K: early.toISOString() } }), { now: new Date('2026-10-01T09:00:00.000Z') });
-  assert.equal(r3.codeTombstones.K, late.toISOString());
+  const withCode = { ...deleted, codeTombstones: { KU: late.toISOString() } };
+  const r3 = importBackup(withCode, exportBackup({ ...c, codeTombstones: { KU: early.toISOString() } }), { now: new Date('2026-10-01T09:00:00.000Z') });
+  assert.equal(r3.codeTombstones.KU, late.toISOString());
 });

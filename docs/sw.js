@@ -1,10 +1,11 @@
 // Service worker: la app funciona sin conexión y avisa de nuevas versiones.
 // IMPORTANTE: sube VERSION (y APP_VERSION en js/app.js) en cada cambio publicado,
 // y añade aquí cualquier archivo nuevo de la app (los tests e2e lo comprueban).
-const VERSION = '1.3.0';
+const VERSION = '1.4.3';
 const SHELL = `turnos-shell-${VERSION}`;
 const RUNTIME = `turnos-runtime-${VERSION}`;
-// Tesseract (vendor/): grande y cambia poco, por eso va aparte de VERSION.
+// Tesseract (vendor/): grande y cambia poco, por eso va aparte de VERSION. Se guarda al usarlo y, antes,
+// en segundo plano (js/ui/prefetch.js), para que el primer escaneo funcione sin conexión.
 // Sube VENDOR_VERSION cada vez que cambie algo en docs/vendor/ (la caché vieja se borra al activar).
 const VENDOR_VERSION = 'tesseract-7.0.0-1';
 const VENDOR = `turnos-vendor-${VENDOR_VERSION}`;
@@ -71,10 +72,12 @@ const PRECACHE = [
   'js/recognize/phone-b/recognize.js',
   'js/recognize/phone-b/rows.js',
   'js/ui/attention.js',
+  'js/ui/back.js',
   'js/ui/background.js',
   'js/ui/badge.js',
   'js/ui/banners.js',
   'js/ui/calendar.js',
+  'js/ui/calguide.js',
   'js/ui/codeEditor.js',
   'js/ui/dayEditor.js',
   'js/ui/dom.js',
@@ -82,6 +85,8 @@ const PRECACHE = [
   'js/ui/icons.js',
   'js/ui/install.js',
   'js/ui/onboarding.js',
+  'js/ui/platform.js',
+  'js/ui/prefetch.js',
   'js/ui/scan.js',
   'js/ui/settings.js',
   'js/ui/setup.js',

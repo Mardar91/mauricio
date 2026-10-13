@@ -10,15 +10,15 @@ const enc = new TextEncoder();
 const unfold = (ics) => ics.replace(/\r\n[ \t]/g, '');
 const lines = (ics) => unfold(ics).split('\r\n').filter(Boolean);
 
-// VEVENTs como listas de líneas (desplegadas)
-function events(ics) {
+// VEVENTs como listas de líneas (desplegadas); sin el aviso «Sube el plan» (plan: true → solo ese)
+function events(ics, { plan = false } = {}) {
   const out = [];
   let cur = null;
   for (const l of lines(ics)) {
     if (l === 'BEGIN:VEVENT') cur = [];
     else if (l === 'END:VEVENT') { out.push(cur); cur = null; } else if (cur) cur.push(l);
   }
-  return out;
+  return out.filter((ev) => ev.some((l) => l.startsWith('UID:plan-')) === plan);
 }
 const prop = (ev, name) => ev.find((l) => l.startsWith(name + ':') || l.startsWith(name + ';'));
 const triggers = (ev) => ev.filter((l) => l.startsWith('TRIGGER:')).map((l) => l.slice(8));
@@ -31,7 +31,7 @@ test('estructura: CRLF, cabeceras y VTIMEZONE de Berlín', () => {
   const ls = lines(ics);
   assert.equal(ls[0], 'BEGIN:VCALENDAR');
   assert.equal(ls.at(-1), 'END:VCALENDAR');
-  for (const l of ['VERSION:2.0', 'X-WR-CALNAME:Turnos de Mauricio', 'REFRESH-INTERVAL;VALUE=DURATION:PT1H',
+  for (const l of ['VERSION:2.0', 'PRODID:-//Turnos//ES', 'X-WR-CALNAME:Mis turnos', 'REFRESH-INTERVAL;VALUE=DURATION:PT1H',
     'X-PUBLISHED-TTL:PT1H', 'BEGIN:VTIMEZONE', 'TZID:Europe/Berlin', 'TZOFFSETFROM:+0100', 'TZOFFSETTO:+0200',
     'RRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=-1SU', 'RRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU',
     'DTSTART:19700329T020000', 'DTSTART:19701025T030000']) {
@@ -85,7 +85,9 @@ test('alarmas desactivadas se omiten', () => {
   const noEve = buildICS(updateSettings(s, { reminders: { eveningBefore: false, minutesBefore: 90 } }), { now: NOW });
   assert.deepEqual(triggers(byUid(noEve, '2026-10-12-F1@turnos-mauricio')), ['-PT1H30M']);
   const none = buildICS(updateSettings(s, { reminders: { eveningBefore: false, beforeStart: false } }), { now: NOW });
-  assert.ok(!none.includes('BEGIN:VALARM'));
+  assert.ok(events(none).every((ev) => !ev.includes('BEGIN:VALARM')));
+  const noPlan = buildICS(updateSettings(s, { reminders: { eveningBefore: false, beforeStart: false, planUpload: false } }), { now: NOW });
+  assert.ok(!noPlan.includes('BEGIN:VALARM'));
   const late = buildICS(updateSettings(s, { reminders: { eveningTime: '21:15', beforeStart: false } }), { now: NOW });
   assert.deepEqual(triggers(byUid(late, '2026-10-12-F1@turnos-mauricio')), ['-PT8H45M']);
 });
@@ -117,8 +119,9 @@ test('rango por defecto: desde el día 1 del mes de hace 2 meses; from/to explí
   const s = stateWith({ '2026-07-31': ['F1'], '2026-08-01': ['F1'], '2026-08-20': ['F1'], '2027-03-01': ['S1'] });
   const uids = (ics) => events(ics).map((ev) => prop(ev, 'UID').slice(4, 14));
   assert.deepEqual(uids(buildICS(s, { now: NOW })), ['2026-08-01', '2026-08-20', '2027-03-01']);
-  // Todo octubre da el mismo rango (y el mismo contenido)
-  assert.equal(buildICS(s, { now: new Date(2026, 9, 31, 23, 0) }), buildICS(s, { now: new Date(2026, 9, 1, 0, 30) }));
+  // Todo octubre da el mismo rango (y el mismo contenido, sin el aviso «Sube el plan», que va por días)
+  const quiet = updateSettings(s, { reminders: { planUpload: false } }, { now: NOW });
+  assert.equal(buildICS(quiet, { now: new Date(2026, 9, 31, 23, 0) }), buildICS(quiet, { now: new Date(2026, 9, 1, 0, 30) }));
   assert.deepEqual(uids(buildICS(s, { now: new Date(2026, 10, 1, 9, 0) })), ['2027-03-01']); // desde el 1 sept
   assert.deepEqual(uids(buildICS(s, { from: '2026-01-01', to: '2026-12-31', now: NOW })), ['2026-07-31', '2026-08-01', '2026-08-20']);
 });

@@ -51,12 +51,12 @@ test('tombstones de más de 120 días se podan al guardar', () => {
 });
 
 test('códigos: updatedAt al editar, tombstone al borrar uno propio, los de fábrica se restablecen', () => {
-  let s = upsertCode(createDefaultState(), { code: 'K', kind: 'event', name: 'Curso', start: '08:00', end: '12:00' }, { now: at(DAY) });
-  assert.equal(s.codes.K.updatedAt, iso(DAY));
-  s = deleteCode(s, 'K', { now: at(2 * DAY) });
-  assert.equal(s.codes.K, undefined);
-  assert.deepEqual(s.codeTombstones, { K: iso(2 * DAY) });
-  s = upsertCode(s, { code: 'K', kind: 'event', name: 'Curso' }, { now: at(3 * DAY) });
+  let s = upsertCode(createDefaultState(), { code: 'KU', kind: 'event', name: 'Curso', start: '08:00', end: '12:00' }, { now: at(DAY) });
+  assert.equal(s.codes.KU.updatedAt, iso(DAY));
+  s = deleteCode(s, 'KU', { now: at(2 * DAY) });
+  assert.equal(s.codes.KU, undefined);
+  assert.deepEqual(s.codeTombstones, { KU: iso(2 * DAY) });
+  s = upsertCode(s, { code: 'KU', kind: 'event', name: 'Curso' }, { now: at(3 * DAY) });
   assert.deepEqual(s.codeTombstones, {});
   // De fábrica: vuelve al original, con fecha (para que el cambio llegue a otros dispositivos)
   s = upsertCode(s, { code: 'F1', start: '07:00', end: '15:00' }, { now: at(3 * DAY) });
@@ -128,15 +128,15 @@ test('mergeStates: por día gana lo más reciente; las tombstones cuentan; resul
 
 test('mergeStates: códigos por updatedAt, borrados y ajustes del dispositivo', () => {
   let a = upsertCode(createDefaultState(), { code: 'F1', start: '07:00', end: '15:00' }, { now: at(1) });
-  a = upsertCode(a, { code: 'K', kind: 'event', name: 'Curso' }, { now: at(1) });
+  a = upsertCode(a, { code: 'KU', kind: 'event', name: 'Curso' }, { now: at(1) });
   a = updateSettings(a, { name: 'Local', sync: { token: 'tok', enabled: true } });
   let b = upsertCode(createDefaultState(), { code: 'F1', start: '06:30', end: '15:00' }, { now: at(2) });
-  b = deleteCode(upsertCode(b, { code: 'K', kind: 'event' }, { now: at(0) }), 'K', { now: at(3) });
+  b = deleteCode(upsertCode(b, { code: 'KU', kind: 'event' }, { now: at(0) }), 'KU', { now: at(3) });
   b = updateSettings(b, { name: 'Remoto', reminders: { minutesBefore: 15 } });
   const m = mergeStates(a, b, { now: T0 }).state;
   assert.equal(m.codes.F1.start, '06:30');
-  assert.equal(m.codes.K, undefined);
-  assert.equal(m.codeTombstones.K, iso(3));
+  assert.equal(m.codes.KU, undefined);
+  assert.equal(m.codeTombstones.KU, iso(3));
   assert.equal(m.settings.name, 'Local'); // ajustes del dispositivo
   assert.equal(m.settings.sync.token, 'tok');
   // Dispositivo vacío: adopta los ajustes del usuario (no los del dispositivo)

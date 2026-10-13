@@ -10,6 +10,11 @@ export const OUT = path.join(ROOT, 'test/e2e/out');
 export const STORAGE_KEY = 'turnos-mauricio:v1';
 
 export const IPHONE_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
+// Android (Chrome en un Samsung Galaxy A54) y un ordenador (Chrome en Windows)
+export const ANDROID_UA = 'Mozilla/5.0 (Linux; Android 14; SM-A546B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Mobile Safari/537.36';
+export const DESKTOP_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36';
+// iPad (Safari se presenta como Mac, con pantalla táctil)
+export const IPAD_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15';
 
 // "Ahora" fijo para capturas y tests: martes 13 de octubre de 2026, 10:15 en Berlín
 export const NOW = new Date('2026-10-13T10:15:00+02:00');
@@ -70,20 +75,29 @@ export function demoState({ sync = false, ntfy = false } = {}) {
   return s;
 }
 
-// Contexto tipo iPhone (390×844) en Chromium
-export async function iphoneContext(browser, { theme = 'light', width = 390, height = 844, scale = 3, ios = true, sw = 'block' } = {}) {
-  return browser.newContext({
+// Contexto tipo iPhone (390×844) en Chromium. device: 'iphone' (por defecto) | 'android' | 'ipad' | 'desktop'
+export async function iphoneContext(browser, { theme = 'light', width = 390, height = 844, scale = 3, ios = true, device, sw = 'block' } = {}) {
+  const dev = device || (ios ? 'iphone' : 'other');
+  const desktop = dev === 'desktop';
+  const context = await browser.newContext({
     viewport: { width, height },
-    deviceScaleFactor: scale,
-    isMobile: true,
-    hasTouch: true,
-    userAgent: ios ? IPHONE_UA : undefined,
+    deviceScaleFactor: desktop ? 1 : scale,
+    isMobile: !desktop && dev !== 'ipad',
+    hasTouch: !desktop,
+    userAgent: { iphone: IPHONE_UA, android: ANDROID_UA, desktop: DESKTOP_UA, ipad: IPAD_UA }[dev],
     colorScheme: theme,
     locale: 'es-ES',
     timezoneId: 'Europe/Berlin',
     serviceWorkers: sw,
     acceptDownloads: true,
   });
+  // Un iPad de verdad: Safari se presenta como Mac, pero con pantalla táctil (maxTouchPoints 5)
+  if (dev === 'ipad') {
+    await context.addInitScript(() => {
+      Object.defineProperty(Navigator.prototype, 'maxTouchPoints', { configurable: true, get: () => 5 });
+    });
+  }
+  return context;
 }
 
 // Prepara una página: hora fija, estado inicial en localStorage y registro de errores.
@@ -170,6 +184,18 @@ export function fakeGitHub({ empty = false, defaultBranch = 'main', status = 200
     gh.commits[`c${++gh.seq}`] = files;
     gh.branches[branch] = `c${gh.seq}`;
   };
+  // Listado de una carpeta (API contents): [{ type: 'file'|'dir', name, path, sha }]
+  gh.listing = (dir, branch = defaultBranch) => {
+    const files = filesOf(branch) || {};
+    const prefix = dir ? `${dir}/` : '';
+    const entries = new Map();
+    for (const [p, f] of Object.entries(files)) {
+      if (!p.startsWith(prefix)) continue;
+      const [first, ...more] = p.slice(prefix.length).split('/');
+      if (!entries.has(first)) entries.set(first, { name: first, path: prefix + first, type: more.length ? 'dir' : 'file', sha: more.length ? `d-${first}` : f.sha });
+    }
+    return [...entries.values()].sort((a, b) => (a.name < b.name ? -1 : 1));
+  };
   // Escrituras recibidas (PUT/POST), por archivo
   gh.writes = (p) => gh.log.filter((l) => /^(PUT|POST) /.test(l) && (!p || l.endsWith(`/${p}`)));
 
@@ -200,6 +226,12 @@ export function fakeGitHub({ empty = false, defaultBranch = 'main', status = 200
       gh.branches[name] = sha;
       return { status: 201, body: { ref, object: { sha } } };
     }
+    if (/^\/contents\/?$/.test(rest) && method === 'GET') {
+      if (isEmpty) return { status: 404, body: { message: 'This repository is empty.' } };
+      const branch = u.searchParams.get('ref') || defaultBranch;
+      if (!gh.branches[branch]) return { status: 404, body: { message: `No commit found for the ref ${branch}` } };
+      return { status: 200, body: gh.listing('', branch) };
+    }
     if ((m = /^\/contents\/(.+)$/.exec(rest))) {
       const file = m[1];
       if (method === 'GET') {
@@ -207,7 +239,10 @@ export function fakeGitHub({ empty = false, defaultBranch = 'main', status = 200
         const branch = u.searchParams.get('ref') || defaultBranch;
         if (!gh.branches[branch]) return { status: 404, body: { message: `No commit found for the ref ${branch}` } };
         const f = gh.file(file, branch);
-        if (!f) return { status: 404, body: { message: 'Not Found' } };
+        if (!f) {
+          const list = gh.listing(file.replace(/\/+$/, ''), branch);
+          return list.length ? { status: 200, body: list } : { status: 404, body: { message: 'Not Found' } };
+        }
         const b64 = Buffer.from(f.text, 'utf8').toString('base64');
         return { status: 200, body: { path: file, sha: f.sha, encoding: 'base64', content: b64.match(/.{1,60}/g).join('\n') } };
       }
@@ -239,8 +274,9 @@ export function fakeGitHub({ empty = false, defaultBranch = 'main', status = 200
 }
 
 // Publica en el GitHub simulado la copia (backup.json v3 + turnos.ics) de OTRO dispositivo
-export async function seedRemote(gh, state, { deviceId = 'otro', key = KEY, now = new Date('2026-10-12T18:00:00Z') } = {}) {
-  const s = core.updateSettings(state, { sync: { ...SYNC, key, deviceId } });
+export async function seedRemote(gh, state, { deviceId = 'otro', key = KEY, now = new Date('2026-10-12T18:00:00Z'), dir = '', name } = {}) {
+  let s = core.updateSettings(state, { sync: { ...SYNC, key, deviceId, dir } });
+  if (name !== undefined) s = core.updateSettings(s, { name });
   const res = await core.syncNow(s, { fetchImpl: gh.fetch, now });
   if (!res.ok) throw new Error(`seedRemote: ${res.error?.code} ${res.error?.detail}`);
   return res;

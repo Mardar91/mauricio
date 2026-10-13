@@ -11,11 +11,14 @@ import { whiteGains, cellGains, regionHSV, cellComponents, colorClass, badgeInk,
 import { matchCodes, inkSignature } from './tmatch.js';
 import { decideAll } from './decide.js';
 import { grayCrop, strip, readStrip } from './cells.js';
-import { daysInMonth, weekdayIdx, monthCandidates, yearCandidates, dateCandidates, weekdayFromText, norm, lev } from './calendar.js';
+import { daysInMonth, weekdayIdx, monthCandidates, yearCandidates, dateCandidates, weekdayFromText, DEFAULT_EMPLOYEE, nameLabel, nameTokens, matchName, normName, otherSheetWarning, checkSingleRow, chooseRow } from './calendar.js';
 import { DEFAULT_KNOWN, classCandidates, normalizeRead, exactNewCode } from './codes.js';
 import { disposeOcr, ocr, prewarm } from './ocr.js';
 
 export async function dispose() { await disposeOcr(); }
+
+// Confianza máxima de los días de una hoja que parece de otra persona (la revisión no los marca: < 0,7)
+export const OTHER_SHEET_CONF = 0.4;
 
 let sheet = null; // recortes de insignias para la superposición de depuración
 
@@ -33,7 +36,9 @@ export async function recognize(input, options = {}) {
 async function run(L, options, prog, res, D) {
   const tess = options.tesseract;
   const known = options.knownCodes && options.knownCodes.length ? options.knownCodes : DEFAULT_KNOWN;
-  const employee = options.employeeName || 'Ducuara';
+  // empleado: nombre del plan («Ducuara Ana»); sin nombre, el apellido de siempre
+  const given = nameLabel(options.employeeName);
+  const who = { label: given || DEFAULT_EMPLOYEE, tokens: nameTokens(given || DEFAULT_EMPLOYEE), given: !!given };
   const { canvas } = L;
   const T0 = performance.now(); const tm = (k) => { if (D) D.info['t_' + k] = Math.round(performance.now() - T0); };
   const P = planes(canvas);
@@ -134,8 +139,24 @@ async function run(L, options, prog, res, D) {
   tm('mes');
   // 4. Fila del empleado
   prog(0.5, 'Buscando tu fila');
-  const blk = await pickBlock(tess, RP, G, b, rows, head.row, employee, D);
-  if (!blk) return finish(res, D, `No se encontró la fila de ${employee}.`);
+  const pk = await pickBlock(tess, RP, G, b, rows, head.row, who, D);
+  if (D) D.info.pick = { hits: pk.hits, otherName: !!pk.otherName, nameMismatch: pk.nameMismatch || null, needFullName: !!pk.needFullName };
+  if (!pk.blk) {
+    if (pk.needFullName) {
+      res.warnings.push(`Hay varias filas en la hoja y con «${who.label}» no se sabe cuál es la tuya. Pon tu nombre como sale en el plan (Ajustes → Tu nombre).`);
+      return finish(res, D);
+    }
+    res.warnings.push(`No se encontró la fila de ${who.label}.`);
+    if (pk.hits > 1) res.warnings.push(who.tokens.length > 1 ? `Hay varias filas parecidas a ${who.label} en la tabla y no se sabe cuál es la tuya.` : `Hay varias filas de ${who.label} en la tabla: pon tu nombre completo, como sale en el plan.`);
+    else if (pk.hits === 0 && who.given && who.tokens.length) res.warnings.push('Comprueba que tu nombre esté escrito como en el plan y que se vea en la foto.');
+    return finish(res, D);
+  }
+  const blk = pk.blk;
+  // tabla de una sola fila con otro nombre (p. ej. la impresión filtrada de otra persona): se lee, pero
+  // si se ve el apellido y falta el nombre de pila, los días quedan «por revisar» (confianza baja)
+  if (pk.nameMismatch) res.warnings.push(otherSheetWarning(who.label, pk.nameMismatch));
+  else if (pk.otherName) res.warnings.push(`Revisa que el plan sea de ${who.label}: no se lee ese nombre en la fila.`);
+  const confCap = pk.nameMismatch ? OTHER_SHEET_CONF : 1;
 
   // 5. Insignias por celda
   prog(0.6, 'Leyendo los turnos');
@@ -182,7 +203,7 @@ async function run(L, options, prog, res, D) {
     d.codes = [...new Set(d.items.filter((i) => i.code).map((i) => i.code))];
     if (d.items.some((i) => i.isNew)) res.warnings.push(`Código nuevo: ${d.items.filter((i) => i.isNew).map((i) => i.code).join(', ')}`);
   }
-  for (const d of days) if (d.ok) res.days.push({ day: d.day, codes: d.codes, confidence: +d.conf.toFixed(2) });
+  for (const d of days) if (d.ok) res.days.push({ day: d.day, codes: d.codes, confidence: +Math.min(d.conf, confCap).toFixed(2) });
   if (days.some((d) => !d.ok)) res.warnings.push('Algunos días no se pudieron leer con seguridad.');
   res.warnings = [...new Set(res.warnings)];
   if (D) {
@@ -393,9 +414,13 @@ function cellContrast(RP, ua, ub, v0, v1) {
 
 // Elige el bloque (empleado) debajo de la cabecera. Cada empleado ocupa 3 sub-filas (ausencias, turno, lugar);
 // las líneas que también cruzan la columna del nombre separan empleados.
-async function pickBlock(tess, RP, G, b, rows, headRow, employee, D) {
+// Con varias filas vale la única cuyo nombre leído contiene TODAS las palabras del nombre (SPEC §11); ninguna o
+// varias → sin fila; con solo el apellido, ninguna (needFullName). Con una sola fila (impresión filtrada) se
+// usa esa; si hay nombre, se comprueba: aviso, y si falta parte del nombre, nameMismatch (días por revisar).
+// → { blk, hits, otherName, nameMismatch, needFullName }
+async function pickBlock(tess, RP, G, b, rows, headRow, who, D) {
   const below = rows.slice(headRow + 1);
-  if (below.length < 3) return null;
+  if (below.length < 3) return { blk: null, hits: -1 };
   const cw = G.days.width; const w = RP.w;
   const t0 = rows[0][0]; const t1 = rows[rows.length - 1][1];
   // borde izquierdo de la tabla: vertical a la izquierda de los días que recorre toda la tabla
@@ -421,22 +446,34 @@ async function pickBlock(tess, RP, G, b, rows, headRow, employee, D) {
   }
   // estructura no fiable: grupos de 3 sub-filas
   if (!blocks.length || blocks.some((bl) => bl.length !== 3)) {
-    if (below.length % 3 !== 0) return null;
+    if (below.length % 3 !== 0) return { blk: null, hits: -1 };
     blocks = []; for (let i = 0; i < below.length; i += 3) blocks.push(below.slice(i, i + 3));
   }
   const mk = (bl) => ({ v0: bl[0][0], v1: bl[bl.length - 1][1], sub: bl.slice(1).map((r) => r[0]) });
-  if (blocks.length === 1) return mk(blocks[0]);
-  // varias filas: buscar el nombre
-  const target = norm(employee); const hits = [];
-  for (const bl of blocks) {
+  // OCR de la columna del nombre de un bloque → coincidencia con el nombre. flat: 2.ª lectura con el contraste
+  // normalizado (foto borrosa o con moaré)
+  const readName = async (bl, flat = false) => {
     const c = grayCrop(RP, nL + 3, bl[0][0] + 2, b[0] - 3, bl[bl.length - 1][1] - 2, 2);
-    if (!c) continue;
-    const o = await ocr(tess, c.canvas, { psm: 6 });
-    const ok = o.words.some((wd) => { const t = norm(wd.text); return t.length >= 3 && lev(t, target) <= Math.max(1, Math.floor(target.length / 4)); });
-    if (D) (D.info.names ||= []).push(o.text);
-    if (ok) hits.push(bl);
+    if (!c) return { ok: false, missing: who.tokens, legible: false };
+    const cv = flat ? flattenGray(c.canvas, Math.round((2 * (bl[bl.length - 1][1] - bl[0][0])) / 3)) : c.canvas;
+    const o = await ocr(tess, cv, { psm: 6 });
+    const words = o.words.map((wd) => wd.text);
+    const m = matchName(words, who.tokens);
+    if (D) (D.info.names ||= []).push(`${flat ? 'flat ' : ''}${o.text.replace(/\s+/g, ' ')} → ${m.ok ? 'ok' : 'falta ' + m.missing.join(',')}`);
+    return { ...m, legible: words.some((w) => /^[a-z]{4,}$/.test(normName(w))) };
+  };
+  if (blocks.length === 1) {
+    if (!who.given || !who.tokens.length) return { blk: mk(blocks[0]), hits: 1 };
+    const reads = [await readName(blocks[0])];
+    if (!reads[0].ok && reads[0].legible) reads.push(await readName(blocks[0], true));
+    // solo se avisa si se lee texto (con la columna del nombre fuera de la foto no se puede comprobar);
+    // si se lee el apellido y falta el nombre de pila: nameMismatch (palabras que faltan)
+    const c = checkSingleRow(reads, who.tokens);
+    return { blk: mk(blocks[0]), hits: 1, otherName: c.otherName, nameMismatch: c.nameMismatch };
   }
-  return hits.length === 1 ? mk(hits[0]) : null;
+  // varias filas: la única con todo el nombre (con solo el apellido, ninguna: needFullName)
+  const r = await chooseRow(blocks.length, who.tokens, (i, flat) => readName(blocks[i], flat));
+  return { blk: r.index >= 0 ? mk(blocks[r.index]) : null, hits: r.hits, needFullName: !!r.needFullName };
 }
 
 // Analiza una celda del empleado: insignias de color (con sus evidencias OCR), guion rojo, U roja

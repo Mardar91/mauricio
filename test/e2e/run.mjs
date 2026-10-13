@@ -6,8 +6,8 @@ import path from 'node:path';
 import { chromium } from 'playwright';
 import { startServer } from '../tools/serve.mjs';
 import {
-  KEY, OWNER, REPO, ROOT, STORAGE_KEY, SYNC, TOKEN, core, demoState, ensureOut, fakeGitHub, findOverflow, iphoneContext,
-  mockNetwork, preparePage, seedRemote,
+  KEY, NOW, OTHER_KEY, OWNER, REPO, ROOT, STORAGE_KEY, SYNC, TOKEN, core, demoState, ensureOut, fakeGitHub, findOverflow,
+  iphoneContext, mockNetwork, preparePage, seedRemote,
 } from './helpers.mjs';
 
 const filter = process.argv.slice(2).join(' ');
@@ -28,11 +28,14 @@ const test = (name, fn, opts = {}) => tests.push({ name, fn, opts });
 
 // Abre la app con un estado inicial; devuelve { page, ctx, errors, net }.
 // standalone: true = app abierta desde la pantalla de inicio; false = pestaña de Safari (iPhone)
-async function openApp({ state = null, sw = 'block', width = 390, hash = '', net = true, standalone = true, ios = true, gh } = {}) {
-  const ctx = await iphoneContext(browser, { scale: 1, sw, width, ios });
+// device: 'android' | 'desktop' | 'ipad' (por defecto, iPhone)
+// prefetch: false (por defecto) = sin descargar el lector en segundo plano (ui/prefetch.js)
+async function openApp({ state = null, sw = 'block', width = 390, height = 844, hash = '', net = true, standalone = true, ios = true, gh, device, prefetch = false } = {}) {
+  const ctx = await iphoneContext(browser, { scale: 1, sw, width, height, ios, device });
   openContexts.push(ctx);
   const errors = [];
   const page = await preparePage(ctx, { state, errors, standalone });
+  await page.addInitScript((pf) => { window.__turnosPrefetch = pf; }, prefetch);
   const log = net ? await mockNetwork(page, { gh }) : null;
   await page.goto(APP + hash);
   await page.waitForSelector('.tabbar', { state: 'attached' });
@@ -48,6 +51,10 @@ const waitState = (page, fn, arg, timeout = 10000) => page.waitForFunction(([k, 
 }, [STORAGE_KEY, fn.toString(), arg], { timeout });
 
 const getState = (page) => page.evaluate((k) => JSON.parse(localStorage.getItem(k)), STORAGE_KEY);
+// Suma (en minutos) de las líneas de «Saldo de horas» («+18 h 30», «−2 h 30», «+5 h»)
+const sumBalanceRows = (page) => page.evaluate(() => [...document.querySelectorAll('[data-testid="overtime"] .bal-months b')]
+  .map((b) => { const m = b.textContent.trim().match(/^([+−-]?)(\d+) h(?: (\d+))?$/); return m ? (m[1] === '+' || !m[1] ? 1 : -1) * (Number(m[2]) * 60 + Number(m[3] || 0)) : NaN; })
+  .reduce((a, n) => a + n, 0));
 const tab = (page, id) => page.click(`.tab[data-tab="${id}"]`);
 const text = (page, sel) => page.locator(sel).first().innerText();
 const visible = (page, sel) => page.locator(sel).first().isVisible();
@@ -62,10 +69,11 @@ async function sheetOpen(page) {
 test('primer uso: la bienvenida se puede saltar y no vuelve a salir', async () => {
   const { page, ctx, errors } = await openApp();
   await page.waitForSelector('.onboarding.open');
-  assert.match(await text(page, '.ob-title'), /Hola, Mauricio/);
+  assert.equal(await text(page, '.ob-title'), '¡Hola! 👋', 'sin nombre todavía: saludo neutro');
   await page.click('.ob-skip');
   await page.waitForSelector('.onboarding', { state: 'detached' });
   assert.match(await text(page, '#view-hoy'), /Aún no tienes turnos/);
+  assert.equal(await text(page, '#view-hoy .large-title'), 'Hola 👋');
   assert.equal((await getState(page)).settings.onboardingDone, true);
   await page.reload();
   await page.waitForSelector('.tabbar');
@@ -81,15 +89,16 @@ test('primer uso en Safari (iPhone sin instalar): paso de instalar, se queda en 
   const { page, ctx, errors } = await openApp({ standalone: false });
   await page.waitForSelector('.onboarding.open');
   const steps = await page.locator('.ob-dot').count();
-  assert.equal(steps, 3, 'en iPhone (Safari) se muestra el paso de instalar');
+  assert.equal(steps, 4, 'en iPhone (Safari) se muestra el paso de instalar (bienvenida, nombre, instalar, avisos)');
   await page.click('.ob-bottom .btn-primary');
+  await page.click('.ob-bottom .btn-primary'); // nombre: se puede dejar vacío
   const install = await text(page, '.ob-step');
   assert.match(install, /«•••»\s*\(abajo a la derecha\) y luego «Compartir»/);
   assert.match(install, /iOS más antiguo, Compartir está abajo en el centro/);
   assert.match(install, /Agregar a inicio/);
   assert.match(install, /Añadir a pantalla de inicio/);
   assert.match(install, /Deja activado «Abrir como app web»/);
-  for (let i = 1; i < steps; i++) await page.click('.ob-bottom .btn-primary');
+  for (let i = 2; i < steps; i++) await page.click('.ob-bottom .btn-primary');
   await page.waitForSelector('.onboarding', { state: 'detached' });
   assert.ok(await visible(page, '#view-hoy'), 'en Safari no lleva a escanear');
   assert.match(await text(page, '[data-testid="banner-safari"]'), /Instala la app para no perder tus datos/);
@@ -110,8 +119,8 @@ test('primer uso en Safari (iPhone sin instalar): paso de instalar, se queda en 
 test('primer uso en la app instalada: completar la bienvenida lleva a Escanear, sin aviso de Safari', async () => {
   const { page, ctx, errors } = await openApp({ standalone: true });
   await page.waitForSelector('.onboarding.open');
-  assert.equal(await page.locator('.ob-dot').count(), 2, 'sin paso de instalar');
-  for (let i = 0; i < 2; i++) await page.click('.ob-bottom .btn-primary');
+  assert.equal(await page.locator('.ob-dot').count(), 3, 'sin paso de instalar');
+  for (let i = 0; i < 3; i++) await page.click('.ob-bottom .btn-primary');
   await page.waitForSelector('.onboarding', { state: 'detached' });
   assert.ok(await visible(page, '#view-escanear'));
   assert.equal(await page.locator('[data-testid="banner-safari"]').count(), 0);
@@ -636,7 +645,7 @@ test('opciones avanzadas: borrar todos los datos pide confirmar dos veces y «De
   await page.click('[data-testid="wipe"]');
   await page.waitForSelector('.dialog-wrap.open');
   await page.click('.dialog-wrap.open .dialog .btn-danger');
-  await page.waitForSelector('.dialog-wrap.open .dialog-title:text("¿Seguro?")');
+  await page.waitForSelector('.dialog-wrap.open .dialog-title:text("¿Lo confirmas?")');
   await page.click('.dialog-wrap.open .dialog .btn-danger');
   await page.waitForSelector('.toast .toast-action');
   let s = await getState(page);
@@ -839,11 +848,13 @@ test('flujo del README: el ordenador de quien ayuda crea el enlace y el iPhone d
   await waitState(A.page, (s) => Boolean(s.settings.sync.enabled && s.settings.sync.lastPushAt), null, 15000);
   const sA = (await getState(A.page)).settings.sync;
   assert.equal(sA.publisher, sA.deviceId, 'el ordenador vacío publica primero (repo vacío)');
-  // En el ordenador se puede cerrar el paso «Suscribirme» (es para el iPhone)
-  if (await A.page.locator('.sheet-subscribe').count()) {
-    await A.page.click('.sheet-subscribe .sheet-close');
-    await A.page.waitForSelector('.sheet-wrap', { state: 'detached' });
-  }
+  // Quien ayuda no ve el paso «Suscribirme»: le lleva a «Crear enlace…» (y a «para otra persona»)
+  await A.page.waitForSelector('.dialog-wrap.open .dialog-title:text("Conectado")');
+  assert.match(await text(A.page, '.dialog-wrap.open .dialog'), /Crear enlace de configuración[\s\S]*Crear enlace para otra persona/);
+  await A.page.click('.dialog-wrap.open .dialog .btn-primary');
+  await A.page.waitForSelector('.dialog-wrap.open', { state: 'detached' });
+  assert.equal(await A.page.locator('.sheet-subscribe').count(), 0, 'sin paso «Suscribirme» en el dispositivo de quien ayuda');
+  assert.ok(await A.page.locator('[data-testid="make-link"]').isVisible(), '«Crear enlace» a la vista');
   await A.ctx.grantPermissions(['clipboard-read', 'clipboard-write']);
   await A.page.click('[data-testid="make-link"]');
   await A.page.waitForSelector('.toast:has-text("Enlace copiado")');
@@ -1040,6 +1051,7 @@ test('PWA: nueva versión → aviso «Actualizar» → recarga con la caché nue
     openContexts.push(ctx);
     const errors = [];
     const page = await preparePage(ctx, { state: demoState(), errors, standalone: true });
+    await page.addInitScript(() => { window.__turnosPrefetch = false; });
     await mockNetwork(page);
     await page.goto(`http://127.0.0.1:${proxy.address().port}/docs/`);
     await page.evaluate(() => navigator.serviceWorker.ready);
@@ -1068,7 +1080,8 @@ test('PWA: nueva versión → aviso «Actualizar» → recarga con la caché nue
 test('PWA: manifest, iconos y metadatos de iOS', async () => {
   const { page, ctx, errors } = await openApp({ state: demoState() });
   const m = await page.evaluate(async () => (await fetch('manifest.webmanifest')).json());
-  assert.equal(m.name, 'Turnos de Mauricio');
+  assert.equal(m.name, 'Turnos', 'nombre neutro (lo usan varias personas)');
+  assert.equal(await page.title(), 'Turnos');
   assert.equal(m.short_name, 'Turnos');
   assert.equal(m.display, 'standalone');
   assert.equal(m.start_url, './');
@@ -1116,14 +1129,13 @@ test('diseño: objetivos táctiles de al menos 44 px y campos de 16 px o más (s
   const check = async (where) => {
     small.push(...(await page.evaluate((w) => {
       const out = [];
-      for (const el of document.querySelectorAll('button, a.btn, label.btn, .switch, .check, input, select, textarea')) {
+      for (const el of document.querySelectorAll('button, a.btn, a.link-btn, label.btn, .switch, .check, input, select, textarea, summary')) {
         const r = el.getBoundingClientRect();
         if (!r.width || !r.height || el.closest('[hidden], .file-inputs, .visually-hidden') || getComputedStyle(el).visibility === 'hidden') continue;
         const fs = parseFloat(getComputedStyle(el).fontSize);
         if (/^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName) && el.type !== 'checkbox' && fs < 16) out.push(`${w}: campo ${el.getAttribute('aria-label') || el.className} ${fs}px`);
         // Interruptores y círculos: la fila entera (label) es el objetivo
         if (el.matches('.switch, .check')) { const lab = el.closest('label'); if (lab) { const lr = lab.getBoundingClientRect(); if (lr.height >= 44) continue; } }
-        if (el.matches('.link-inline')) continue; // enlace dentro de una tarjeta que también se puede tocar
         if (Math.min(r.height, r.width) < 43.5) out.push(`${w}: ${el.tagName.toLowerCase()}.${String(el.className).split(' ').join('.')} ${Math.round(r.width)}×${Math.round(r.height)} "${(el.getAttribute('aria-label') || el.textContent || '').trim().slice(0, 24)}"`);
       }
       return out;
@@ -1162,7 +1174,9 @@ test('textos: español neutro (sin giros solo de España ni «X» para miércole
     all.push(await page.evaluate(() => document.querySelector('.view:not([hidden])').textContent));
   }
   const src = fs.readdirSync(path.join(ROOT, 'docs/js/ui')).map((f) => fs.readFileSync(path.join(ROOT, 'docs/js/ui', f), 'utf8')).join('\n');
-  for (const re of [/Hacer foto/, /Haz una foto/, /hazle una foto/i, /Rellen/, /He podido/, /ha fallado/, /de baja\b/, /Acuéstate pronto/, /[«"]X[»"]/]) {
+  for (const re of [/Hacer foto/, /Haz una foto/, /hazle una foto/i, /Rellen/, /He podido/, /ha fallado/, /de baja\b/, /Acuéstate pronto/, /[«"]X[»"]/,
+    // Lo usan Mauricio y su hermana: sin textos con género
+    /¿Seguro\b/, /\bestás suscrit[oa]\b/, /\bbienvenido\b/i]) {
     assert.doesNotMatch(src, re, `texto a cambiar: ${re}`);
   }
   assert.doesNotMatch(all.join(' '), /\bX\b/);
@@ -1303,7 +1317,7 @@ test('Hoy: un código con solo hora de inicio no muestra «null»', async () => 
   const hero = await text(page, '.hero');
   assert.doesNotMatch(hero, /null/);
   assert.match(hero, /desde las 10:45/);
-  assert.doesNotMatch(await page.getAttribute('.hero', 'aria-label'), /null/);
+  assert.doesNotMatch(await page.getAttribute('[data-testid="hero-open"]', 'aria-label'), /null/);
   return { ctx, errors };
 });
 
@@ -1477,6 +1491,1418 @@ test('diálogos: cerrar antes del primer fotograma no los deja abiertos; un avis
   assert.equal(await page.evaluate(() => window.__closed), 'dismiss', 'al cerrarlo se avisa (para volver a ofrecerlo)');
   return { ctx, errors };
 });
+
+// ---------- SPEC §11–§14: varias personas, Android, funciones nuevas y diseño adaptable ----------
+
+// GitHub con el calendario de Mauricio (raíz) y, si se pide, el de Ana (carpeta «ana», otra clave)
+async function familyGitHub({ ana = true } = {}) {
+  const gh = fakeGitHub();
+  await seedRemote(gh, demoState(), { deviceId: 'iphone1', name: 'Mauricio' });
+  if (ana) {
+    let st = core.updateSettings(core.createDefaultState(), { onboardingDone: true });
+    st = core.setDay(st, '2026-10-14', ['S1'], { now: new Date('2026-10-10T10:00:00Z') });
+    await seedRemote(gh, st, { deviceId: 'android-ana', dir: 'ana', key: OTHER_KEY, name: 'Ana' });
+  }
+  return gh;
+}
+// Simula el aviso de instalación de Chrome (beforeinstallprompt)
+const fakeInstallPrompt = (page, outcome = 'accepted') => page.evaluate((o) => {
+  window.__prompted = false;
+  const e = new Event('beforeinstallprompt', { cancelable: true });
+  e.prompt = async () => { window.__prompted = true; };
+  e.userChoice = Promise.resolve({ outcome: o });
+  window.dispatchEvent(e);
+}, outcome);
+const RECORDING_STUB = `export async function recognize(input, o = {}) { globalThis.__employeeName = o.employeeName; o.onProgress?.(1, 'Listo');
+  return { layout: 'unknown', month: null, year: null, days: [], warnings: [] }; }
+export async function dispose() {}`;
+
+test('primer uso: nombre y nombre del plan (saltables) → saludo, Ajustes «Tu nombre» y la tabla del PC', async () => {
+  const { page, ctx, errors } = await openApp();
+  await page.waitForSelector('.onboarding.open');
+  await page.click('[data-testid="ob-next"]');
+  assert.match(await text(page, '.ob-step[data-step="name"]'), /¿Cómo te llamas\?[\s\S]*¿Cómo sale tu nombre en el plan\?/);
+  await page.fill('[data-testid="ob-name"]', '  Ana ');
+  assert.equal(await page.getAttribute('[data-testid="ob-plan-name"]', 'placeholder'), 'Ej.: Ducuara Ana', 'sugiere «Ducuara <nombre>»');
+  await page.fill('[data-testid="ob-plan-name"]', 'Ducuara Ana');
+  await page.click('[data-testid="ob-next"]');
+  assert.match(await text(page, '.ob-step'), /Avisos antes de trabajar/);
+  let s = await getState(page);
+  assert.equal(s.settings.name, 'Ana');
+  assert.equal(s.settings.planName, 'Ducuara Ana');
+  await page.click('[data-testid="ob-next"]');
+  await page.waitForSelector('.onboarding', { state: 'detached' });
+  await tab(page, 'hoy');
+  assert.equal(await text(page, '#view-hoy .large-title'), 'Hola, Ana 👋');
+  // Ajustes → «Tu nombre»: se puede cambiar
+  await tab(page, 'ajustes');
+  assert.equal(await page.inputValue('#set-name [data-fkey="name"]'), 'Ana');
+  assert.equal(await page.inputValue('#set-name [data-fkey="planName"]'), 'Ducuara Ana');
+  await page.fill('#set-name [data-fkey="name"]', 'Lucía');
+  await page.press('#set-name [data-fkey="name"]', 'Tab');
+  await waitState(page, (st) => st.settings.name === 'Lucía');
+  await tab(page, 'hoy');
+  assert.equal(await text(page, '#view-hoy .large-title'), 'Hola, Lucía 👋');
+  // Escanear: el lector busca la fila con el nombre del plan
+  await page.route('**/docs/js/recognize/index.js', (r) => r.fulfill({ contentType: 'text/javascript', body: RECORDING_STUB }));
+  await tab(page, 'escanear');
+  await page.setInputFiles('input[data-testid="scan-pick"]', PHOTO);
+  await page.waitForSelector('.fallback', { timeout: 20000 });
+  assert.equal(await page.evaluate(() => globalThis.__employeeName), 'Ducuara Ana');
+  s = await getState(page);
+  assert.equal(s.settings.planName, 'Ducuara Ana');
+  return { ctx, errors };
+});
+
+test('primer uso saltado: sin nombre, saludo neutro y el lector usa «Ducuara»', async () => {
+  const { page, ctx, errors } = await openApp();
+  await page.waitForSelector('.onboarding.open');
+  await page.click('[data-testid="ob-next"]');
+  await page.click('.ob-skip');
+  await page.waitForSelector('.onboarding', { state: 'detached' });
+  const s = await getState(page);
+  assert.equal(s.settings.name, '');
+  assert.equal(s.settings.planName, '');
+  assert.equal(await text(page, '#view-hoy .large-title'), 'Hola 👋');
+  await page.route('**/docs/js/recognize/index.js', (r) => r.fulfill({ contentType: 'text/javascript', body: RECORDING_STUB }));
+  await tab(page, 'escanear');
+  await page.setInputFiles('input[data-testid="scan-pick"]', PHOTO);
+  await page.waitForSelector('.fallback', { timeout: 20000 });
+  assert.equal(await page.evaluate(() => globalThis.__employeeName), 'Ducuara');
+  return { ctx, errors };
+});
+
+test('Android: «Calendario del teléfono», ICSx⁵ (intent) primero y Google Calendar después, sin avisos de Safari', async () => {
+  const gh = await familyGitHub();
+  const state = core.updateSettings(demoState(), { name: 'Ana', sync: { ...SYNC, key: OTHER_KEY, dir: 'ana', deviceId: 'android-ana' } });
+  const { page, ctx, errors } = await openApp({ state, gh, device: 'android', standalone: false, width: 360, height: 740 });
+  await waitState(page, (s) => Boolean(s.settings.sync.lastPullAt));
+  assert.equal(await page.evaluate(() => document.documentElement.dataset.platform), 'android');
+  assert.equal(await page.locator('[data-testid="banner-safari"]').count(), 0, 'en Android no hay aviso de Safari');
+  await page.waitForSelector('[data-testid="sync-line"]');
+  assert.match(await text(page, '[data-testid="sync-line"]'), /^Tu calendario al día/);
+  assert.doesNotMatch(await text(page, '#view-hoy'), /iPhone/);
+  await tab(page, 'ajustes');
+  assert.match(await page.locator('#set-calendar .set-title').textContent(), /^Calendario del teléfono$/);
+  const href = await page.getAttribute('#set-calendar [data-testid="webcal"]', 'href');
+  assert.equal(href, `intent://raw.githubusercontent.com/${OWNER}/${REPO}/HEAD/ana/turnos.ics#Intent;scheme=webcals;package=at.bitfire.icsdroid;S.browser_fallback_url=${encodeURIComponent('https://play.google.com/store/apps/details?id=at.bitfire.icsdroid')};end`);
+  assert.match(await text(page, '#set-calendar [data-testid="webcal"]'), /Ver mis turnos en el calendario/);
+  assert.match(await text(page, '#set-calendar [data-testid="alerts-notice"]'), /Ignore alerts embedded in the calendar/);
+  await ctx.grantPermissions(['clipboard-read', 'clipboard-write']);
+  await page.click('#set-calendar [data-testid="copy-cal-link"]');
+  await page.waitForSelector('.toast:has-text("Enlace copiado")');
+  assert.equal(await page.evaluate(() => navigator.clipboard.readText()), `https://raw.githubusercontent.com/${OWNER}/${REPO}/HEAD/ana/turnos.ics`);
+  // Las dos guías, la recomendada primero
+  const guides = await page.locator('#set-calendar .guide-group > details > summary').allInnerTexts();
+  assert.match(guides[0], /ICSx⁵ \(recomendado\)/);
+  assert.match(guides[1], /Google Calendar/);
+  await page.click('details[data-fkey="guide-icsx5"] > summary');
+  const icsx5 = await text(page, 'details[data-fkey="guide-icsx5"]');
+  // Orden real de ICSx⁵ 2.4: «SUBSCRIBE» en la 1.ª pantalla; en la 2.ª («Alarms») solo la flecha →, que
+  // la crea y cierra ICSx⁵; el intervalo se pone después, abriéndola desde su icono
+  assert.match(icsx5, /Google Play[\s\S]*1,99 €[\s\S]*Permitir[\s\S]*SUBSCRIBE[\s\S]*Título y color[\s\S]*Ignore alerts embedded in the calendar[\s\S]*flecha →[\s\S]*se cierra[\s\S]*desde su icono[\s\S]*Mis suscripciones[\s\S]*Cada hora[\s\S]*Sin restricciones/);
+  assert.doesNotMatch(icsx5, /Ignore alerts embedded in the calendar[^\n]*\n[^\n]*SUBSCRIBE/, '«SUBSCRIBE» no va después de «Alarms»');
+  assert.match(icsx5, /«Turnos de Ana»/);
+  await page.click('details[data-fkey="guide-google"] > summary');
+  assert.match(await text(page, 'details[data-fkey="guide-google"]'), /calendar\.google\.com[\s\S]*Desde una URL[\s\S]*Agregar notificación/);
+  // Sin «iPhone» en Ajustes (salvo la guía de otra persona, que no está abierta)
+  assert.doesNotMatch(await page.evaluate(() => document.getElementById('view-ajustes').innerText), /iPhone/);
+  // «Ver sus turnos» de Mauricio: guía para mirar sin sus avisos
+  await page.waitForSelector('#set-family');
+  await page.click('#set-family [data-dir="_"] [data-testid="family-subscribe"]');
+  await sheetOpen(page);
+  assert.match(await page.getAttribute('[data-testid="family-open-android"]', 'href'), new RegExp(`^intent://raw\\.githubusercontent\\.com/${OWNER}/${REPO}/HEAD/turnos\\.ics#Intent;scheme=webcals;`));
+  assert.match(await text(page, '[data-testid="family-guide"]'), /activa «Ignore alerts embedded in the calendar»/);
+  return { ctx, errors };
+});
+
+test('Android: botón «Instalar la app» (beforeinstallprompt) y guía del menú ⋮', async () => {
+  const { page, ctx, errors } = await openApp({ state: demoState(), device: 'android', standalone: false });
+  await tab(page, 'ajustes');
+  assert.match(await text(page, '#set-install'), /menú ⋮[\s\S]*Instalar app/);
+  assert.equal(await page.locator('#set-install [data-testid="install-prompt"]').count(), 0, 'sin aviso de Chrome todavía');
+  assert.doesNotMatch(await text(page, '#set-install'), /Safari/);
+  await fakeInstallPrompt(page);
+  await page.waitForSelector('#set-install [data-testid="install-prompt"]');
+  await page.click('#set-install [data-testid="install-prompt"]');
+  await page.waitForFunction(() => window.__prompted === true);
+  await page.waitForSelector('#set-install [data-testid="install-prompt"]', { state: 'detached' });
+  return { ctx, errors };
+});
+
+test('Android: «Atrás» cierra la hoja o el diálogo (y pregunta si hay cambios) sin salir de la app', async () => {
+  const { page, ctx, errors } = await openApp({ state: demoState(), device: 'android', standalone: false });
+  const url = page.url();
+  await tab(page, 'calendario');
+  await page.click('.day-row[data-key="2026-10-14"]');
+  await sheetOpen(page);
+  await page.evaluate(() => history.back());
+  await page.waitForSelector('.sheet-wrap', { state: 'detached' });
+  assert.equal(page.url(), url, 'sigue en la app');
+  assert.ok(await visible(page, '#view-calendario'));
+  // Con cambios: «Atrás» pregunta; «Atrás» otra vez sigue editando
+  await page.click('.day-row[data-key="2026-10-14"]');
+  await sheetOpen(page);
+  await page.click('.sheet .tile[data-code="S1"]');
+  await page.evaluate(() => history.back());
+  await page.waitForSelector('.dialog-wrap.open');
+  assert.match(await text(page, '.dialog-wrap.open .dialog'), /Salir sin guardar/);
+  await page.waitForTimeout(150);
+  await page.evaluate(() => history.back());
+  await page.waitForSelector('.dialog-wrap', { state: 'detached' });
+  assert.ok(await visible(page, '.sheet-day'), 'la hoja sigue abierta');
+  await page.click('[data-testid="day-save"]');
+  await page.waitForSelector('.sheet-wrap', { state: 'detached' });
+  assert.deepEqual((await getState(page)).days['2026-10-14'].codes, ['S1']);
+  // Cerrada desde la app: no queda la entrada extra en el historial
+  await page.waitForTimeout(200);
+  assert.ok(!(await page.evaluate(() => history.state?.turnosBack)), 'sin entrada pendiente');
+  // La bienvenida: «Atrás» vuelve un paso
+  await page.evaluate(() => import('./js/ui/onboarding.js').then((m) => m.showOnboarding(window.__turnosTest && { store: window.__turnosTest.store, go: window.__turnosTest.go, repaint: () => {} }, { again: true })));
+  await page.waitForSelector('.onboarding.open');
+  await page.click('[data-testid="ob-next"]');
+  await page.waitForSelector('.ob-step[data-step="name"]');
+  await page.evaluate(() => history.back());
+  await page.waitForSelector('.ob-step[data-step="welcome"]');
+  await page.evaluate(() => history.back());
+  await page.waitForSelector('.onboarding', { state: 'detached' });
+  assert.equal(page.url(), url);
+  return { ctx, errors };
+});
+
+test('iPhone: cerrar hojas con ✕ o Escape no deja entradas en el historial', async () => {
+  const { page, ctx, errors } = await openApp({ state: demoState() });
+  const before = await page.evaluate(() => history.length);
+  await tab(page, 'calendario');
+  for (let i = 0; i < 3; i++) {
+    await page.click('.day-row[data-key="2026-10-14"]');
+    await sheetOpen(page);
+    if (i % 2) await page.keyboard.press('Escape'); else await page.click('.sheet-close');
+    await page.waitForSelector('.sheet-wrap', { state: 'detached' });
+  }
+  await page.waitForTimeout(200);
+  assert.ok(!(await page.evaluate(() => history.state?.turnosBack)));
+  // El historial no crece sin límite (cada hoja quita su entrada)
+  assert.ok(await page.evaluate(() => history.length) <= before + 1);
+  return { ctx, errors };
+});
+
+test('varias personas: «Crear enlace para otra persona» (carpeta y clave nuevas) y «Calendarios de la familia»', async () => {
+  const gh = await familyGitHub();
+  const state = core.updateSettings(demoState(), { name: 'Mauricio', sync: { ...SYNC, deviceId: 'iphone1' } });
+  const { page, ctx, errors } = await openApp({ state, gh });
+  await waitState(page, (s) => Boolean(s.settings.sync.lastPullAt || s.settings.sync.lastPushAt));
+  await tab(page, 'ajustes');
+  await page.waitForSelector('#set-family', { timeout: 10000 });
+  const items = page.locator('#set-family [data-testid="family-item"]');
+  assert.equal(await items.count(), 2);
+  assert.match(await items.nth(0).innerText(), /Mauricio[\s\S]*Tu calendario[\s\S]*Tú/);
+  assert.match(await items.nth(1).innerText(), /Ana/);
+  assert.match(await text(page, '#set-family'), /deja activado «Eliminar alertas»/);
+  // iPhone: antes de suscribirse, el aviso «deja ACTIVADO Eliminar alertas»; la suscripción sale de su botón
+  await page.evaluate(() => document.addEventListener('click', (e) => {
+    const a = e.target.closest?.('a[href^="webcal:"]');
+    if (a) { e.preventDefault(); window.__opened = a.href; }
+  }, true));
+  await page.click('#set-family [data-dir="ana"] [data-testid="family-subscribe"]');
+  await page.waitForSelector('.dialog-wrap.open [data-testid="family-ios-notice"]');
+  assert.match(await text(page, '.dialog-wrap.open .dialog-title'), /Turnos de Ana: solo para mirar/);
+  assert.match(await text(page, '.dialog-wrap.open .dialog-strong'), /Cuando el iPhone lo pregunte, deja ACTIVADO «Eliminar alertas»/);
+  assert.equal(await page.evaluate(() => window.__opened || null), null, 'todavía no se abre nada');
+  await page.click('.dialog-wrap.open .btn-primary');
+  await page.waitForFunction(() => Boolean(window.__opened));
+  assert.equal(await page.evaluate(() => window.__opened), `webcal://raw.githubusercontent.com/${OWNER}/${REPO}/HEAD/ana/turnos.ics`);
+  await page.waitForSelector('.dialog-wrap', { state: 'detached' });
+  // Crear enlace para otra persona
+  await page.click('[data-testid="advanced"] > summary');
+  assert.match(await text(page, '[data-testid="make-link"]'), /Crear enlace para Mauricio/);
+  await page.click('[data-testid="make-person-link"]');
+  await sheetOpen(page);
+  await page.click('[data-testid="person-create"]');
+  assert.match(await text(page, '.sheet-person .form-error'), /Escribe el nombre/);
+  await page.fill('[data-testid="person-name"]', 'Ana');
+  await page.click('[data-testid="person-create"]');
+  await page.waitForSelector('[data-testid="person-result"]:not([hidden])');
+  const link = await page.locator('[data-testid="person-link"]').textContent();
+  const cfg = core.parseSetupLink(link);
+  assert.equal(cfg.dir, 'ana-2', 'no repite la carpeta de Ana que ya existe');
+  assert.equal(cfg.name, 'Ana');
+  assert.equal(cfg.token, TOKEN);
+  assert.equal(cfg.owner, OWNER);
+  assert.ok(core.isSyncKey(cfg.key) && cfg.key !== KEY && cfg.key !== OTHER_KEY, 'clave nueva');
+  assert.match(await text(page, '[data-testid="person-result"]'), /carpeta «ana-2»[\s\S]*En Android[\s\S]*En iPhone/);
+  await ctx.grantPermissions(['clipboard-read', 'clipboard-write']);
+  await page.click('[data-testid="person-copy"]');
+  await page.waitForSelector('.toast:has-text("Enlace copiado")');
+  assert.equal(await page.evaluate(() => navigator.clipboard.readText()), link);
+  assert.equal((await getState(page)).settings.sync.dir, '', 'este dispositivo no cambia de carpeta');
+  assert.equal(gh.writes().filter((l) => /ana-2/.test(l)).length, 0, 'crear el enlace no escribe nada');
+  return { ctx, errors };
+});
+
+test('varias personas: el enlace de Ana abierto en su Android publica en «ana/» sin tocar el calendario de Mauricio', async () => {
+  const gh = await familyGitHub({ ana: false });
+  const rootBackup = gh.text('backup.json');
+  const rootIcs = gh.text('turnos.ics');
+  const seeded = gh.writes().length;
+  const p = core.buildPersonLink(APP, { owner: OWNER, repo: REPO, branch: '', token: TOKEN }, { name: 'Ana', existingDirs: [''] });
+  let st = core.updateSettings(core.createDefaultState(), { onboardingDone: true });
+  st = core.setDay(st, '2026-10-14', ['S1'], { now: new Date('2026-10-12T10:00:00Z') });
+  const { page, ctx, errors } = await openApp({ state: st, gh, hash: p.link.slice(APP.length), device: 'android', standalone: false });
+  // Su turno no dice de quién es: primero «¿Estos turnos son de Ana?» (sin el «Conectar…» genérico)
+  await waitDialog(page, '¿Estos turnos son de Ana?');
+  assert.match(await text(page, '.dialog-wrap.open .dialog'), /En este teléfono hay 1 día con turnos y no dice de quién son/);
+  await clickDialog(page, 'Sí, son de Ana');
+  await page.waitForSelector('[data-testid="subscribe-step"]', { timeout: 15000 });
+  await page.waitForSelector('.sheet-subscribe [data-testid="webcal"][aria-disabled="false"]', { timeout: 15000 });
+  assert.match(await page.getAttribute('.sheet-subscribe [data-testid="webcal"]', 'href'), /^intent:\/\/raw\.githubusercontent\.com\/[^#]+\/HEAD\/ana\/turnos\.ics#Intent;scheme=webcals;package=at\.bitfire\.icsdroid;/);
+  assert.match(await text(page, '[data-testid="subscribe-step"]'), /ICSx⁵[\s\S]*Cada hora/);
+  assert.ok(await visible(page, '.sheet-subscribe [data-testid="copy-cal-link"]'), '«Copiar enlace» siempre');
+  const s = await getState(page);
+  assert.equal(s.settings.sync.dir, 'ana');
+  assert.equal(s.settings.name, 'Ana', '«Sí, son de Ana»: su nombre se guarda (no tenía)');
+  assert.deepEqual(Object.keys(s.days), ['2026-10-14'], 'su turno se queda');
+  assert.equal(s.settings.sync.key, p.key);
+  const backup = gh.json('ana/backup.json');
+  assert.equal(backup.meta.publisher, s.settings.sync.deviceId, 'el teléfono de Ana publica su carpeta');
+  assert.equal(backup.meta.name, 'Ana');
+  assert.match(gh.text('ana/turnos.ics'), /X-WR-CALNAME:Turnos de Ana/);
+  assert.equal(gh.text('backup.json'), rootBackup, 'la copia de Mauricio no cambia');
+  assert.equal(gh.text('turnos.ics'), rootIcs, 'el calendario de Mauricio no cambia');
+  const mine = gh.writes().slice(seeded);
+  assert.ok(mine.length >= 2 && mine.every((l) => /\/contents\/ana\//.test(l)), `solo escribe en ana/: ${mine.join(', ')}`);
+  await page.click('.sheet-subscribe .sheet-close');
+  await page.waitForSelector('.sheet-wrap', { state: 'detached' });
+  await tab(page, 'hoy');
+  assert.equal(await text(page, '#view-hoy .large-title'), 'Hola, Ana 👋');
+  return { ctx, errors };
+});
+
+test('Horas: suplementos del mes (con € si hay salario) y saldos (horas y vacaciones del año)', async () => {
+  let state = demoState();
+  state = core.updateSettings(state, { supplements: { hourlyWage: 20 }, balances: { overtimeStartMin: 90, overtimeStartMonth: '2026-08', vacationCarryOver: 2.5 } });
+  const { page, ctx, errors } = await openApp({ state });
+  await tab(page, 'horas');
+  const sp = core.monthSummary(state, 2026, 10).supplements;
+  for (const k of ['night', 'saturday', 'sunday', 'holiday']) {
+    assert.equal(await text(page, `[data-testid="supplements"] [data-kind="${k}"] .sup-hours`), core.formatHours(sp[k].minutes), k);
+  }
+  const eur = new Intl.NumberFormat('es-ES', { style: 'currency', currency: 'EUR' }).format(sp.euros);
+  assert.match(await text(page, '[data-testid="supplements-total"]'), new RegExp(`≈ ${eur.replace(/[.\s]/g, '.')}`));
+  assert.match(await text(page, '[data-testid="supplements"]'), /Comprueba tu contrato/);
+  const ob = core.overtimeBalance(state, { now: NOW });
+  assert.equal(await text(page, '[data-testid="overtime"] .bal-value'), core.formatSignedHours(ob.balance));
+  assert.match(await text(page, '[data-testid="overtime"]'), /Desde agosto 2026\./);
+  assert.equal(await text(page, '[data-testid="bal-start"] b'), '+1 h 30');
+  assert.equal(await sumBalanceRows(page), ob.balance, 'las líneas suman el total');
+  const vac = core.vacationSummary(state, 2026, { now: NOW });
+  assert.match(await text(page, '[data-testid="vacation"] .bal-value'), new RegExp(`^${String(vac.remaining).replace('.', ',')} días`));
+  assert.match(await text(page, '[data-testid="vacation"]'), new RegExp(`Usadas: ${vac.used} días`));
+  // Sin salario: invita a ponerlo → Ajustes «Contrato y nómina» abierto
+  await page.evaluate(() => window.__turnosTest.store.set((s) => { s.settings.supplements.hourlyWage = null; return s; }));
+  await page.click('[data-testid="supplements"] .sup-wage');
+  await page.waitForFunction(() => document.getElementById('set-payroll')?.open === true);
+  await page.fill('[data-fkey="wage"]', '18,5');
+  await page.press('[data-fkey="wage"]', 'Tab');
+  await waitState(page, (s) => s.settings.supplements.hourlyWage === 18.5);
+  await page.fill('[data-fkey="vac-days"]', '28');
+  await page.press('[data-fkey="vac-days"]', 'Tab');
+  await waitState(page, (s) => s.settings.balances.vacationDaysPerYear === 28);
+  await page.fill('[data-fkey="ot-start"]', '-3,5');
+  await page.press('[data-fkey="ot-start"]', 'Tab');
+  await waitState(page, (s) => s.settings.balances.overtimeStartMin === -210);
+  await page.fill('[data-fkey="sup-night"]', '400');
+  await page.press('[data-fkey="sup-night"]', 'Tab');
+  await page.waitForSelector('.toast-error:has-text("porcentaje")');
+  assert.equal((await getState(page)).settings.supplements.night.pct, 26, 'un valor no válido no se guarda');
+  await page.fill('[data-fkey="sup-sunday"]', '50');
+  await page.press('[data-fkey="sup-sunday"]', 'Tab');
+  await waitState(page, (s) => s.settings.supplements.sunday.pct === 50);
+  await page.selectOption('[data-fkey="ot-month"]', '2026-09');
+  await waitState(page, (s) => s.settings.balances.overtimeStartMonth === '2026-09');
+  return { ctx, errors };
+});
+
+test('Ajustes: «Contrato y nómina» plegado por defecto, con el aviso «comprueba tu contrato»', async () => {
+  const { page, ctx, errors } = await openApp({ state: demoState() });
+  await tab(page, 'ajustes');
+  assert.equal(await page.evaluate(() => document.getElementById('set-payroll').open), false);
+  assert.equal(await page.locator('[data-fkey="wage"]').isVisible(), false);
+  await page.click('[data-testid="payroll"] > summary');
+  assert.match(await text(page, '[data-testid="payroll-note"]'), /Comprueba tu contrato/);
+  for (const k of ['vac-days', 'vac-carry', 'ot-start', 'ot-month', 'sup-night', 'sup-night-from', 'sup-night-to', 'sup-saturday', 'sup-sunday', 'sup-holiday', 'wage']) {
+    assert.ok(await page.locator(`[data-fkey="${k}"]`).isVisible(), k);
+  }
+  assert.equal(await page.inputValue('[data-fkey="sup-night-from"]'), '23:00');
+  return { ctx, errors };
+});
+
+test('tiempo de viaje: el lugar con 25 min → «Sal a las 13:05 hacia S51» en Hoy y «Abrir en Mapas»', async () => {
+  const { page, ctx, errors } = await openApp({ state: demoState() });
+  assert.equal(await page.locator('[data-testid="travel-fact"]').count(), 0, 'sin viaje no se dice');
+  await tab(page, 'ajustes');
+  await page.click('[data-testid="places"] > summary');
+  await page.click('.code-row[data-code="S51"]');
+  await sheetOpen(page);
+  assert.equal(await page.locator('.sheet-code [data-testid="ce-maps"]').isVisible(), false, 'sin dirección no hay mapa');
+  await page.fill('.sheet-code input[placeholder^="Ej.: Karl"]', 'Karl-Marx-Straße 101, Berlín');
+  assert.equal(await page.getAttribute('.sheet-code [data-testid="ce-maps"]', 'href'), `https://maps.apple.com/?q=${encodeURIComponent('Karl-Marx-Straße 101, Berlín')}`);
+  await page.selectOption('[data-testid="ce-travel"]', '25');
+  assert.match(await text(page, '.ce-preview'), /25 min de viaje/);
+  await page.click('[data-testid="code-save"]');
+  await page.waitForSelector('.sheet-wrap', { state: 'detached' });
+  assert.equal((await getState(page)).codes.S51.travelMin, 25);
+  assert.match(await text(page, '.code-row[data-code="S51"]'), /25 min de viaje/);
+  await tab(page, 'hoy');
+  assert.equal(await text(page, '[data-testid="travel-fact"]'), 'Sal a las 13:05 hacia S51 (25 min de viaje)');
+  assert.match(await page.getAttribute('#view-hoy [data-testid="maps-link"]', 'href'), /^https:\/\/maps\.apple\.com\/\?q=/);
+  // Tocar «Mapa» no abre el editor del día
+  await page.evaluate(() => document.addEventListener('click', (e) => { if (e.target.closest('a[data-testid="maps-link"]')) e.preventDefault(); }));
+  await page.click('#view-hoy [data-testid="maps-link"]');
+  await page.waitForTimeout(300);
+  assert.equal(await page.locator('.sheet-wrap').count(), 0);
+  return { ctx, errors };
+});
+
+test('recordatorios: «Avisarme para subir el plan» (activado) se puede apagar y quita el aviso del calendario', async () => {
+  const { page, ctx, errors } = await openApp({ state: demoState() });
+  await tab(page, 'ajustes');
+  const sw = '#set-reminders [data-fkey="planUpload"]';
+  assert.equal(await page.isChecked(sw), true);
+  assert.match(core.buildICS(await getState(page), { now: NOW }), /UID:plan-2026-11@/);
+  await page.click(sw);
+  await waitState(page, (s) => s.settings.reminders.planUpload === false);
+  assert.doesNotMatch(core.buildICS(await getState(page), { now: NOW }), /UID:plan-/);
+  return { ctx, errors };
+});
+
+test('enfermedad: K «Enfermedad» en la paleta, se guarda y acredita la jornada', async () => {
+  const { page, ctx, errors } = await openApp({ state: demoState() });
+  await tab(page, 'calendario');
+  await page.click('.day-row[data-key="2026-10-20"]');
+  await sheetOpen(page);
+  const tile = page.locator('.sheet .tile[data-code="K"]');
+  assert.ok(await tile.isVisible(), 'K a mano, sin «Más códigos»');
+  assert.match(await tile.getAttribute('aria-label'), /K Enfermedad/);
+  await tile.click();
+  await page.click('[data-testid="day-save"]');
+  await page.waitForSelector('.sheet-wrap', { state: 'detached' });
+  const s = await getState(page);
+  assert.deepEqual(s.days['2026-10-20'].codes, ['K']);
+  assert.equal(core.dayMinutes(s, '2026-10-20').credited, 7 * 60);
+  assert.match(await text(page, '.day-row[data-key="2026-10-20"]'), /Enfermedad/);
+  return { ctx, errors };
+});
+
+test('ordenador (1280×800): columna central, pestañas y hojas centradas; teclado (Escape, flechas y foco)', async () => {
+  const { page, ctx, errors } = await openApp({ state: demoState(), device: 'desktop', width: 1280, height: 800, standalone: false });
+  assert.equal(await page.evaluate(() => document.documentElement.dataset.platform), 'desktop');
+  const box = (sel) => page.evaluate((s) => { const r = document.querySelector(s).getBoundingClientRect(); return { l: r.left, r: r.right, w: r.width, vw: innerWidth }; }, sel);
+  const views = await box('#views');
+  assert.ok(views.w <= 720, `columna de ${views.w} px`);
+  assert.ok(Math.abs(views.l - (views.vw - views.r)) <= 1, 'columna centrada');
+  for (const sel of ['.hero', '.week-card']) assert.ok((await box(sel)).w <= 680, `${sel} sin estirarse`);
+  const bar = await box('.tabbar');
+  assert.ok(bar.w <= 600 && Math.abs(bar.l - (bar.vw - bar.r)) <= 1, `barra de pestañas centrada (${JSON.stringify(bar)})`);
+  assert.equal(await page.locator('[data-testid="banner-safari"]').count(), 0);
+  assert.doesNotMatch(await text(page, '#view-hoy'), /iPhone/);
+  // Hoja centrada; Escape la cierra
+  await tab(page, 'calendario');
+  await page.click('.day-row[data-key="2026-10-14"]');
+  await sheetOpen(page);
+  const sh = await box('.sheet');
+  assert.ok(sh.w <= 620 && Math.abs(sh.l - (sh.vw - sh.r)) <= 1, `hoja centrada (${JSON.stringify(sh)})`);
+  await page.keyboard.press('Escape');
+  await page.waitForSelector('.sheet-wrap', { state: 'detached' });
+  // Flechas: mes siguiente / anterior
+  await page.keyboard.press('ArrowRight');
+  assert.match(await text(page, '.nav-title'), /Noviembre 2026/);
+  await page.keyboard.press('ArrowLeft');
+  await page.keyboard.press('ArrowLeft');
+  assert.match(await text(page, '.nav-title'), /Septiembre 2026/);
+  // Tabulador: el foco se ve
+  await page.keyboard.press('Tab');
+  const outline = await page.evaluate(() => getComputedStyle(document.activeElement).outlineStyle);
+  assert.notEqual(outline, 'none', 'foco visible con el teclado');
+  return { ctx, errors };
+});
+
+test('diseño: nada se sale a 360 px en Android ni en tablet (820 y 1180) con lo nuevo abierto', async () => {
+  const problems = [];
+  for (const [device, width, height] of [['android', 360, 740], ['ipad', 820, 1180], ['ipad', 1180, 820]]) {
+    let state = demoState({ sync: true });
+    state = core.upsertCode(state, { ...core.getCode(state, 'S51'), place: 'Karl-Marx-Straße 101, Berlín', travelMin: 25 });
+    state = core.updateSettings(state, { name: 'Ana', supplements: { hourlyWage: 18.5 } });
+    const { page, ctx } = await openApp({ state, device, width, height, standalone: device !== 'android' });
+    for (const id of ['hoy', 'calendario', 'escanear', 'horas', 'ajustes']) {
+      await tab(page, id);
+      if (id === 'ajustes') { await page.click('[data-testid="payroll"] > summary'); await page.click('#set-advanced > summary'); }
+      await page.waitForTimeout(150);
+      problems.push(...(await findOverflow(page)).map((p) => `${device} ${width}: ${id}: ${p}`));
+    }
+    await ctx.close();
+  }
+  assert.deepEqual(problems, []);
+  return { ctx: null, errors: [] };
+});
+
+test('iPad: dice «iPad» (no «iPhone») en el calendario, la suscripción y los consejos', async () => {
+  const { page, ctx, errors } = await openApp({ state: demoState({ sync: true }), gh: fakeGitHub(), device: 'ipad', width: 820, height: 1180 });
+  assert.equal(await page.evaluate(() => document.documentElement.dataset.platform), 'ios');
+  await tab(page, 'ajustes');
+  assert.equal((await page.locator('#set-calendar .set-title').textContent()).trim(), 'Calendario del iPad');
+  assert.match(await text(page, '#set-calendar [data-testid="webcal"]'), /Suscribirme en el iPad/);
+  assert.match(await text(page, '#set-calendar [data-testid="alerts-notice"]'), /cuando el iPad lo pregunte/);
+  assert.match(await text(page, '#set-reminders'), /Calendario del iPad[\s\S]*«Suscribirme en el iPad»/);
+  for (const id of ['hoy', 'calendario', 'horas', 'ajustes']) {
+    await tab(page, id);
+    assert.doesNotMatch(await text(page, `#view-${id}`), /iPhone/, id);
+  }
+  return { ctx, errors };
+});
+
+test('textos: «calendario del teléfono» en minúscula dentro de las frases (Android)', async () => {
+  const state = core.updateSettings(demoState(), { name: 'Ana' });
+  const { page, ctx, errors } = await openApp({ state, device: 'android', standalone: false, width: 360, height: 740 });
+  await tab(page, 'ajustes');
+  assert.equal((await page.locator('#set-calendar .set-title').textContent()).trim(), 'Calendario del teléfono', 'el título de la sección sí');
+  assert.match(await text(page, '[data-testid="sync-status"]'), /no salen en el calendario del teléfono/);
+  assert.match(await text(page, '#set-reminders'), /falta conectar el calendario del teléfono/);
+  await tab(page, 'calendario');
+  await page.click('.day-row[data-key="2026-10-14"]');
+  await sheetOpen(page);
+  assert.match(await text(page, '.sheet-day'), /La nota no sale en el calendario del teléfono/);
+  return { ctx, errors };
+});
+
+test('Android: antes de suscribirse, Ajustes explica que ICSx⁵ se instala primero (1,99 €), antes del botón', async () => {
+  const gh = await familyGitHub();
+  const state = core.updateSettings(demoState(), { name: 'Ana', sync: { ...SYNC, key: OTHER_KEY, dir: 'ana', deviceId: 'android-ana' } });
+  const { page, ctx, errors } = await openApp({ state, gh, device: 'android', standalone: false, width: 360, height: 740 });
+  await waitState(page, (s) => Boolean(s.settings.sync.lastPullAt));
+  await tab(page, 'ajustes');
+  await page.waitForSelector('#set-calendar [data-testid="webcal"][aria-disabled="false"]');
+  const card = await text(page, '#set-calendar .cal-card');
+  assert.match(card, /Instala «ICSx⁵» desde Google Play \(cuesta 1,99 €\)[\s\S]*SUBSCRIBE[\s\S]*flecha →[\s\S]*Cada hora[\s\S]*Ver mis turnos en el calendario/);
+  // Los pasos van antes del botón
+  const order = await page.evaluate(() => {
+    const st = document.querySelector('#set-calendar .cal-card .steps');
+    const btn = document.querySelector('#set-calendar [data-testid="webcal"]');
+    return Boolean(st.compareDocumentPosition(btn) & Node.DOCUMENT_POSITION_FOLLOWING);
+  });
+  assert.ok(order, 'pasos y después el botón');
+  return { ctx, errors };
+});
+
+test('calendario a 360 px: el mes y las semanas se leen enteros («Septiembre 2026», «12–18 oct», «31 ago – 6 sept»)', async () => {
+  const { page, ctx, errors } = await openApp({ state: demoState(), device: 'android', standalone: false, width: 360, height: 740 });
+  await tab(page, 'calendario');
+  assert.equal(await text(page, '[data-week="2026-10-12"] .week-sep-range'), '12–18 oct');
+  const clipped = [];
+  for (let i = 0; i < 4; i++) {
+    if (i) await page.click('[aria-label="Mes siguiente"]');
+    clipped.push(...await page.evaluate(() => [...document.querySelectorAll('.nav-title, .week-sep-range')]
+      .filter((e) => e.scrollWidth > e.clientWidth + 0.5).map((e) => e.textContent)));
+  }
+  // Septiembre (con la semana del 31 de agosto)
+  for (let i = 0; i < 4; i++) await page.click('[aria-label="Mes anterior"]');
+  assert.equal(await text(page, '.nav-title'), 'Septiembre 2026');
+  assert.equal(await text(page, '[data-week="2026-08-31"] .week-sep-range'), '31 ago – 6 sept');
+  clipped.push(...await page.evaluate(() => [...document.querySelectorAll('.nav-title, .week-sep-range')]
+    .filter((e) => e.scrollWidth > e.clientWidth + 0.5).map((e) => e.textContent)));
+  assert.deepEqual(clipped, [], 'nada cortado con «…»');
+  return { ctx, errors };
+});
+
+test('editar día: «Sal a las…» y «Abrir en Mapas» en el turno; un libre no dice «0 h de trabajo»', async () => {
+  let state = demoState();
+  state = core.upsertCode(state, { ...core.getCode(state, 'S51'), place: 'Karl-Marx-Straße 101, Berlín', travelMin: 25 });
+  const { page, ctx, errors } = await openApp({ state });
+  await tab(page, 'calendario');
+  await page.click('.day-row[data-key="2026-10-13"]');
+  await sheetOpen(page);
+  assert.equal(await text(page, '.sheet-day [data-testid="day-travel"]'), 'Sal a las 13:05 hacia S51 (25 min de viaje)');
+  assert.equal(await page.getAttribute('.sheet-day [data-testid="day-maps"]', 'href'), `https://maps.apple.com/?q=${encodeURIComponent('Karl-Marx-Straße 101, Berlín')}`);
+  // Horario especial: la hora de salir cambia con él
+  await page.click('.sheet-day [data-testid="day-time-edit"]');
+  await page.fill('.sheet-day [data-testid="day-time-start"]', '15:00');
+  await page.waitForFunction(() => /14:35/.test(document.querySelector('.sheet-day [data-testid="day-travel"]').textContent));
+  await page.keyboard.press('Escape');
+  await page.waitForSelector('.dialog-wrap.open');
+  await page.click('.dialog-wrap.open .btn-danger');
+  await page.waitForSelector('.sheet-wrap', { state: 'detached' });
+  // Un día libre
+  const off = Object.entries(state.days).find(([k, d]) => k >= '2026-10-01' && d.codes.length === 1 && d.codes[0] === '-')[0];
+  await page.click(`.day-row[data-key="${off}"]`);
+  await sheetOpen(page);
+  assert.equal(await page.locator('.sheet-day .de-summary').isVisible(), false);
+  assert.doesNotMatch(await text(page, '.sheet-day .de-selected'), /0 h de trabajo/);
+  return { ctx, errors };
+});
+
+test('códigos: «Restablecer» un lugar dice que borra la dirección y el viaje, y se puede deshacer', async () => {
+  let state = demoState();
+  state = core.upsertCode(state, { ...core.getCode(state, 'S51'), place: 'Karl-Marx-Straße 101, Berlín', travelMin: 25 });
+  const { page, ctx, errors } = await openApp({ state });
+  await tab(page, 'ajustes');
+  await page.click('[data-testid="places"] > summary');
+  await page.click('.code-row[data-code="S51"]');
+  await sheetOpen(page);
+  await page.click('.sheet-code .btn-danger-plain');
+  await page.waitForSelector('.dialog-wrap.open');
+  assert.match(await text(page, '.dialog-wrap.open .dialog-text'), /se borrarán su dirección y su tiempo de viaje/);
+  await page.click('.dialog-wrap.open .btn-danger');
+  await waitState(page, (s) => !s.codes.S51.place);
+  await page.click('.toast .toast-action:has-text("Deshacer")');
+  await waitState(page, (s) => s.codes.S51.place === 'Karl-Marx-Straße 101, Berlín' && s.codes.S51.travelMin === 25);
+  return { ctx, errors };
+});
+
+test('Horas: el saldo muestra los meses anteriores y el saldo inicial (las líneas suman el total)', async () => {
+  const state = core.updateSettings(demoState(), { balances: { overtimeStartMin: 300 } });
+  const { page, ctx, errors } = await openApp({ state });
+  await tab(page, 'horas');
+  const ob = core.overtimeBalance(state, { now: NOW });
+  assert.ok(ob.months.length > 3, 'hay más de 3 meses con plan');
+  assert.equal(await text(page, '[data-testid="overtime"] .bal-value'), core.formatSignedHours(ob.balance));
+  assert.match(await text(page, '[data-testid="bal-earlier"]'), new RegExp(`Meses anteriores \\(${ob.months.length - 3}\\)`));
+  assert.equal(await text(page, '[data-testid="bal-start"] b'), '+5 h');
+  assert.equal(await sumBalanceRows(page), ob.balance);
+  return { ctx, errors };
+});
+
+test('teclado: «Próximo turno» es un botón de verdad (Espacio abre el día) y «Esta semana» responde a Espacio', async () => {
+  let state = demoState();
+  state = core.upsertCode(state, { ...core.getCode(state, 'S51'), place: 'Karl-Marx-Straße 101, Berlín' });
+  const { page, ctx, errors } = await openApp({ state, device: 'desktop', width: 1280, height: 800, standalone: false });
+  assert.equal(await page.locator('.hero[role="button"], .hero [role="button"]').count(), 0, 'sin role=button con enlaces dentro');
+  assert.equal(await page.locator('[data-testid="hero-open"] a, [data-testid="hero-open"] button').count(), 0);
+  await page.focus('[data-testid="hero-open"]');
+  await page.keyboard.press('Space');
+  await sheetOpen(page);
+  assert.match(await text(page, '.sheet-title'), /13 de octubre/);
+  await page.keyboard.press('Escape');
+  await page.waitForSelector('.sheet-wrap', { state: 'detached' });
+  await page.focus('.week-card');
+  await page.keyboard.press('Space');
+  await page.waitForSelector('#view-calendario:not([hidden])');
+  return { ctx, errors };
+});
+
+test('teclado: con Tab, el foco nunca queda debajo de la barra de pestañas (ordenador e iPhone)', async () => {
+  const hidden = [];
+  for (const [device, width, height] of [['desktop', 1280, 800], [undefined, 390, 844]]) {
+    const { page, ctx } = await openApp({ state: demoState({ sync: true }), device, width, height, standalone: device !== 'desktop' });
+    await tab(page, 'ajustes');
+    await page.evaluate(() => { window.scrollTo(0, 0); document.activeElement?.blur(); });
+    for (let i = 0; i < 60; i++) {
+      await page.keyboard.press('Tab');
+      const r = await page.evaluate(() => {
+        const el = document.activeElement;
+        if (!el || el === document.body || el.closest('.tabbar')) return null;
+        const a = el.getBoundingClientRect(), bar = document.querySelector('.tabbar').getBoundingClientRect();
+        if (a.height > innerHeight / 2) return null;
+        return a.bottom > bar.top + 1 ? `${el.tagName} «${(el.getAttribute('aria-label') || el.textContent || '').trim().slice(0, 30)}»` : null;
+      });
+      if (r) hidden.push(`${device || 'iphone'}: ${r}`);
+    }
+    await ctx.close();
+  }
+  assert.deepEqual(hidden, []);
+  return { ctx: null, errors: [] };
+});
+
+test('bienvenida en Android con el aviso de Chrome: «Instalar la app» es el botón principal y «Ahora no» el secundario', async () => {
+  const { page, ctx, errors } = await openApp({ state: null, device: 'android', standalone: false, width: 360, height: 740 });
+  await page.waitForSelector('.onboarding.open');
+  await fakeInstallPrompt(page);
+  await page.click('[data-testid="ob-next"]');
+  await page.waitForSelector('.ob-step[data-step="name"]');
+  await page.click('[data-testid="ob-next"]');
+  await page.waitForSelector('.ob-step[data-step="install"] [data-testid="install-prompt"]');
+  assert.match(await page.getAttribute('.ob-step [data-testid="install-prompt"]', 'class'), /btn-primary/);
+  assert.equal(await text(page, '[data-testid="ob-next"]'), 'Ahora no');
+  assert.match(await page.getAttribute('[data-testid="ob-next"]', 'class'), /btn-secondary/);
+  // Todo el paso cabe en 360×740 (sin tener que desplazar)
+  const fits = await page.evaluate(() => { const c = document.querySelector('.ob-content'); return c.scrollHeight <= c.clientHeight + 1; });
+  assert.ok(fits, 'el paso de instalar cabe sin desplazar');
+  await page.click('[data-testid="ob-next"]');
+  await page.waitForSelector('.ob-step[data-step="reminders"]');
+  assert.match(await page.getAttribute('[data-testid="ob-next"]', 'class'), /btn-primary/);
+  assert.equal(await text(page, '[data-testid="ob-next"]'), 'Empezar');
+  return { ctx, errors };
+});
+
+test('Escanear en el ordenador: un solo botón «Elegir fotos del plan» (sin «Tomar foto»)', async () => {
+  const { page, ctx, errors } = await openApp({ state: demoState(), device: 'desktop', width: 1280, height: 800, standalone: false });
+  await tab(page, 'escanear');
+  const labels = await page.locator('#view-escanear .scan-actions label.btn').allInnerTexts();
+  assert.deepEqual(labels.map((t) => t.trim()), ['Elegir fotos del plan']);
+  assert.equal(await page.getAttribute('#view-escanear .scan-actions label.btn', 'for'), 'scan-pick-input');
+  return { ctx, errors };
+});
+
+test('diseño a 360 px: las horas lado a lado pasan una debajo de otra (formato de 12 h)', async () => {
+  const { page, ctx, errors } = await openApp({ state: demoState(), device: 'android', standalone: false, width: 360, height: 740 });
+  await tab(page, 'calendario');
+  await page.click('.day-row[data-key="2026-10-13"]');
+  await sheetOpen(page);
+  await page.click('.sheet-day [data-testid="day-time-edit"]');
+  const [a, b] = await page.evaluate(() => ['day-time-start', 'day-time-end'].map((id) => {
+    const r = document.querySelector(`[data-testid="${id}"]`).getBoundingClientRect(); return { top: r.top, w: r.width };
+  }));
+  assert.ok(b.top > a.top + 20, 'una debajo de otra');
+  assert.ok(a.w > 250, `campo ancho (${a.w} px)`);
+  return { ctx, errors };
+});
+
+// ---------- 1.4.2 ----------
+
+// Enlace del calendario de Ana (carpeta ana/, su clave)
+const anaHash = () => setupHash({ dir: 'ana', key: OTHER_KEY, name: 'Ana' });
+const dialogTitle = (page) => text(page, '.dialog-wrap.open .dialog-title');
+const openHash = (page, hash) => page.evaluate((hsh) => { location.hash = hsh; }, hash);
+// Anota el título de cada diálogo que se abre (window.__titles)
+const recordDialogs = (page) => page.evaluate(() => {
+  window.__titles = [];
+  new MutationObserver((list) => {
+    for (const m of list) for (const n of m.addedNodes) {
+      if (n.nodeType !== 1) continue;
+      for (const t of n.matches?.('.dialog-title') ? [n] : n.querySelectorAll?.('.dialog-title') || []) window.__titles.push(t.textContent.trim());
+    }
+  }).observe(document.body, { childList: true, subtree: true });
+});
+const titles = (page) => page.evaluate(() => window.__titles || []);
+const waitDialog = (page, title) => page.waitForSelector(`.dialog-wrap.open .dialog-title:text-is(${JSON.stringify(title)})`, { timeout: 15000 });
+const clickDialog = (page, label) => page.click(`.dialog-wrap.open .dialog button:text-is(${JSON.stringify(label)})`);
+
+test('otra persona: el enlace de Ana en un teléfono que usa el calendario de Mauricio pregunta; Cancelar no cambia nada', async () => {
+  const gh = await familyGitHub();
+  const state = core.updateSettings(demoState(), { name: 'Mauricio', sync: { ...SYNC, deviceId: 'android1' } });
+  const { page, ctx, errors } = await openApp({ state, gh, device: 'android', standalone: false });
+  await waitState(page, (s) => Boolean(s.settings.sync.lastPullAt));
+  const before = await getState(page);
+  const writes = gh.writes().length;
+  await recordDialogs(page);
+  await openHash(page, anaHash());
+  // Ya usa el calendario de otra persona: sin el «Conectar…» genérico, directamente la pregunta
+  await page.waitForSelector('.dialog-wrap.open .dialog-title:text("¿Cambiar al calendario de Ana?")', { timeout: 15000 });
+  assert.deepEqual(await titles(page), ['¿Cambiar al calendario de Ana?'], 'un solo diálogo');
+  const q = await text(page, '.dialog-wrap.open .dialog');
+  assert.match(q, /Este enlace es del calendario de Ana y este dispositivo usa el de Mauricio\./, 'el mensaje del core');
+  assert.match(q, /¿Cambiar este dispositivo a ese calendario\?/);
+  assert.match(q, /se guardan como copia y puedes deshacerlo/);
+  assert.doesNotMatch(q, /No se cambió nada/, 'no dice «no se cambió nada» en una pregunta');
+  await page.click('.dialog-wrap.open .dialog .btn-secondary');
+  await page.waitForSelector('.dialog-wrap', { state: 'detached' });
+  await page.waitForTimeout(500);
+  const after = await getState(page);
+  assert.equal(after.settings.sync.dir, '', 'sigue en el calendario de Mauricio');
+  assert.equal(after.settings.sync.key, KEY);
+  assert.deepEqual(Object.keys(after.days).sort(), Object.keys(before.days).sort(), 'los mismos turnos');
+  assert.equal(await page.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith('turnos-mauricio:before-import:')).length), 0, 'sin copia: no se cambió nada');
+  assert.equal(gh.writes().length, writes, 'nada se escribe en GitHub');
+  return { ctx, errors };
+});
+
+test('otra persona: confirmar pasa el teléfono al calendario de Ana sin llevar los turnos de Mauricio, y «Deshacer» vuelve', async () => {
+  const gh = await familyGitHub();
+  const rootBackup = gh.text('backup.json');
+  const state = core.updateSettings(demoState(), { name: 'Mauricio', sync: { ...SYNC, deviceId: 'android1' } });
+  const { page, ctx, errors } = await openApp({ state, gh, device: 'android', standalone: false });
+  await waitState(page, (s) => Boolean(s.settings.sync.lastPullAt));
+  const nBefore = Object.keys((await getState(page)).days).length;
+  const writes = gh.writes().length;
+  await recordDialogs(page);
+  await openHash(page, anaHash());
+  await page.waitForSelector('.dialog-wrap.open .dialog-title:text("¿Cambiar al calendario de Ana?")', { timeout: 15000 });
+  await page.click('.dialog-wrap.open .dialog .btn-primary');
+  // Ana ya publica desde su teléfono, y este es de Mauricio: no se ofrece tomar el relevo (solo lee)
+  await page.waitForSelector('[data-testid="subscribe-step"]', { timeout: 15000 });
+  assert.ok(!(await titles(page)).some((t) => /¿Usar este/.test(t)), `sin «¿Usar este…?»: ${await titles(page)}`);
+  assert.match(await text(page, '[data-testid="switched-note"]'), /Este teléfono usa ahora «Turnos de Ana»\. Solo lee: ese calendario lo sigue actualizando otro dispositivo\. Si antes te suscribiste al de Mauricio/);
+  const s = await getState(page);
+  assert.equal(s.settings.sync.dir, 'ana');
+  assert.equal(s.settings.sync.key, OTHER_KEY);
+  assert.equal(s.settings.name, 'Ana');
+  assert.deepEqual(Object.keys(s.days), ['2026-10-14'], 'solo los turnos de Ana');
+  assert.equal(gh.writes().length, writes, 'nada de Mauricio se publica en ana/ (ni en la raíz)');
+  assert.equal(gh.text('backup.json'), rootBackup);
+  // «Deshacer» (dentro del paso «Suscribirme»): vuelve entero al calendario de Mauricio
+  assert.equal(await page.locator('.toast:has-text("usa ahora el calendario de Ana")').count(), 0, 'sin aviso que tape la hoja');
+  assert.match(await text(page, '[data-testid="switch-undo"]'), /Deshacer: volver al calendario de Mauricio/);
+  await page.click('[data-testid="switch-undo"]');
+  await page.waitForSelector('.sheet-wrap', { state: 'detached' });
+  await page.waitForSelector('.toast:has-text("vuelve al calendario de Mauricio")');
+  await waitState(page, (st) => st.settings.sync.dir === '');
+  const back = await getState(page);
+  assert.equal(back.settings.sync.key, KEY);
+  assert.equal(back.settings.name, 'Mauricio');
+  assert.equal(Object.keys(back.days).length, nBefore, 'vuelven sus turnos');
+  await page.waitForTimeout(300);
+  assert.equal(gh.writes().slice(writes).filter((l) => /\/contents\/ana\//.test(l)).length, 0, 'tampoco al deshacer se escribe en ana/');
+  return { ctx, errors };
+});
+
+test('otra persona: la copia de antes de cambiar sale en «Restaurar» y al recuperarla vuelve a su calendario', async () => {
+  const gh = await familyGitHub();
+  const state = core.updateSettings(demoState(), { name: 'Mauricio', sync: { ...SYNC, deviceId: 'android1' } });
+  const { page, ctx, errors } = await openApp({ state, gh, device: 'android', standalone: false });
+  await waitState(page, (s) => Boolean(s.settings.sync.lastPullAt));
+  const writes = gh.writes().length;
+  await openHash(page, anaHash());
+  await page.waitForSelector('.dialog-wrap.open .dialog-title:text("¿Cambiar al calendario de Ana?")', { timeout: 15000 });
+  await page.click('.dialog-wrap.open .dialog .btn-primary');
+  await page.waitForSelector('[data-testid="subscribe-step"]', { timeout: 15000 });
+  await page.click('.sheet-subscribe .sheet-close');
+  await page.waitForSelector('.sheet-wrap', { state: 'detached' });
+  await page.click('[data-testid="advanced"] > summary');
+  const row = page.locator('#set-restore .set-row', { hasText: 'Copia de antes de cambiar de calendario' });
+  assert.match(await row.innerText(), /calendario de Mauricio/);
+  await row.locator('[data-testid="restore-copy"]').click();
+  await page.waitForSelector('.dialog-wrap.open');
+  assert.match(await text(page, '.dialog-wrap.open .dialog'), /Este dispositivo vuelve a ese calendario/);
+  await page.click('.dialog-wrap.open .dialog .btn-danger, .dialog-wrap.open .dialog .btn-primary');
+  await waitState(page, (st) => st.settings.sync.dir === '' && st.settings.sync.key && Object.keys(st.days).length > 1);
+  await page.waitForSelector('.toast:has-text("vuelve al calendario de Mauricio")');
+  assert.equal(gh.writes().slice(writes).filter((l) => /\/contents\/ana\//.test(l)).length, 0, 'nada de Mauricio en ana/');
+  return { ctx, errors };
+});
+
+test('formulario avanzado: cambiar a otro repositorio en un dispositivo con datos de otro calendario pregunta antes; al confirmar no se lleva nada', async () => {
+  const gh = await familyGitHub();
+  const other = fakeGitHub({ empty: true }); // repositorio nuevo y vacío (p. ej. el de otra persona)
+  const state = core.updateSettings(demoState(), { name: 'Mauricio', sync: { ...SYNC, deviceId: 'pc1' } });
+  const { page, ctx, errors } = await openApp({ state, gh, device: 'desktop', width: 1280, height: 800, standalone: false });
+  const cors = { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*', 'access-control-allow-methods': 'GET,PUT,POST,DELETE' };
+  await page.route('https://api.github.com/repos/*/ana-datos**', (route) => {
+    const req = route.request();
+    if (req.method() === 'OPTIONS') return route.fulfill({ status: 204, headers: cors });
+    const r = other.handle({ method: req.method(), url: req.url(), body: req.postData() });
+    return route.fulfill({ status: r.status, contentType: 'application/json', headers: cors, body: JSON.stringify(r.body) });
+  });
+  await waitState(page, (s) => Boolean(s.settings.sync.lastPullAt));
+  const nDays = Object.keys((await getState(page)).days).length;
+  const writes = gh.writes().length;
+  await tab(page, 'ajustes');
+  await page.click('[data-testid="advanced"] > summary');
+  const ask = async () => {
+    await page.fill('[data-fkey="gh-repo"]', 'ana-datos');
+    await page.click('[data-fkey="btn-connect"]');
+    await page.waitForSelector('.dialog-wrap.open .dialog-title:text("¿Cambiar de calendario?")', { timeout: 15000 });
+    const q = await text(page, '.dialog-wrap.open .dialog');
+    assert.match(q, /¿Cambiar este dispositivo a ese calendario\?/);
+    assert.doesNotMatch(q, /No se cambió nada/);
+  };
+  await ask();
+  await page.click('.dialog-wrap.open .dialog .btn-secondary');
+  await page.waitForSelector('.dialog-wrap', { state: 'detached' });
+  await page.waitForTimeout(300);
+  let s = await getState(page);
+  assert.equal(s.settings.sync.repo, REPO, 'Cancelar: no cambia de repositorio');
+  assert.equal(Object.keys(s.days).length, nDays, 'conserva sus turnos');
+  assert.equal(other.writes().length, 0, 'nada en el otro repositorio');
+  // Confirmar: el otro calendario empieza limpio (quien ayuda publica primero, sin turnos de Mauricio)
+  await ask();
+  await page.click('.dialog-wrap.open .dialog .btn-primary');
+  await page.waitForSelector('.dialog-wrap.open .dialog-title:text("Conectado")', { timeout: 15000 });
+  await page.click('.dialog-wrap.open .dialog .btn-primary');
+  s = await getState(page);
+  assert.equal(s.settings.sync.repo, 'ana-datos');
+  assert.equal(Object.keys(s.days).length, 0, 'sin los turnos de Mauricio');
+  assert.notEqual(s.settings.sync.key, KEY, 'clave nueva para el otro calendario');
+  const b = other.json('backup.json');
+  assert.ok(b, 'publica en el repositorio nuevo');
+  assert.equal(b.meta.days, 0, 'sin ningún turno de Mauricio');
+  assert.equal(gh.writes().length, writes, 'el calendario de Mauricio no cambia');
+  await page.waitForSelector('.toast:has-text("usa ahora") .toast-action');
+  return { ctx, errors };
+});
+
+test('datos de otro calendario (sincronización detenida): «Cambiar al calendario conectado…» pregunta y cambia sin llevarlos', async () => {
+  const gh = fakeGitHub();
+  await seedRemote(gh, demoState(), { deviceId: 'iphone1', name: 'Mauricio' });
+  const rootBackup = gh.text('backup.json');
+  // Los turnos de este teléfono son de otro repositorio, pero está configurado con mauricio-datos
+  let st = core.updateSettings(core.createDefaultState(), { onboardingDone: true, name: 'Mauricio' });
+  st = core.setDay(st, '2026-10-20', ['N1'], { now: new Date('2026-10-01T10:00:00Z') });
+  st = core.updateSettings(st, { sync: { ...SYNC, deviceId: 'android1', lastPullAt: '2026-10-10T10:00:00.000Z', boundTarget: `${OWNER.toLowerCase()}/otro-repo/:` } });
+  const { page, ctx, errors } = await openApp({ state: st, gh, device: 'android', standalone: false });
+  await waitState(page, (s) => s.settings.sync.lastErrorCode === 'OTHER_TARGET');
+  assert.equal(gh.text('backup.json'), rootBackup, 'no publica nada');
+  await tab(page, 'ajustes');
+  await page.waitForSelector('[data-testid="sync-status"][data-kind="error"]');
+  await page.click('[data-fkey="btn-switchfix"]');
+  await page.waitForSelector('.dialog-wrap.open .dialog-title:text("¿Cambiar de calendario?")', { timeout: 15000 });
+  assert.match(await text(page, '.dialog-wrap.open .dialog'), /¿Cambiar este dispositivo a ese calendario\?/);
+  await page.click('.dialog-wrap.open .dialog .btn-primary');
+  // Es el calendario de Mauricio y este teléfono es de Mauricio: se ofrece, con su nombre
+  await waitDialog(page, '¿Usar este teléfono para actualizar el calendario de Mauricio?');
+  assert.match(await text(page, '.dialog-wrap.open .dialog'), /Hazlo solo si este es el teléfono de Mauricio\./);
+  assert.equal(await text(page, '.dialog-wrap.open .dialog .btn-primary'), 'Sí, usar este', 'recomendado (la misma persona)');
+  await clickDialog(page, 'No, solo leer');
+  // La dirección del calendario no cambia: no hace falta suscribirse otra vez; «Deshacer» en el aviso
+  await page.waitForSelector('.toast:has-text("usa ahora el calendario de Mauricio") .toast-action', { timeout: 15000 });
+  const s = await getState(page);
+  assert.equal(s.settings.sync.lastErrorCode, null);
+  assert.ok(!s.days['2026-10-20'] || s.days['2026-10-20'].codes.join() !== 'N1', 'el N1 del otro calendario no se trae');
+  assert.equal(gh.text('backup.json'), rootBackup, 'ni se publica');
+  return { ctx, errors };
+});
+
+test('«Crear enlace para Mauricio» lleva el nombre: en otro teléfono la confirmación dice «para Mauricio»', async () => {
+  const gh = fakeGitHub();
+  const state = core.updateSettings(demoState(), { name: 'Mauricio Ducuara', sync: { ...SYNC, deviceId: 'iphone1' } });
+  const A = await openApp({ state, gh });
+  await waitState(A.page, (s) => Boolean(s.settings.sync.lastPushAt));
+  await tab(A.page, 'ajustes');
+  await A.page.click('[data-testid="advanced"] > summary');
+  await A.ctx.grantPermissions(['clipboard-read', 'clipboard-write']);
+  assert.match(await text(A.page, '[data-testid="make-link"]'), /Crear enlace para Mauricio/);
+  await A.page.click('[data-testid="make-link"]');
+  await A.page.waitForSelector('.toast:has-text("Enlace copiado")');
+  const link = await A.page.evaluate(() => navigator.clipboard.readText());
+  const cfg = core.parseSetupLink(link.slice(link.indexOf('#')));
+  assert.equal(cfg.name, 'Mauricio', 'solo el nombre de pila');
+  assert.equal(cfg.dir, '');
+  const B = await openApp({ state: null, gh, hash: link.slice(APP.length), device: 'android', standalone: false });
+  await B.page.waitForSelector('.dialog-wrap.open');
+  assert.match(await text(B.page, '.dialog-wrap.open .dialog'), /lo preparó quien te ayuda para Mauricio/);
+  return { ctx: B.ctx, errors: [...A.errors, ...B.errors] };
+});
+
+test('primer uso en el ordenador: «¿De quién son estos turnos?» (no «¿Cómo te llamas?») y sin saludo con nombre', async () => {
+  const { page, ctx, errors } = await openApp({ device: 'desktop', width: 1280, height: 800, standalone: false });
+  await page.waitForSelector('.onboarding.open');
+  await page.click('[data-testid="ob-next"]');
+  const step = await text(page, '.ob-step[data-step="name"]');
+  assert.match(step, /¿De quién son estos turnos\?/);
+  assert.match(step, /escribe el nombre de esa persona, no el tuyo/);
+  assert.match(step, /Nombre de la persona[\s\S]*¿Cómo sale su nombre en el plan\?/);
+  assert.doesNotMatch(step, /¿Cómo te llamas\?/);
+  await page.fill('[data-testid="ob-name"]', 'Mauricio');
+  await page.click('[data-testid="ob-next"]');
+  await page.click('.ob-skip');
+  await page.waitForSelector('.onboarding', { state: 'detached' });
+  assert.equal((await getState(page)).settings.name, 'Mauricio');
+  await tab(page, 'ajustes');
+  assert.match(await text(page, '#set-name'), /Nombre de la persona[\s\S]*no el tuyo, si la ayudas/i);
+  return { ctx, errors };
+});
+
+test('quien ayuda: un error que no se arregla solo se muestra y no dice «Conectado»', async () => {
+  const gh = fakeGitHub({ empty: true });
+  const helperState = core.updateSettings(core.createDefaultState(), { onboardingDone: true });
+  const { page, ctx, errors } = await openApp({ state: helperState, device: 'desktop', width: 1280, height: 800, standalone: false, gh });
+  // El token solo puede leer: el PUT da 403
+  await page.route('https://api.github.com/**', (r) => (r.request().method() === 'PUT'
+    ? r.fulfill({ status: 403, contentType: 'application/json', headers: { 'access-control-allow-origin': '*' }, body: '{"message":"Resource not accessible by personal access token"}' })
+    : r.fallback()));
+  await tab(page, 'ajustes');
+  await page.click('[data-testid="advanced"] > summary');
+  await page.fill('[data-fkey="gh-owner"]', OWNER);
+  await page.fill('[data-fkey="gh-repo"]', REPO);
+  await page.fill('[data-fkey="gh-token"]', TOKEN);
+  await page.click('[data-fkey="btn-connect"]');
+  await page.waitForSelector('.dialog-wrap.open .dialog-title:text("Falta un detalle")', { timeout: 15000 });
+  await page.click('.dialog-wrap.open .dialog .btn-primary');
+  await page.waitForTimeout(600);
+  assert.equal(await page.locator('.dialog-wrap.open .dialog-title:text("Conectado")').count(), 0, 'sin «Conectado»');
+  assert.equal(await page.locator('[data-testid="make-link"]').count(), 0, 'no hay enlace que crear');
+  return { ctx, errors: errors.filter((e) => !/403/.test(e)) };
+});
+
+test('quien ayuda sin internet: «Se conectará cuando haya internet» y nunca pregunta «¿Usar este dispositivo?»', async () => {
+  const gh = fakeGitHub();
+  await seedRemote(gh, demoState(), { deviceId: 'iphone1' });
+  // El ordenador de quien ayuda ya tiene la conexión (con la clave) pero nunca llegó a leer: GitHub no responde
+  const helperState = core.updateSettings(core.createDefaultState(), { onboardingDone: true, sync: { ...SYNC, deviceId: 'pc1' } });
+  gh.status = 503;
+  const { page, ctx, errors } = await openApp({ state: helperState, device: 'desktop', width: 1280, height: 800, standalone: false, gh });
+  await waitState(page, (s) => s.settings.sync.lastErrorCode === 'SERVER');
+  const offline = (r) => r.abort('internetdisconnected');
+  await page.route('https://api.github.com/**', offline);
+  gh.status = 200;
+  await tab(page, 'ajustes');
+  await page.click('[data-testid="advanced"] > summary');
+  await page.click('[data-fkey="btn-connect"]'); // «Guardar y conectar» otra vez, sin internet
+  await page.waitForSelector('.dialog-wrap.open .dialog-title:text("Guardado, sin conexión")', { timeout: 15000 });
+  assert.match(await text(page, '.dialog-wrap.open .dialog'), /Se conectará cuando haya internet; luego podrás crear el enlace/);
+  await page.click('.dialog-wrap.open .dialog .btn-primary');
+  assert.equal(await page.evaluate(() => localStorage.getItem('turnos-mauricio:ask-takeover')), null, 'quien ayuda no deja pendiente «¿Usar este dispositivo?»');
+  assert.equal(await page.locator('[data-testid="make-link"]').count(), 0, 'todavía no se puede crear el enlace');
+  // Vuelve internet: publica el iPhone, este solo lee y no pregunta nada
+  await page.unroute('https://api.github.com/**', offline);
+  await page.evaluate(() => window.__turnosTest.background().syncNow());
+  await waitState(page, (s) => Boolean(s.settings.sync.lastPullAt));
+  await page.waitForTimeout(800);
+  assert.equal(await page.locator('.dialog-wrap.open').count(), 0, 'no pregunta «¿Usar este dispositivo?»');
+  assert.equal((await getState(page)).settings.sync.publisher, 'iphone1', 'sigue publicando el iPhone');
+  assert.equal(gh.writes().length, 2, 'quien ayuda no escribe nada');
+  await page.waitForSelector('[data-testid="make-link"]');
+  return { ctx, errors: errors.filter((e) => !/ERR_INTERNET_DISCONNECTED|503/.test(e)) };
+});
+
+test('«Crear enlace» no sale si este dispositivo no puede leer el calendario (clave que no vale)', async () => {
+  const gh = fakeGitHub();
+  await seedRemote(gh, demoState(), { deviceId: 'iphone1', key: OTHER_KEY });
+  const state = core.updateSettings(demoState(), { sync: { ...SYNC, deviceId: 'pc1', lastPullAt: '2026-10-12T08:00:00.000Z' } });
+  const { page, ctx, errors } = await openApp({ state, gh, device: 'desktop', width: 1280, height: 800, standalone: false });
+  await waitState(page, (s) => s.settings.sync.lastErrorCode === 'DECRYPT');
+  await tab(page, 'ajustes');
+  await page.click('[data-testid="advanced"] > summary');
+  assert.equal(await page.locator('[data-testid="make-link"]').count(), 0);
+  assert.match(await text(page, '[data-testid="make-link-blocked"]'), /no está disponible[\s\S]*la clave no vale/);
+  return { ctx, errors };
+});
+
+test('Horas: lo acreditado dice vacaciones y enfermedad por separado', async () => {
+  let state = demoState();
+  const at = new Date('2026-10-12T10:00:00Z');
+  state = core.setDay(state, '2026-10-20', ['U'], { now: at });
+  state = core.setDay(state, '2026-10-21', ['K'], { now: at });
+  const { page, ctx, errors } = await openApp({ state });
+  await tab(page, 'horas');
+  assert.match(await text(page, '.hs-foot'), /Incluye 7 h de vacaciones y 7 h de enfermedad\./);
+  state = core.clearDay(state, '2026-10-20', { now: at });
+  const B = await openApp({ state });
+  await tab(B.page, 'horas');
+  assert.match(await text(B.page, '.hs-foot'), /Incluye 7 h de enfermedad\./);
+  assert.doesNotMatch(await text(B.page, '.hs-foot'), /vacaciones/);
+  return { ctx: B.ctx, errors: [...errors, ...B.errors] };
+});
+
+test('revisión: «Esta hoja parece de otra persona» es un aviso naranja (no informativo)', async () => {
+  const { page, ctx, errors } = await openApp({ state: demoState() });
+  const w = 'Esta hoja parece de otra persona: no veo «Ana» en el nombre. Revisa antes de guardar.';
+  await page.evaluate((r) => window.__turnosTest.injectScanResult(r), {
+    layout: 'pc-table', month: 11, year: 2026, days: [{ day: 2, codes: ['F1'], confidence: 0.4 }, { day: 3, codes: ['S1'], confidence: 0.4 }],
+    warnings: [w, 'Otro aviso.'],
+  });
+  await page.waitForSelector('.review-list');
+  const warn = page.locator('[data-testid="other-sheet"]');
+  assert.equal(await warn.count(), 1);
+  assert.match(await warn.getAttribute('class'), /notice-warn/);
+  assert.equal(await warn.innerText(), w);
+  assert.equal(await page.locator('.notice-info', { hasText: 'Esta hoja parece' }).count(), 0);
+  assert.equal(await page.locator('.notice-info', { hasText: 'Otro aviso.' }).count(), 1, 'los demás avisos siguen siendo informativos');
+  return { ctx, errors };
+});
+
+test('360 px: «Desde» (mes) y «En el plan» ponen el campo debajo del texto, sin cortar «Ducuara Mauricio»', async () => {
+  const state = core.updateSettings(demoState(), { name: 'Mauricio', planName: 'Ducuara Mauricio', balances: { overtimeStartMonth: '2026-09' } });
+  const { page, ctx, errors } = await openApp({ state, device: 'android', standalone: false, width: 360, height: 740 });
+  await tab(page, 'ajustes');
+  await page.click('[data-testid="payroll"] > summary');
+  const m = await page.evaluate(() => {
+    const geo = (el) => { const r = el.getBoundingClientRect(); return { top: r.top, bottom: r.bottom, w: r.width }; };
+    const plan = document.querySelector('[data-fkey="planName"]');
+    const month = document.querySelector('[data-fkey="ot-month"]');
+    const planLabel = plan.closest('.set-row').querySelector('.set-row-main');
+    const monthLabel = month.closest('.set-row').querySelector('.set-row-main');
+    return { plan: geo(plan), planLabel: geo(planLabel), planFits: plan.scrollWidth <= plan.clientWidth + 1, month: geo(month), monthLabel: geo(monthLabel) };
+  });
+  assert.ok(m.plan.top >= m.planLabel.bottom - 1, 'el campo del plan va debajo');
+  assert.ok(m.plan.w > 230, `campo del plan ancho (${m.plan.w})`);
+  assert.ok(m.planFits, '«Ducuara Mauricio» cabe entero');
+  assert.ok(m.month.top >= m.monthLabel.bottom - 1, 'el mes va debajo de «Desde»');
+  assert.ok(m.monthLabel.w > 250, `el texto de «Desde» no se aprieta (${m.monthLabel.w})`);
+  assert.deepEqual(await findOverflow(page), []);
+  return { ctx, errors };
+});
+
+test('PWA: el lector se descarga en segundo plano y el primer escaneo funciona SIN NINGUNA conexión', async () => {
+  // Servidor propio delante del estático (para apagarlo) que anota lo que le llega
+  const hits = [];
+  const sockets = new Set();
+  const proxy = http.createServer(async (req, res) => {
+    hits.push(req.url);
+    try {
+      const r = await fetch(server.url + req.url);
+      res.writeHead(r.status, { 'content-type': r.headers.get('content-type') || 'application/octet-stream', 'cache-control': 'no-store' });
+      res.end(Buffer.from(await r.arrayBuffer()));
+    } catch { res.writeHead(502).end(); }
+  });
+  proxy.on('connection', (s) => { sockets.add(s); s.on('close', () => sockets.delete(s)); });
+  await new Promise((r) => proxy.listen(0, '127.0.0.1', r));
+  // Que las rutas y el modo sin conexión de Playwright lleguen también a las peticiones del service worker
+  const prevFlag = process.env.PW_EXPERIMENTAL_SERVICE_WORKER_NETWORK_EVENTS;
+  process.env.PW_EXPERIMENTAL_SERVICE_WORKER_NETWORK_EVENTS = '1';
+  try {
+    const ctx = await iphoneContext(browser, { scale: 1, sw: 'allow' });
+    openContexts.push(ctx);
+    const errors = [];
+    const page = await preparePage(ctx, { state: core.updateSettings(core.createDefaultState(), { onboardingDone: true }), errors, standalone: true });
+    await page.addInitScript(() => { window.__turnosPrefetch = { delay: 300 }; });
+    const base = `http://127.0.0.1:${proxy.address().port}/docs/`;
+    await page.goto(base);
+    await page.waitForSelector('.tabbar');
+    // Descarga en segundo plano (sin escanear nada)
+    await page.waitForFunction(() => window.__turnosTest.prefetch()?.status().status === 'done', null, { timeout: 60000 });
+    const files = await page.evaluate(() => window.__turnosTest.prefetch().files());
+    assert.equal(files.length, 4, `un solo núcleo (el de este dispositivo): ${files.join(', ')}`);
+    assert.ok(files.some((f) => /core\/tesseract-core-[a-z]*-?lstm\.wasm\.js$/.test(f)));
+    assert.ok(files.some((f) => f.endsWith('lang/best_int/eng.traineddata.gz')));
+    assert.equal(await page.evaluate(() => typeof window.Tesseract), 'undefined', 'no se ejecutó el lector: solo se descargó');
+    const cached = await page.evaluate(async () => {
+      const name = (await caches.keys()).find((k) => k.startsWith('turnos-vendor-'));
+      return { name, urls: (await (await caches.open(name)).keys()).map((r) => r.url) };
+    });
+    for (const f of files) assert.ok(cached.urls.includes(f), `en la caché ${cached.name}: ${f}`);
+    const others = ['simd', 'relaxedsimd', ''].map((v) => `core/tesseract-core-${v ? `${v}-` : ''}lstm.wasm.js`).filter((c) => !files.some((f) => f.endsWith(c)));
+    assert.equal(others.length, 2);
+    assert.ok(!cached.urls.some((u) => others.some((c) => u.endsWith(c))), 'los otros núcleos no se descargan');
+    // Sin conexión de verdad: rutas abortadas (también las del service worker) + sin conexión + servidor apagado
+    await ctx.route('**', (r) => r.abort('internetdisconnected'));
+    await ctx.setOffline(true);
+    // Comprobación: una petición que el service worker manda a la red (no está en su caché) no llega
+    const before = hits.length;
+    const probe = await page.evaluate(async () => {
+      try { const r = await fetch('vendor/tesseract/no-esta-en-cache.js?sonda'); return `respuesta ${r.status}`; } catch (e) { return 'error'; }
+    });
+    assert.equal(probe, 'error', 'la petición del service worker a la red falla');
+    assert.equal(hits.slice(before).filter((u) => /sonda/.test(u)).length, 0, 'el bloqueo llega a las peticiones del service worker');
+    for (const s of sockets) s.destroy();
+    await new Promise((r) => proxy.close(r));
+    // Abrir otra vez la app y escanear por primera vez, sin red
+    await page.reload();
+    await page.waitForSelector('.tabbar');
+    const hitsOffline = hits.length;
+    await tab(page, 'escanear');
+    await page.setInputFiles('input[data-testid="scan-pick"]', PHOTO);
+    await page.waitForSelector('.review-list, .fallback, [data-testid="ocr-failed"]', { timeout: 90000 });
+    assert.equal(await page.locator('[data-testid="ocr-failed"]').count(), 0, 'el lector arranca sin conexión');
+    assert.ok(await page.locator('.review-list').count() > 0, 'llega a la revisión');
+    assert.match(await text(page, '.review-month'), /Octubre/i);
+    assert.equal(hits.length, hitsOffline, 'nada llegó al servidor');
+    return { ctx, errors: errors.filter((e) => !/ERR_INTERNET_DISCONNECTED|ERR_FAILED|Failed to fetch|no-esta-en-cache/.test(e)) };
+  } finally {
+    if (prevFlag === undefined) delete process.env.PW_EXPERIMENTAL_SERVICE_WORKER_NETWORK_EVENTS;
+    else process.env.PW_EXPERIMENTAL_SERVICE_WORKER_NETWORK_EVENTS = prevFlag;
+    for (const s of sockets) s.destroy();
+    proxy.close();
+  }
+}, { slow: true });
+
+// ---------- 1.4.3 ----------
+
+// Teléfono de Ana con sus turnos (ANA-MARK), nunca conectado. name '' = saltó «¿Cómo te llamas?»
+function anaPhoneState(name = '') {
+  let st = core.updateSettings(core.createDefaultState(), { onboardingDone: true, name });
+  st = core.setDay(st, '2026-10-15', ['N1'], { now: new Date('2026-10-12T10:00:00Z') });
+  st = core.setDay(st, '2026-12-24', ['N1'], { note: 'ANA-MARK', now: new Date('2026-10-12T10:00:00Z') });
+  return st;
+}
+const copiesIn = (page) => page.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith('turnos-mauricio:before-import:')).length);
+const mauState = () => core.updateSettings(demoState(), { name: 'Mauricio', sync: { ...SYNC, deviceId: 'iphone1' } });
+
+test('S2b: teléfono sin nombre y con turnos abre el enlace de Mauricio: «¿Estos turnos son de Mauricio?»; «No» → cancelar o cambiar limpio', async () => {
+  const gh = await familyGitHub();
+  const rootBackup = gh.text('backup.json');
+  const { page, ctx, errors } = await openApp({ state: anaPhoneState(), gh, device: 'android', standalone: false });
+  await recordDialogs(page);
+  const writes = gh.writes().length;
+  const link = setupHash({ name: 'Mauricio' });
+  await openHash(page, link);
+  await waitDialog(page, '¿Estos turnos son de Mauricio?');
+  assert.deepEqual(await titles(page), ['¿Estos turnos son de Mauricio?'], 'lo primero: de quién son (sin «Conectar…» ni «¿Usar este…?»)');
+  const q = await text(page, '.dialog-wrap.open .dialog');
+  assert.match(q, /En este teléfono hay 2 días con turnos y no dice de quién son\. El enlace es del calendario de Mauricio: si son de Mauricio, se juntan con su calendario\. Si son de otra persona, toca «No» y no se junta nada\./);
+  await clickDialog(page, 'No');
+  await waitDialog(page, '¿Cambiar este teléfono al calendario de Mauricio?');
+  assert.match(await text(page, '.dialog-wrap.open .dialog'), /no se juntan con los de Mauricio[\s\S]*se guardan como copia y puedes deshacerlo[\s\S]*pide el correcto/);
+  await clickDialog(page, 'Cancelar');
+  await page.waitForSelector('.dialog-wrap', { state: 'detached' });
+  await page.waitForTimeout(300);
+  let s = await getState(page);
+  assert.deepEqual([s.settings.sync.enabled, s.settings.name, Object.keys(s.days).sort()], [false, '', ['2026-10-15', '2026-12-24']], 'Cancelar: nada cambia');
+  assert.equal(await copiesIn(page), 0, 'sin copia sobrante');
+  assert.equal(gh.writes().length, writes);
+  // Otra vez: «No» → «Sí, cambiar»: solo lo de Mauricio, y no se ofrece tomar el relevo
+  await page.evaluate(() => { location.hash = ''; });
+  await openHash(page, link);
+  await waitDialog(page, '¿Estos turnos son de Mauricio?');
+  await clickDialog(page, 'No');
+  await waitDialog(page, '¿Cambiar este teléfono al calendario de Mauricio?');
+  await clickDialog(page, 'Sí, cambiar');
+  await page.waitForSelector('[data-testid="subscribe-step"]', { timeout: 15000 });
+  assert.ok(!(await titles(page)).some((t) => /¿Usar este/.test(t)), `sin «¿Usar este…?»: ${await titles(page)}`);
+  assert.match(await text(page, '[data-testid="switched-note"]'), /Solo lee: ese calendario lo sigue actualizando otro dispositivo/);
+  s = await getState(page);
+  assert.equal(s.settings.sync.dir, '');
+  assert.ok(!s.days['2026-12-24'] && s.days['2026-10-15']?.codes.join() !== 'N1', 'sin los turnos de Ana');
+  assert.equal(s.settings.name, 'Mauricio');
+  assert.equal(gh.text('backup.json'), rootBackup, 'el calendario de Mauricio no cambia');
+  assert.equal(gh.writes().length, writes, 'nada se escribe');
+  // «Restaurar»: la copia de antes (sin conectar) lo dice
+  await page.click('.sheet-subscribe .sheet-close');
+  await page.waitForSelector('.sheet-wrap', { state: 'detached' });
+  await page.click('[data-testid="advanced"] > summary');
+  const row = page.locator('#set-restore .set-row', { hasText: 'Copia de antes de cambiar de calendario' });
+  assert.match(await row.innerText(), /2 días \(sin conectar\)/);
+  await row.locator('[data-testid="restore-copy"]').click();
+  await waitDialog(page, '¿Volver a esta copia?');
+  const r = await text(page, '.dialog-wrap.open .dialog');
+  assert.match(r, /con 2 días \(sin conectar\)\. Este dispositivo vuelve a como estaba \(sin conectar\) y deja el calendario de ahora\./);
+  assert.doesNotMatch(r, /vuelve a ese calendario|Ojo/);
+  await clickDialog(page, 'Volver a esta copia');
+  await waitState(page, (x) => Boolean(x.days['2026-12-24']) && x.settings.sync.enabled === false && x.settings.name === '');
+  await page.waitForTimeout(800);
+  assert.equal(gh.writes().length, writes, 'tampoco al volver');
+  return { ctx, errors };
+});
+
+test('S2b: «Sí, son de Mauricio» → «¿Usar este teléfono para actualizar el calendario de Mauricio?… Hazlo solo si…»; «No, solo leer» no publica', async () => {
+  const gh = await familyGitHub();
+  const rootBackup = gh.text('backup.json');
+  const { page, ctx, errors } = await openApp({ state: anaPhoneState(), gh, device: 'android', standalone: false });
+  const writes = gh.writes().length;
+  await openHash(page, setupHash({ name: 'Mauricio' }));
+  await waitDialog(page, '¿Estos turnos son de Mauricio?');
+  await clickDialog(page, 'Sí, son de Mauricio');
+  await waitDialog(page, '¿Usar este teléfono para actualizar el calendario de Mauricio?');
+  const q = await text(page, '.dialog-wrap.open .dialog');
+  assert.match(q, /Hazlo solo si este es el teléfono de Mauricio\./);
+  assert.doesNotMatch(q, /Recomendado si este es tu/);
+  await clickDialog(page, 'No, solo leer');
+  await page.waitForSelector('[data-testid="subscribe-step"]', { timeout: 15000 });
+  const s = await getState(page);
+  assert.equal(s.settings.name, 'Mauricio', '«Sí»: el teléfono es de Mauricio');
+  assert.ok(s.days['2026-12-24'], 'sus turnos se quedan aquí');
+  assert.equal(gh.text('backup.json'), rootBackup, 'solo lee');
+  assert.equal(gh.writes().length, writes);
+  return { ctx, errors };
+});
+
+test('el teléfono de Ana (con nombre, sin turnos) abre el enlace de Mauricio: tomar el relevo no se recomienda («No, solo leer» primero)', async () => {
+  const gh = await familyGitHub({ ana: false });
+  const rootBackup = gh.text('backup.json');
+  const st = core.updateSettings(core.createDefaultState(), { onboardingDone: true, name: 'Ana' });
+  const { page, ctx, errors } = await openApp({ state: st, gh, device: 'android', standalone: false });
+  await openHash(page, setupHash({ name: 'Mauricio' }));
+  await waitDialog(page, 'Conectar el calendario del teléfono');
+  await clickDialog(page, 'Sí, conectar');
+  await waitDialog(page, '¿Usar este teléfono para actualizar el calendario de Mauricio?');
+  assert.match(await text(page, '.dialog-wrap.open .dialog'), /Hazlo solo si este es el teléfono de Mauricio\./);
+  assert.deepEqual(await page.locator('.dialog-wrap.open .dialog-actions button').allInnerTexts(), ['No, solo leer', 'Sí, usar este']);
+  assert.equal(await text(page, '.dialog-wrap.open .dialog .btn-primary'), 'No, solo leer');
+  await clickDialog(page, 'No, solo leer');
+  await page.waitForSelector('[data-testid="subscribe-step"]', { timeout: 15000 });
+  assert.equal(gh.text('backup.json'), rootBackup);
+  return { ctx, errors };
+});
+
+test('S1: el iPhone de Mauricio cambia al calendario de Ana: no se ofrece tomar el relevo y «Deshacer» deja ana/ con su teléfono publicando', async () => {
+  const gh = await familyGitHub();
+  const anaBefore = gh.text('ana/backup.json');
+  const { page, ctx, errors } = await openApp({ state: mauState(), gh, standalone: true });
+  await waitState(page, (s) => Boolean(s.settings.sync.lastPullAt));
+  await recordDialogs(page);
+  const writes = gh.writes().length;
+  await openHash(page, anaHash());
+  await waitDialog(page, '¿Cambiar al calendario de Ana?');
+  await clickDialog(page, 'Sí, cambiar');
+  await page.waitForSelector('[data-testid="subscribe-step"]', { timeout: 15000 });
+  assert.deepEqual(await titles(page), ['¿Cambiar al calendario de Ana?'], 'ni «Conectar…» ni «¿Usar este iPhone…?»');
+  const s = await getState(page);
+  assert.deepEqual([s.settings.sync.dir, s.settings.sync.publisher, s.settings.sync.key], ['ana', 'android-ana', OTHER_KEY]);
+  await page.click('[data-testid="switch-undo"]');
+  await waitState(page, (x, k) => x.settings.sync.dir === '' && x.settings.sync.key === k, KEY);
+  await page.evaluate(() => window.__turnosTest.background().runSync({ manual: true, force: true }));
+  await page.waitForTimeout(1200);
+  assert.equal(gh.text('ana/backup.json'), anaBefore, 'ana/ sigue igual');
+  assert.equal(gh.json('ana/backup.json').meta.publisher, 'android-ana', 'lo sigue publicando el teléfono de Ana');
+  assert.equal(gh.writes().slice(writes).filter((l) => /\/contents\/ana\//.test(l)).length, 0, 'nada se escribe en ana/');
+  return { ctx, errors };
+});
+
+test('S1b: tras cambiar al calendario de Ana, «Usar este dispositivo» lo nombra y «Restaurar» avisa de que dejará de actualizarse', async () => {
+  const gh = await familyGitHub();
+  const { page, ctx, errors } = await openApp({ state: mauState(), gh, standalone: true });
+  await waitState(page, (s) => Boolean(s.settings.sync.lastPullAt));
+  await openHash(page, anaHash());
+  await waitDialog(page, '¿Cambiar al calendario de Ana?');
+  await clickDialog(page, 'Sí, cambiar');
+  await page.waitForSelector('[data-testid="subscribe-step"]', { timeout: 15000 });
+  await page.click('.sheet-subscribe .sheet-close');
+  await page.waitForSelector('.sheet-wrap', { state: 'detached' });
+  await page.click('[data-testid="takeover"]');
+  await waitDialog(page, '¿Actualizar el calendario de Ana desde este iPhone?');
+  assert.match(await text(page, '.dialog-wrap.open .dialog'), /Hazlo solo si este es el iPhone de Ana\./);
+  await clickDialog(page, 'Sí, usar este');
+  await page.waitForSelector('.toast:has-text("ahora el calendario se actualiza desde aquí")', { timeout: 15000 });
+  assert.equal(gh.json('ana/backup.json').meta.publisher, 'iphone1');
+  await page.click('[data-testid="advanced"] > summary');
+  const row = page.locator('#set-restore .set-row', { hasText: 'Copia de antes de cambiar de calendario' });
+  await row.locator('[data-testid="restore-copy"]').click();
+  await waitDialog(page, '¿Volver a esta copia?');
+  assert.match(await text(page, '.dialog-wrap.open .dialog'), /\(calendario de Mauricio\)\. Este dispositivo vuelve a ese calendario y deja el de ahora\. Ojo: este iPhone actualiza ahora el calendario de Ana: dejará de actualizarse hasta que otro dispositivo toque «Usar este dispositivo»\./);
+  await clickDialog(page, 'Cancelar');
+  return { ctx, errors };
+});
+
+test('misma persona en otra carpeta: tras cambiar se ofrece el relevo con su nombre (recomendado) y «Deshacer» recuerda «Usar este dispositivo»', async () => {
+  const gh = await familyGitHub({ ana: false });
+  const MKEY = Buffer.alloc(32, 5).toString('base64url');
+  // Quien ayuda preparó otra carpeta para Mauricio y la publica desde su ordenador (vacía)
+  await seedRemote(gh, core.updateSettings(core.createDefaultState(), { onboardingDone: true }), { deviceId: 'pc1', dir: 'mauricio', key: MKEY, name: 'Mauricio' });
+  const { page, ctx, errors } = await openApp({ state: mauState(), gh, standalone: true });
+  await waitState(page, (s) => Boolean(s.settings.sync.lastPullAt));
+  await openHash(page, setupHash({ dir: 'mauricio', key: MKEY, name: 'Mauricio' }));
+  await waitDialog(page, '¿Cambiar de calendario?');
+  await clickDialog(page, 'Sí, cambiar');
+  await waitDialog(page, '¿Usar este iPhone para actualizar el calendario de Mauricio?');
+  assert.equal(await text(page, '.dialog-wrap.open .dialog .btn-primary'), 'Sí, usar este', 'recomendado: la misma persona');
+  await clickDialog(page, 'Sí, usar este');
+  await page.waitForSelector('[data-testid="subscribe-step"]', { timeout: 15000 });
+  await waitState(page, (x) => x.settings.sync.dir === 'mauricio' && x.settings.sync.publisher === x.settings.sync.deviceId);
+  assert.equal(gh.json('mauricio/backup.json').meta.publisher, 'iphone1');
+  await page.click('[data-testid="switch-undo"]');
+  await page.waitForSelector('.toast:has-text("ya no se actualiza desde aquí: en el dispositivo que lo usa, toca «Usar este dispositivo»")', { timeout: 10000 });
+  await waitState(page, (x) => x.settings.sync.dir === '');
+  return { ctx, errors };
+});
+
+test('S2c: enlace antiguo sin nombre y copia de la raíz sin meta.name: el nombre sale del calendario publicado («Turnos de Mauricio»)', async () => {
+  const gh = await familyGitHub({ ana: false });
+  const doc = gh.json('backup.json');
+  delete doc.meta.name; // como una copia de 1.4.1 (no va en los datos autenticados)
+  gh.write('backup.json', JSON.stringify(doc));
+  assert.match(gh.text('turnos.ics'), /X-WR-CALNAME:Turnos de Mauricio/);
+  const { page, ctx, errors } = await openApp({ state: anaPhoneState('Ana'), gh, device: 'android', standalone: false });
+  const writes = gh.writes().length;
+  await openHash(page, setupHash());
+  await waitDialog(page, 'Conectar el calendario del teléfono'); // el enlace no dice de quién es
+  await clickDialog(page, 'Sí, conectar');
+  await waitDialog(page, '¿Cambiar al calendario de Mauricio?');
+  assert.match(await text(page, '.dialog-wrap.open .dialog'), /Este enlace es del calendario de Mauricio y en este dispositivo hay turnos de Ana\./);
+  await clickDialog(page, 'Cancelar');
+  await page.waitForSelector('.dialog-wrap', { state: 'detached' });
+  await page.waitForTimeout(300);
+  const s = await getState(page);
+  assert.equal(s.settings.sync.enabled, false);
+  assert.ok(s.days['2026-12-24']);
+  assert.equal(gh.writes().length, writes);
+  return { ctx, errors };
+});
+
+test('S3b: quien ayuda cambia de rama en el formulario: no se pregunta ni se crea la rama; recomienda «Crear enlace para otra persona»', async () => {
+  const gh = await familyGitHub({ ana: false });
+  const helper = core.updateSettings(core.createDefaultState(), { onboardingDone: true, name: 'Mauricio', sync: { ...SYNC, deviceId: 'pc1' } });
+  const { page, ctx, errors } = await openApp({ state: helper, gh, device: 'desktop', width: 1280, height: 800, standalone: false });
+  await waitState(page, (s) => Boolean(s.settings.sync.lastPullAt) && Object.keys(s.days).length > 5);
+  await recordDialogs(page);
+  const writes = gh.writes().length;
+  const nDays = Object.keys((await getState(page)).days).length;
+  await tab(page, 'ajustes');
+  await page.click('[data-testid="advanced"] > summary');
+  await page.fill('[data-fkey="gh-branch"]', 'datos');
+  await page.click('[data-fkey="btn-connect"]');
+  await waitDialog(page, 'No se pudo conectar');
+  assert.match(await text(page, '.dialog-wrap.open .dialog'), /Esa rama todavía no existe[\s\S]*usa «Crear enlace para otra persona» \(le crea su carpeta\)\. No se cambió nada\./);
+  assert.deepEqual(await titles(page), ['No se pudo conectar'], 'sin «¿Cambiar de calendario?» antes');
+  await clickDialog(page, 'Entendido');
+  const s = await getState(page);
+  assert.deepEqual([s.settings.sync.branch, Object.keys(s.days).length], ['', nDays], 'nada cambia');
+  assert.equal(gh.branches.datos, undefined, 'la rama no se creó');
+  assert.equal(gh.writes().length, writes, 'nada se escribe');
+  assert.equal(await copiesIn(page), 0);
+  return { ctx, errors: errors.filter((e) => !/404/.test(e)) };
+});
+
+test('sin internet, un enlace de otro calendario en un teléfono conectado: «no se cambió nada… Abre el enlace otra vez»', async () => {
+  const gh = await familyGitHub();
+  const { page, ctx, errors } = await openApp({ state: mauState(), gh, standalone: true });
+  await waitState(page, (s) => Boolean(s.settings.sync.lastPullAt));
+  const before = await getState(page);
+  await page.route('https://api.github.com/**', (r) => r.abort('internetdisconnected'));
+  await openHash(page, anaHash());
+  await waitDialog(page, 'No se pudo conectar');
+  assert.equal(await text(page, '.dialog-wrap.open .dialog-text'), 'Sin conexión a internet: no se cambió nada. Abre el enlace otra vez cuando tengas internet.');
+  await clickDialog(page, 'Entendido');
+  const after = await getState(page);
+  assert.deepEqual([after.settings.sync.dir, after.settings.sync.key, Object.keys(after.days).length], ['', KEY, Object.keys(before.days).length]);
+  assert.equal(await copiesIn(page), 0);
+  return { ctx, errors: errors.filter((e) => !/INTERNET_DISCONNECTED|Failed to fetch/.test(e)) };
+});
+
+test('quien ayuda vuelve por el formulario a un calendario sin su clave: el aviso explica «Restaurar → Copia de antes de cambiar de calendario»', async () => {
+  const gh = await familyGitHub({ ana: false });
+  const other = fakeGitHub({ empty: true });
+  const helper = core.updateSettings(core.createDefaultState(), { onboardingDone: true, name: 'Mauricio', sync: { ...SYNC, deviceId: 'pc1' } });
+  const { page, ctx, errors } = await openApp({ state: helper, gh, device: 'desktop', width: 1280, height: 800, standalone: false });
+  const cors = { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*', 'access-control-allow-methods': 'GET,PUT,POST,DELETE' };
+  await page.route('https://api.github.com/repos/*/ana-datos**', (route) => {
+    const req = route.request();
+    if (req.method() === 'OPTIONS') return route.fulfill({ status: 204, headers: cors });
+    const r = other.handle({ method: req.method(), url: req.url(), body: req.postData() });
+    return route.fulfill({ status: r.status, contentType: 'application/json', headers: cors, body: JSON.stringify(r.body) });
+  });
+  await waitState(page, (s) => Boolean(s.settings.sync.lastPullAt) && Object.keys(s.days).length > 5);
+  await tab(page, 'ajustes');
+  await page.click('[data-testid="advanced"] > summary');
+  await page.fill('[data-fkey="gh-repo"]', 'ana-datos');
+  await page.click('[data-fkey="btn-connect"]');
+  await waitDialog(page, '¿Cambiar de calendario?');
+  await clickDialog(page, 'Sí, cambiar');
+  await waitDialog(page, 'Conectado');
+  await clickDialog(page, 'Entendido');
+  await waitState(page, (s) => s.settings.sync.repo === 'ana-datos');
+  await page.fill('[data-fkey="gh-repo"]', REPO);
+  await page.click('[data-fkey="btn-connect"]');
+  await waitDialog(page, 'No se pudo conectar');
+  const msg = await text(page, '.dialog-wrap.open .dialog-text');
+  assert.match(msg, /^Falta la clave para leer tus turnos guardados en internet\. No se envió nada\. Para volver a un calendario que ya usabas aquí: Opciones avanzadas → Restaurar → «Copia de antes de cambiar de calendario», o abre aquí el enlace del teléfono que lo publica\.$/);
+  assert.doesNotMatch(msg, /Pide ayuda a quien te configuró/);
+  await clickDialog(page, 'Entendido');
+  return { ctx, errors: errors.filter((e) => !/404|409/.test(e)) };
+});
+
+test('PWA: si empieza un escaneo mientras se descarga el lector, se corta la descarga en curso (y se reintenta luego)', async () => {
+  // Servidor delante del estático: el diccionario (eng.traineddata.gz) tarda en llegar
+  const sockets = new Set();
+  const proxy = http.createServer(async (req, res) => {
+    try {
+      const r = await fetch(server.url + req.url);
+      const body = Buffer.from(await r.arrayBuffer());
+      res.writeHead(r.status, { 'content-type': r.headers.get('content-type') || 'application/octet-stream', 'cache-control': 'no-store', 'content-length': body.length });
+      if (!/eng\.traineddata/.test(req.url)) { res.end(body); return; }
+      res.write(body.subarray(0, 1024));
+      setTimeout(() => { try { res.end(body.subarray(1024)); } catch { /* cortado */ } }, 15000);
+    } catch { res.writeHead(502).end(); }
+  });
+  proxy.on('connection', (sk) => { sockets.add(sk); sk.on('close', () => sockets.delete(sk)); });
+  await new Promise((r) => proxy.listen(0, '127.0.0.1', r));
+  try {
+    const ctx = await iphoneContext(browser, { scale: 1, sw: 'allow' });
+    openContexts.push(ctx);
+    const errors = [];
+    const page = await preparePage(ctx, { state: core.updateSettings(core.createDefaultState(), { onboardingDone: true }), errors, standalone: true });
+    await page.addInitScript(() => { window.__turnosPrefetch = false; });
+    await page.goto(`http://127.0.0.1:${proxy.address().port}/docs/`);
+    await page.waitForSelector('.tabbar');
+    await page.waitForFunction(() => Boolean(navigator.serviceWorker.controller), null, { timeout: 20000 });
+    await page.evaluate(async () => {
+      const { createOcrPrefetch } = await import('./js/ui/prefetch.js');
+      window.__busy = false;
+      window.__pf = createOcrPrefetch({ isBusy: () => window.__busy });
+      window.__pf.run();
+    });
+    // Ya bajó el lector y su núcleo; el diccionario está a medias
+    await page.waitForFunction(() => window.__pf.status().status === 'running' && window.__pf.status().fetched.length === 3, null, { timeout: 60000 });
+    await page.evaluate(() => { window.__busy = true; }); // empieza un escaneo
+    await page.waitForFunction(() => window.__pf.status().aborted === 1, null, { timeout: 5000 });
+    const st = await page.evaluate(() => window.__pf.status());
+    assert.equal(st.status, 'waiting', 'se aplaza (se reintenta luego)');
+    assert.equal(st.error, null);
+    const cached = await page.evaluate(async () => Boolean(await caches.match(window.__pf.files().find((f) => f.endsWith('eng.traineddata.gz')))));
+    assert.equal(cached, false, 'el diccionario a medias no queda en la caché');
+    return { ctx, errors: errors.filter((e) => !/abort/i.test(e)) };
+  } finally {
+    for (const sk of sockets) sk.destroy();
+    proxy.close();
+  }
+}, { slow: true });
 
 // ---------------------------------------------------------------------------
 

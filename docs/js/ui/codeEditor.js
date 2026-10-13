@@ -1,7 +1,8 @@
 // Hoja "Código": crear o editar un código. Lo de todos los días (horario, pausa, lugar) a la vista;
 // tipo, color y forma en «Más opciones».
 import {
-  DEFAULT_CODES, cleanCode, countsAsWork, deleteCode, formatHours, getCode, nominalMinutes, parseHHMM, toKey, upsertCode,
+  DEFAULT_CODES, cleanCode, countsAsWork, deleteCode, formatHours, getCode, mapsUrl, nominalMinutes, parseHHMM, toKey, travelOf,
+  upsertCode,
 } from '../core/index.js';
 import { badgeFromDef, KIND_LABEL } from './badge.js';
 import { contrastText, h, nextId, parseNum, plural, setChildren } from './dom.js';
@@ -21,10 +22,14 @@ const SHAPE_BY_KIND = { event: 'hexagon', wish: 'tag', vacation: 'text', off: 't
 const SHAPES = [['circle', 'Círculo'], ['hexagon', 'Hexágono'], ['tag', 'Etiqueta'], ['text', 'Solo texto']];
 const BREAKS = [0, 15, 30, 45, 60, 90];
 const TIMED = ['shift', 'event', 'other'];
+// Tiempo de viaje (SPEC §13.2), sobre todo en lugares
+const TRAVEL = [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 60, 75, 90, 120, 150, 180];
+const TRAVEL_KINDS = ['place', 'shift', 'event'];
+const travelLabel = (m) => (!m ? 'Sin viaje' : m < 60 ? `${m} min` : formatHours(m));
 
 // Campos que se comparan para saber si hay cambios sin guardar
 const snap = (d) => JSON.stringify([d.code, d.kind, d.name, d.start || '', d.end || '', Number(d.breakMin) || 0, Boolean(d.countsHours),
-  d.creditHours ?? null, d.color, d.shape, d.place || '']);
+  d.creditHours ?? null, d.color, d.shape, d.place || '', Number(d.travelMin) || 0]);
 
 // Días del plan que usan el código (desde 'from', si se indica) y no tienen un horario especial para él
 function daysUsing(state, code, from = null) {
@@ -37,9 +42,9 @@ export function openCodeEditor(ctx, code, opts = {}) {
   const { store } = ctx;
   const isNew = !code;
   const existing = code ? getCode(store.get(), code) : null;
-  const d = existing ? { ...existing, start: existing.start || '', end: existing.end || '' } : {
+  const d = existing ? { ...existing, start: existing.start || '', end: existing.end || '', travelMin: travelOf(existing) } : {
     code: '', kind: opts.kind || 'shift', name: '', start: '', end: '', breakMin: 30, countsHours: true,
-    creditHours: null, color: '#F2E500', textColor: '#1F1F1F', shape: 'circle', place: '', confirmed: true,
+    creditHours: null, color: '#F2E500', textColor: '#1F1F1F', shape: 'circle', place: '', confirmed: true, travelMin: 0,
   };
   const initial = snap(d);
   const wasUnconfirmed = existing?.confirmed === false;
@@ -63,6 +68,9 @@ export function openCodeEditor(ctx, code, opts = {}) {
   const breakSel = h('select', { class: 'input select', id: `${fid}-break`, value: String(d.breakMin ?? 0), on: { change: () => { d.breakMin = Number(breakSel.value); updatePreview(); } } },
     [...new Set([...BREAKS, Number(d.breakMin) || 0])].sort((a, b) => a - b).map((m) => h('option', { value: String(m) }, m ? `${m} min` : 'Sin pausa')));
   const placeInput = h('input', { class: 'input', id: `${fid}-place`, value: d.place || '', maxlength: '80', placeholder: 'Ej.: Karl-Marx-Str. 1 / Ruta norte', on: { input: () => { d.place = placeInput.value; updatePreview(); } } });
+  const travelSel = h('select', { class: 'input select', id: `${fid}-travel`, value: String(d.travelMin || 0), 'data-testid': 'ce-travel', on: { change: () => { d.travelMin = Number(travelSel.value) || 0; updatePreview(); } } },
+    [...new Set([...TRAVEL, Number(d.travelMin) || 0])].sort((a, b) => a - b).map((m) => h('option', { value: String(m) }, travelLabel(m))));
+  const mapsLink = h('a', { class: 'link-btn ce-maps', target: '_blank', rel: 'noopener', 'data-testid': 'ce-maps' }, icon('map'), 'Abrir en Mapas');
   const creditInput = h('input', {
     class: 'input', id: `${fid}-credit`, inputmode: 'decimal', value: d.creditHours == null ? '' : String(d.creditHours).replace('.', ','),
     placeholder: 'Automático (tu jornada)', on: { input: () => { d.creditHours = creditInput.value.trim() === '' ? null : parseNum(creditInput.value); } },
@@ -86,7 +94,8 @@ export function openCodeEditor(ctx, code, opts = {}) {
     h('p', { class: 'hint ce-overnight', hidden: true }, '🌙 Termina al día siguiente.'));
   const secCounts = h('label', { class: 'switch-row', for: countsSwitch.id }, h('span', {}, 'Cuenta como horas de trabajo'), countsSwitch);
   const secCredit = field('Horas que cuenta por día', creditInput, 'Déjalo vacío para usar tu jornada normal.');
-  const secPlace = h('div', { class: 'field' }, placeLabel, placeInput);
+  const secPlace = h('div', { class: 'field' }, placeLabel, placeInput, mapsLink);
+  const secTravel = field('Tiempo de viaje', travelSel, 'El aviso «antes del turno» llega antes y te dice a qué hora salir.');
   const more = h('details', { class: 'ce-more', open: isNew || d.kind === 'other', dataset: { testid: 'ce-more' } },
     h('summary', {}, h('span', {}, 'Más opciones'), h('span', { class: 'ce-more-sub' }, 'tipo, color y forma'), icon('chevronDown', 'icon chev')),
     h('div', { class: 'ce-more-body' },
@@ -135,6 +144,7 @@ export function openCodeEditor(ctx, code, opts = {}) {
     secCounts.hidden = k !== 'event';
     secCredit.hidden = !['vacation', 'sick'].includes(k);
     secPlace.hidden = !['shift', 'place', 'event'].includes(k);
+    secTravel.hidden = !TRAVEL_KINDS.includes(k);
     placeLabel.textContent = k === 'place' ? '¿Dónde es? (nombre o dirección)' : 'Lugar (opcional)';
     // Un lugar no necesita nombre aparte: basta con «¿Dónde es?»
     if (isNew) nameInput.closest('.field').hidden = k === 'place';
@@ -151,10 +161,15 @@ export function openCodeEditor(ctx, code, opts = {}) {
       creditHours: ['vacation', 'sick'].includes(d.kind) ? d.creditHours : null, confirmed: true,
       start: TIMED.includes(d.kind) && d.start ? d.start : null,
       end: TIMED.includes(d.kind) && d.end ? d.end : null,
+      travelMin: TRAVEL_KINDS.includes(d.kind) ? Number(d.travelMin) || 0 : 0,
     };
   }
 
   function updatePreview() {
+    // «Abrir en Mapas» solo con una dirección
+    const url = mapsUrl(d.place || '', ctx.platform);
+    mapsLink.hidden = !url;
+    if (url) mapsLink.href = url;
     const s = parseHHMM(d.start), e = parseHHMM(d.end);
     secTime.querySelector('.ce-overnight').hidden = !(s !== null && e !== null && e <= s);
     const def = { ...buildDef(d.code || '?'), code: d.code || '?' };
@@ -167,6 +182,7 @@ export function openCodeEditor(ctx, code, opts = {}) {
     } else if (d.kind === 'place') {
       line = d.place ? 'Lugar de trabajo' : 'Lugar · sin dirección todavía';
     }
+    if (TRAVEL_KINDS.includes(d.kind) && d.travelMin) line += ` · ${travelLabel(d.travelMin)} de viaje`;
     setChildren(preview, badgeFromDef(def, { size: 'lg', title: false }),
       h('div', { class: 'ce-prev-text' }, h('p', { class: 'ce-prev-name' }, def.name), h('p', { class: 'muted small' }, line)));
   }
@@ -194,7 +210,7 @@ export function openCodeEditor(ctx, code, opts = {}) {
     if (!isNew && countsAsWork(existing) && !countsAsWork(def)) {
       const n = Object.entries(state.days || {}).filter(([k, e]) => k >= today && e?.codes?.includes(c)).length;
       const ok = await confirmDialog({
-        icon: '⚠️', title: `¿Seguro que quieres cambiar ${c}?`,
+        icon: '⚠️', title: `¿Quieres cambiar ${c} de verdad?`,
         text: `${c} dejará de contar horas${def.start ? '' : ' y de avisarte'}${n ? ` en ${plural(n, 'día', 'días')} de tu plan` : ''}.`,
         ok: 'Sí, cambiar', cancel: 'No, dejarlo como estaba', danger: true,
       });
@@ -227,21 +243,42 @@ export function openCodeEditor(ctx, code, opts = {}) {
     opts.onSaved?.(c);
   }
 
+  // Qué se pierde al restablecer un código de fábrica (dirección, viaje, horario, nombre, color)
+  function resetLosses(cur, base) {
+    const lost = [];
+    if ((cur.place || '') && (cur.place || '') !== (base.place || '')) lost.push(cur.kind === 'place' ? 'su dirección' : 'su lugar');
+    if (travelOf(cur) !== travelOf(base)) lost.push('su tiempo de viaje');
+    if ((cur.start || null) !== (base.start || null) || (cur.end || null) !== (base.end || null) || (Number(cur.breakMin) || 0) !== (Number(base.breakMin) || 0)) lost.push('su horario');
+    if (cur.kind !== 'place' && (cur.name || '') !== (base.name || '')) lost.push('su nombre');
+    if ((cur.color || '').toUpperCase() !== (base.color || '').toUpperCase() || cur.shape !== base.shape) lost.push('su color');
+    return lost;
+  }
+
   async function remove() {
     const state = store.get();
-    const used = Object.values(state.days).filter((e) => e.codes.includes(existing.code)).length;
-    const builtin = Boolean(DEFAULT_CODES[existing.code]);
+    const c = existing.code;
+    const used = Object.values(state.days).filter((e) => e.codes.includes(c)).length;
+    const builtin = Boolean(DEFAULT_CODES[c]);
+    const before = state.codes[c] ? { ...state.codes[c] } : null;
+    let text;
+    if (builtin) {
+      const lost = before ? resetLosses(before, DEFAULT_CODES[c]) : [];
+      const list = lost.length > 1 ? `${lost.slice(0, -1).join(', ')} y ${lost[lost.length - 1]}` : lost[0];
+      text = lost.length ? `Volverá a como venía de fábrica: se borrarán ${list}.` : 'Volverá a como venía de fábrica.';
+    } else {
+      text = used ? `Se usa en ${plural(used, 'día', 'días')}. Esos días lo mantendrán, pero con un horario supuesto.` : 'Este código no se usa en ningún día.';
+    }
     const ok = await confirmDialog({
-      title: builtin ? `¿Restablecer ${existing.code}?` : `¿Borrar ${existing.code}?`,
-      text: builtin ? 'Volverá a su horario y color de fábrica.'
-        : used ? `Se usa en ${plural(used, 'día', 'días')}. Esos días lo mantendrán, pero con un horario supuesto.` : 'Este código no se usa en ningún día.',
-      ok: builtin ? 'Restablecer' : 'Borrar', danger: !builtin,
+      title: builtin ? `¿Restablecer ${c}?` : `¿Borrar ${c}?`, text,
+      ok: builtin ? 'Restablecer' : 'Borrar', danger: true,
     });
     if (!ok) return;
-    store.set((s) => deleteCode(s, existing.code));
+    store.set((s) => deleteCode(s, c));
     sheet.close();
-    savedToast(ctx, builtin ? `${existing.code} restablecido` : `${existing.code} borrado`);
-    opts.onSaved?.(existing.code);
+    savedToast(ctx, builtin ? `${c} restablecido` : `${c} borrado`, {
+      action: before ? { label: 'Deshacer', run: () => store.set((s) => upsertCode(s, before)) } : undefined,
+    });
+    opts.onSaved?.(c);
   }
 
   // Abierto desde un día: dejar claro que esto cambia todos los días con este código
@@ -261,7 +298,7 @@ export function openCodeEditor(ctx, code, opts = {}) {
         : 'Este horario es supuesto. Revísalo y toca «Confirmar».')) : null,
     preview,
     secName,
-    secTime, secCounts, secCredit, secPlace,
+    secTime, secCounts, secCredit, secPlace, secTravel,
     more,
     err,
     h('button', { type: 'submit', hidden: true, tabindex: '-1', 'aria-hidden': 'true' }));

@@ -15,7 +15,7 @@ export function baseCode(code) {
   return {
     code, kind: 'other', name: code, start: null, end: null, breakMin: 0,
     countsHours: false, creditHours: null, color: COLORS.other, textColor: COLORS.white,
-    shape: 'circle', place: '', confirmed: true, builtin: false, updatedAt: null,
+    shape: 'circle', place: '', travelMin: 0, confirmed: true, builtin: false, updatedAt: null,
   };
 }
 
@@ -45,6 +45,9 @@ function build() {
     { ...baseCode('W-'), kind: 'wish', name: 'Libre deseado', color: COLORS.wish,
       textColor: COLORS.dark, shape: 'tag', builtin: true },
     { ...baseCode('U'), kind: 'vacation', name: 'Vacaciones', color: COLORS.red,
+      textColor: COLORS.red, shape: 'text', builtin: true },
+    // Enfermedad (SPEC §13.5): se acredita como las vacaciones
+    { ...baseCode('K'), kind: 'sick', name: 'Enfermedad', color: COLORS.red,
       textColor: COLORS.red, shape: 'text', builtin: true },
     { ...baseCode('-'), kind: 'off', name: 'Libre', color: COLORS.red,
       textColor: COLORS.red, shape: 'text', builtin: true },
@@ -218,6 +221,45 @@ export function normalizeDayCodes(state, codes) {
     .map((c, i) => ({ c, i, r: RANK[kindOf(state, c)] ?? 2 }))
     .sort((a, b) => a.r - b.r || a.i - b.i)
     .map((x) => x.c);
+}
+
+// ---------- Tiempo de viaje y mapas (SPEC §13.2) ----------
+
+export const MAX_TRAVEL_MIN = 180;
+
+// Minutos de viaje de un código (0..180)
+export function travelOf(def) {
+  const n = Math.round(Number(def?.travelMin));
+  return Number.isFinite(n) && n > 0 ? Math.min(MAX_TRAVEL_MIN, n) : 0;
+}
+
+// Viaje de un día = el mayor de sus códigos → { minutes, code, def, to }. to: el lugar de destino
+// (el código con el viaje si es un lugar; si no, el primer lugar del día) o null.
+export function dayTravel(state, key) {
+  const entry = state?.days?.[key];
+  const none = { minutes: 0, code: null, def: null, to: null };
+  if (!entry) return none;
+  const defs = (entry.codes || []).map((c) => getCode(state, c));
+  let best = null;
+  for (const def of defs) {
+    const t = travelOf(def);
+    // Empate: mejor un lugar (es el destino)
+    if (t > 0 && (!best || t > best.minutes || (t === best.minutes && def.kind === 'place' && best.def.kind !== 'place'))) {
+      best = { minutes: t, code: def.code, def };
+    }
+  }
+  if (!best) return none;
+  const to = best.def.kind === 'place' ? best.def : defs.find((d) => d.kind === 'place') ?? null;
+  return { ...best, to };
+}
+
+// Enlace «Abrir en Mapas» con la dirección del lugar (texto o CodeDef con .place). iOS: Apple Maps;
+// resto (Android, ordenador): Google Maps. null si no hay dirección.
+export function mapsUrl(place, platform) {
+  const text = String((typeof place === 'string' ? place : place?.place) ?? '').trim();
+  if (!text) return null;
+  const q = encodeURIComponent(text);
+  return platform === 'ios' ? `https://maps.apple.com/?q=${q}` : `https://www.google.com/maps/search/?api=1&query=${q}`;
 }
 
 // Emoji según tipo y hora de inicio

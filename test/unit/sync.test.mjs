@@ -104,7 +104,8 @@ test('syncNow: primera publicación en un repo vacío → backup.json cifrado (r
   const doc = backupDoc(gh);
   assert.equal(doc.format, 'turnos-backup');
   assert.equal(doc.v, 3);
-  assert.deepEqual(doc.meta, { rev: 1, savedAt: T0.toISOString(), deviceId: 'movil1', days: 7, publisher: 'movil1', publisherSince: T0.toISOString() });
+  // meta.name: solo el nombre de pila en claro (para «Calendarios de la familia»), nunca el apellido
+  assert.deepEqual(doc.meta, { rev: 1, savedAt: T0.toISOString(), deviceId: 'movil1', days: 7, publisher: 'movil1', publisherSince: T0.toISOString(), name: 'Mauricio' });
   assert.equal(doc.enc.alg, 'AES-GCM');
   // Nada en claro fuera de enc.iv/enc.data (base64url aleatorio: podrían contener «F52» por casualidad)
   const clear = JSON.stringify({ ...doc, enc: { ...doc.enc, iv: '', data: '' } });
@@ -298,7 +299,7 @@ test('nunca publica 0 días encima de una copia con días (salvo allowEmpty o un
   const data = await remoteData(gh);
   assert.deepEqual(data.days, {});
   assert.deepEqual(Object.keys(data.tombstones).sort(), ['2026-10-12', '2026-10-13']);
-  assert.equal((gh.text('turnos.ics').match(/BEGIN:VEVENT/g) || []).length, 0);
+  assert.equal((gh.text('turnos.ics').match(/^UID:(?!plan-)/gm) || []).length, 0); // solo queda «Sube el plan»
 });
 
 test('un borrado (tombstone) llega al otro dispositivo', async () => {
@@ -534,7 +535,14 @@ test('calendarUrls: rama por defecto (HEAD), rama indicada y codificación', () 
   assert.deepEqual(calendarUrls(SYNC), {
     webcal: 'webcal://raw.githubusercontent.com/Mardar91/mauricio-datos/HEAD/turnos.ics',
     https: 'https://raw.githubusercontent.com/Mardar91/mauricio-datos/HEAD/turnos.ics',
+    webcals: 'webcals://raw.githubusercontent.com/Mardar91/mauricio-datos/HEAD/turnos.ics',
+    // Android: abre ICSx⁵ (o su página de Google Play)
+    android: 'intent://raw.githubusercontent.com/Mardar91/mauricio-datos/HEAD/turnos.ics#Intent;scheme=webcals;package=at.bitfire.icsdroid;'
+      + 'S.browser_fallback_url=https%3A%2F%2Fplay.google.com%2Fstore%2Fapps%2Fdetails%3Fid%3Dat.bitfire.icsdroid;end',
   });
+  // Carpeta de otra persona
+  assert.equal(calendarUrls({ ...SYNC, dir: 'ana' }).webcal, 'webcal://raw.githubusercontent.com/Mardar91/mauricio-datos/HEAD/ana/turnos.ics');
+  assert.equal(calendarUrls({ ...SYNC, branch: 'datos', dir: 'ana' }).android.split('#')[0], 'intent://raw.githubusercontent.com/Mardar91/mauricio-datos/datos/ana/turnos.ics');
   assert.equal(calendarUrls({ ...SYNC, branch: 'datos' }).https, 'https://raw.githubusercontent.com/Mardar91/mauricio-datos/datos/turnos.ics');
   assert.equal(calendarUrls({ ...SYNC, branch: 'a/b' }).https, 'https://raw.githubusercontent.com/Mardar91/mauricio-datos/a/b/turnos.ics');
 });
@@ -543,14 +551,14 @@ test('enlace de configuración: incluye la clave y se valida campo a campo', () 
   const link = buildSetupLink('https://mardar91.github.io/mauricio/#hoy', SYNC);
   assert.match(link, /^https:\/\/mardar91\.github\.io\/mauricio\/#setup=[A-Za-z0-9_-]+$/);
   const hash = link.slice(link.indexOf('#'));
-  assert.deepEqual(parseSetupLink(hash), { enabled: true, owner: 'Mardar91', repo: 'mauricio-datos', branch: '', token: TOKEN, key: KEY });
+  assert.deepEqual(parseSetupLink(hash), { enabled: true, owner: 'Mardar91', repo: 'mauricio-datos', branch: '', dir: '', token: TOKEN, key: KEY });
   assert.deepEqual(parseSetupLink(link), parseSetupLink(hash));
   assert.equal(parseSetupLink('#setup=nobase64!!'), null);
   assert.equal(parseSetupLink('#hoy'), null);
   assert.equal(parseSetupLink(''), null);
   const enc = (o) => `#setup=${Buffer.from(JSON.stringify(o)).toString('base64url')}`;
   const ok = { owner: 'Mardar91', repo: 'mauricio-datos', token: TOKEN };
-  assert.deepEqual(parseSetupLink(enc(ok)), { enabled: true, ...ok, branch: '', key: '' });
+  assert.deepEqual(parseSetupLink(enc(ok)), { enabled: true, ...ok, branch: '', dir: '', key: '' });
   assert.equal(parseSetupLink(enc({ owner: 'a' })), null);
   const bad = [
     { owner: 'a/../b' }, { owner: '-abc' }, { owner: 'a'.repeat(40) }, { owner: 'a--b' },
@@ -558,12 +566,13 @@ test('enlace de configuración: incluye la clave y se valida campo a campo', () 
     { token: 'tok' }, { token: 'ghp_short' }, { token: `ghp_${'a'.repeat(36)}!` },
     { branch: 'x/../../attacker/repo/main' }, { branch: '../x' }, { branch: 'a//b' }, { branch: '.hidden' }, { branch: 'x.lock' }, { branch: 'HEAD' },
     { key: 'corta' }, { key: `${KEY}x` }, { branch: 5 },
+    { dir: '../ana' }, { dir: 'ana/x' }, { dir: 'a'.repeat(33) }, { dir: 'ana maría' }, { dir: 'ñ' }, { dir: 5 },
   ];
   for (const b of bad) assert.equal(parseSetupLink(enc({ ...ok, ...b })), null, JSON.stringify(b));
   assert.equal(parseSetupLink(enc({ ...ok, token: `ghp_${'a'.repeat(36)}` })).token, `ghp_${'a'.repeat(36)}`);
   // Formato corto y publishPlaces
   const short = parseSetupLink(enc({ o: 'X', r: 'y', t: TOKEN, b: 'datos', k: KEY, p: true }));
-  assert.deepEqual(short, { enabled: true, owner: 'X', repo: 'y', branch: 'datos', token: TOKEN, key: KEY, publishPlaces: true });
+  assert.deepEqual(short, { enabled: true, owner: 'X', repo: 'y', branch: 'datos', dir: '', token: TOKEN, key: KEY, publishPlaces: true });
   assert.equal(normalizeSyncConfig(null), null);
   assert.ok(isValidBranch('feature/turnos-2026'));
   assert.ok(!isValidBranch('a b'));
