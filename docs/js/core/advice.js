@@ -27,9 +27,9 @@ function workIntervals(state, from, to) {
 const worksOn = (state, key) => (state?.days?.[key]?.codes || [])
   .some((c) => { const d = getCode(state, c); return d.kind === 'shift' || isTimedCode(d) || countsAsWork(d); });
 
-// Día libre: hay plan y solo tiene '-', 'W-', vacaciones/baja (o está vacío). Un evento o un código
-// desconocido NO es un día libre.
-const FREE_KINDS = ['off', 'wish', 'vacation', 'sick'];
+// Día libre: hay plan y solo tiene '-', 'W-', vacaciones (o está vacío). Un evento, un código
+// desconocido o la baja por enfermedad NO son días libres (la baja tampoco suma a la racha).
+const FREE_KINDS = ['off', 'wish', 'vacation'];
 const freeOn = (state, key) => {
   const entry = state?.days?.[key];
   return Boolean(entry) && (entry.codes || []).every((c) => FREE_KINDS.includes(getCode(state, c).kind));
@@ -247,29 +247,67 @@ function remindersRule(state, out) {
     id: 'reminders-off', prio: 2, level: 'info', icon: '🔔',
     title: 'Activa los recordatorios',
     text: 'Para que el iPhone te avise la víspera y antes de cada turno, pide el enlace de configuración a quien te ayuda con la app.',
-    action: { tab: 'ajustes', section: 'calendario', label: 'Ver cómo' },
+    action: { tab: 'ajustes', section: 'calendar', label: 'Ver cómo' },
   });
 }
 
 const TRANSIENT = ['NETWORK', 'SERVER', 'RATE_LIMIT', 'CONFLICT'];
+const DAY_MS = 24 * 3600 * 1000;
 
 // El calendario no se actualiza (token caducado, clave distinta…): avisar en Hoy
 function syncRule(state, now, out) {
   const s = state?.settings?.sync || {};
   if (!s.enabled || !s.lastError) return;
-  const transient = TRANSIENT.includes(s.lastErrorCode);
-  if (transient) {
+  const action = { tab: 'ajustes', section: 'calendar', label: 'Ver en Ajustes' };
+  if (TRANSIENT.includes(s.lastErrorCode)) {
+    // Nunca se ha conectado (p. ej. enlace abierto sin internet): aviso suave, no «hace tiempo»
+    if (!s.lastPushAt && !s.lastPullAt) {
+      out.push({
+        id: 'sync-error', prio: 6, level: 'info', icon: '📡',
+        title: 'El calendario aún no está conectado',
+        text: 'Todavía no se ha podido conectar el calendario; se volverá a intentar cuando haya internet.',
+        action,
+      });
+      return;
+    }
     // Fallos pasajeros (sin red…): solo si duran más de un día
-    const last = Math.max(tsOf(s.lastPushAt), tsOf(s.lastPullAt));
-    if (last && now.getTime() - last < 24 * 3600 * 1000) return;
+    const since = tsOf(s.lastErrorSince) || Math.max(tsOf(s.lastPushAt), tsOf(s.lastPullAt));
+    if (since && now.getTime() - since < DAY_MS) return;
   }
+  const transient = TRANSIENT.includes(s.lastErrorCode);
   out.push({
     id: 'sync-error', prio: 0, level: transient ? 'warn' : 'alert', icon: '⚠️',
     title: 'Tu calendario no se está actualizando',
     text: transient
       ? 'Hace tiempo que tus turnos no llegan al Calendario del iPhone. Abre la app con internet; si sigue igual, pide ayuda a quien te configuró la app.'
       : 'Los turnos nuevos o cambiados no llegan al Calendario del iPhone y no tendrán aviso. Pide ayuda a quien te configuró la app.',
-    action: { tab: 'ajustes', section: 'calendario', label: 'Ver en Ajustes' },
+    action,
+  });
+}
+
+// Este dispositivo solo lee (el calendario lo publica otro) y tiene cambios propios (sin publicar en
+// la última lectura, o hechos después): esos cambios no llegarán al Calendario del iPhone.
+function readOnlyRule(state, out) {
+  const s = state?.settings?.sync || {};
+  if (!s.enabled || !s.publisher || !s.deviceId || s.publisher === s.deviceId || s.lastError) return;
+  if (s.unpublished > 0) return pushReadOnly(out);
+  const since = tsOf(s.lastPullAt);
+  const newer = (v) => tsOf(v) > since;
+  const st = state.settings || {};
+  const edited = Object.values(state.days || {}).some((d) => newer(d?.updatedAt))
+    || Object.values(state.tombstones || {}).some(newer)
+    || Object.values(state.codes || {}).some((c) => newer(c?.updatedAt))
+    || Object.values(state.codeTombstones || {}).some(newer)
+    || newer(st.remindersUpdatedAt) || newer(st.placesUpdatedAt);
+  if (edited) pushReadOnly(out);
+}
+
+function pushReadOnly(out) {
+  out.push({
+    id: 'read-only', prio: 1, level: 'warn', icon: '📵',
+    title: 'Estos cambios no llegan al calendario',
+    text: 'Has cambiado algo en este dispositivo, pero el Calendario del iPhone lo actualiza tu otra app. Haz los cambios allí, o en Ajustes elige «Usar este dispositivo».',
+    action: { tab: 'ajustes', section: 'calendar', label: 'Ver en Ajustes' },
   });
 }
 
@@ -297,6 +335,7 @@ export function getAdvice(state, now = new Date()) {
   freeDaysRule(state, today, out);
   remindersRule(state, out);
   syncRule(state, now, out);
+  readOnlyRule(state, out);
   newerSchemaRule(state, out);
   return out
     .sort((a, b) => LEVEL[b.level] - LEVEL[a.level] || a.prio - b.prio || String(a.key ?? '').localeCompare(String(b.key ?? '')))

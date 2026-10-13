@@ -27,6 +27,8 @@ test('index.js se importa sin DOM y re-exporta la API del SPEC §4', async () =>
     'normalizeSyncConfig', 'syncConfigPatch', 'isValidBranch', 'SyncError', 'SYNC_MESSAGES',
     'mergeStates', 'pruneTombstones', 'saveBeforeImport', 'listBeforeImport', 'undoImport', 'syncPayload', 'dataFingerprint',
     'generateSyncKey', 'isSyncKey', 'timedInterval', 'isTimedCode', 'defaultIcsFrom', 'isAppleMobile', 'safeColor',
+    // un solo dispositivo publica
+    'becomePublisher', 'isReadOnlyDevice',
   ];
   for (const name of api) assert.ok(name in core, `falta ${name}`);
   // Sin localStorage el store funciona en memoria

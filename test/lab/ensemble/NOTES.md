@@ -69,9 +69,10 @@ de `index.js` (solo fotos de la lista del móvil; tiempos de Chromium de escrito
 
 Todas las columnas del conjunto con 0 días mal. Con «< 11» se obtiene lo mismo (o un poco más: si B no se
 ejecuta, las lecturas de A con confianza 0,5 no se ponen en duda) que ejecutando B siempre, con ~18 % menos de
-tiempo; «< 10» ahorra otros ~0,3 s pero pierde 11 días en el conjunto sin ver. El conjunto sin ver
-(`stress-rest-gt.json` = `stress-gt.json` menos la muestra) no se usó para nada más que validar la regla y
-encontró los dos fallos que motivaron las reglas de fusión de abajo.
+tiempo; «< 10» ahorra otros ~0,3 s pero pierde 11 días en el conjunto sin ver. El conjunto «sin ver»
+(`stress-rest-gt.json` = `stress-gt.json` menos la muestra) sirvió para validar la regla de disparo, pero
+también destapó los 3 días mal que motivaron las dos reglas de fusión de abajo: su «0 mal» ya no es una prueba
+independiente de esas dos reglas (sí de que no quitan días bien de más: coste medido en los tres conjuntos).
 
 ## Fusión A + B (`mergePhone`)
 
@@ -132,6 +133,12 @@ RESUMEN {"photos":183,"required":1836,"correct":1788,"wrong":0,"extra":250,"miss
 node test/lab/eval.mjs --impl docs/js/recognize/index.js --gt test/lab/out/ensemble/stress-sample-pcfix-gt.json
 RESUMEN {"photos":183,"required":1836,"correct":1788,"wrong":0,"extra":0,"missed":48,"optionalWrong":0,"monthOk":180,"layoutOk":182,"avgMs":2846,"accuracy":0.974}
          (274 días opcionales bien, 0 mal)
+# validación con las 449 fotos de estrés que no se usaron para elegir nada (make-gt.mjs):
+node test/lab/eval.mjs --impl docs/js/recognize/index.js --gt test/lab/out/ensemble/stress-rest-gt.json
+RESUMEN {"photos":449,"required":4733,"correct":4508,"wrong":0,"extra":0,"missed":225,"optionalWrong":0,"monthOk":436,"layoutOk":449,
+         "avgMs":2732,"byLayout":{"phone-list":{"required":4673,"correct":4456},"pc-grid":{"required":60,"correct":52}},"accuracy":0.952}
+         (por separado: A 3895 + 2 mal, B 4171 + 1 mal; la unión sin las dos reglas de fusión tendría 3 mal,
+          y esas reglas se diseñaron mirando estos 3 casos)
 ```
 
 Pruebas de borde (`node test/lab/ensemble/edge.mjs`, 34/34 correctas):
@@ -147,6 +154,12 @@ Pruebas de borde (`node test/lab/ensemble/edge.mjs`, 34/34 correctas):
 - Entradas inválidas (null, undefined, Blob vacío, texto, `{}`, lienzo de 1 px) y sin `globalThis.Tesseract`:
   no lanza, aviso en español. `dispose()` deja 0 workers y se puede volver a leer (también con las rutas por
   defecto); `dispose()` a mitad de una lectura no la cuelga; dos lecturas simultáneas: 0 mal.
+
+Tests de la app: `npm test` verde; `npm run e2e` 20/20 (incluye «el reconocedor actual procesa una foto sin
+errores» y «precache completo») sobre una copia del árbol con `docs/js/core` de HEAD. En el árbol compartido
+fallan tests por el trabajo en curso de otro agente en `docs/js/core` (sincronización, copia de seguridad) y por
+`docs/js/core/CHANGES-FOR-UI.md`, que no debería estar dentro de `docs/js/` (el test exige precachear todo lo
+que hay ahí); `js/core/cipher.js` ya está en PRECACHE.
 
 ## Limpieza de `docs/vendor/tesseract/`
 

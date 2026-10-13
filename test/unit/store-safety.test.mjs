@@ -312,8 +312,11 @@ test('importBackup no toca la sync ni ntfy de este teléfono (ni el onboarding)'
   }
 });
 
+// Teléfono conectado: sync activa y ya leyó el remoto (lo importado se sella como lo más nuevo)
+const connected = (s) => updateSettings(s, { sync: { enabled: true, token: 'TOK', lastPullAt: T0.toISOString() } });
+
 test('importBackup: copia vacía rechazada si el teléfono tiene días (salvo force); copia cifrada → aviso', () => {
-  const phone = stateWith({ '2026-10-12': ['F1'] });
+  const phone = connected(stateWith({ '2026-10-12': ['F1'] }));
   const empty = JSON.stringify({ app: 'turnos-mauricio', schema: 1, days: {} });
   assert.throws(() => importBackup(phone, empty), (e) => e.code === 'EMPTY_BACKUP' && /No se ha cambiado nada/.test(e.message));
   const forced = importBackup(phone, empty, { force: true, now: T0 });
@@ -325,8 +328,10 @@ test('importBackup: copia vacía rechazada si el teléfono tiene días (salvo fo
 
 test('copia de seguridad antes de importar (máx. 3) y deshacer', () => {
   const storage = memoryStorage();
-  let phone = updateSettings(stateWith({ '2026-10-12': ['F1'], '2026-10-13': ['S1'] }), { sync: { enabled: true, token: 'TOK' } });
-  for (let i = 0; i < 4; i++) assert.ok(saveBeforeImport(phone, storage, { now: at(i * 1000) }).startsWith(BEFORE_IMPORT_PREFIX));
+  const phone = connected(stateWith({ '2026-10-12': ['F1'], '2026-10-13': ['S1'] }));
+  const keys = [];
+  for (let i = 0; i < 4; i++) keys.push(saveBeforeImport(phone, storage, { now: at(i * 1000) }));
+  for (const k of keys) assert.ok(k.startsWith(BEFORE_IMPORT_PREFIX));
   const list = listBeforeImport(storage);
   assert.equal(list.length, 3);
   assert.equal(list[0].at, iso(3000)); // la más nueva primero
@@ -334,14 +339,20 @@ test('copia de seguridad antes de importar (máx. 3) y deshacer', () => {
   const imported = importBackup(phone, JSON.stringify({ days: { '2026-10-20': ['N1'] } }), { now: at(DAY) });
   // Mientras tanto cambió el token y se programaron avisos: deshacer los conserva
   const current = updateSettings(imported, { sync: { token: 'NUEVO' }, ntfy: { scheduled: { z: { at: '2026-10-21T05:00:00.000Z', hash: 'h' } } } });
-  const undone = undoImport(storage, current, { now: at(2 * DAY) });
+  // Sin la clave de ESA importación no se deshace nada (nunca «la más nueva» a ciegas)
+  assert.equal(undoImport(storage, current, { now: at(2 * DAY) }), null);
+  assert.equal(undoImport(storage, current, { now: at(2 * DAY), key: 'otra-cosa' }), null);
+  const undone = undoImport(storage, current, { now: at(2 * DAY), key: keys[3] });
   assert.deepEqual(Object.keys(undone.days).sort(), ['2026-10-12', '2026-10-13']);
   assert.equal(undone.days['2026-10-12'].updatedAt, iso(2 * DAY)); // gana al sincronizar
   assert.ok(undone.tombstones['2026-10-20']);
   assert.equal(undone.settings.sync.token, 'NUEVO');
   assert.deepEqual(Object.keys(undone.settings.ntfy.scheduled), ['z']);
   assert.equal(listBeforeImport(storage).length, 2); // la copia usada se borra
-  assert.equal(undoImport(memoryStorage(), current), null);
+  // Segundo toque en «Deshacer»: esa copia ya no existe → nada (no restaura otra más vieja)
+  assert.equal(undoImport(storage, undone, { now: at(2 * DAY), key: keys[3] }), null);
+  assert.equal(listBeforeImport(storage).length, 2);
+  assert.equal(undoImport(memoryStorage(), current, { key: keys[3] }), null);
 });
 
 test('una copia cifrada se puede restaurar descifrándola primero', async () => {

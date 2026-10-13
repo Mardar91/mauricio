@@ -1,95 +1,16 @@
-import { stateWith, mockFetch, REAL_WEEK, T0 } from './helpers.mjs';
+import { stateWith, mockFetch, fakeGitHub, REAL_WEEK, T0, TOKEN, KEY, OTHER_KEY, SYNC, API, REPO } from './helpers.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   testConnection, ensureBranch, syncNow, pullOnly, applySyncResult, fetchRemoteBackup, pushData, pullBackup,
   calendarUrls, parseSetupLink, buildSetupLink, normalizeSyncConfig, syncConfigPatch, isValidBranch,
-  encryptBackup, decryptBackup, SyncError, SYNC_MESSAGES,
+  encryptBackup, decryptBackup, SyncError, SYNC_MESSAGES, becomePublisher,
 } from '../../docs/js/core/sync.js';
 import { isSyncKey } from '../../docs/js/core/cipher.js';
 import { updateSettings, importBackup, setDay, clearDay, createDefaultState } from '../../docs/js/core/store.js';
 
-const TOKEN = `github_pat_${'A'.repeat(22)}_${'B'.repeat(59)}`;
-const KEY = Buffer.alloc(32, 7).toString('base64url');
-const OTHER_KEY = Buffer.alloc(32, 9).toString('base64url');
-const SYNC = { enabled: true, owner: 'Mardar91', repo: 'mauricio-datos', branch: '', token: TOKEN, key: KEY, deviceId: 'movil1' };
-const API = 'https://api.github.com';
-const REPO = '/repos/Mardar91/mauricio-datos';
 const DAY = 24 * 3600 * 1000;
 const at = (ms) => new Date(T0.getTime() + ms);
-
-// GitHub simulado en memoria: commits con instantáneas de archivos, ramas, repo vacío y control de sha
-function fakeGitHub({ empty = false, defaultBranch = 'main', repoStatus = 200, hasPages = false } = {}) {
-  const gh = { commits: {}, branches: {}, seq: 0, defaultBranch, beforePut: null, override: null };
-  if (!empty) {
-    gh.commits.c0 = { 'README.md': { sha: 'f0', text: '# datos' } };
-    gh.branches[defaultBranch] = 'c0';
-  }
-  const filesOf = (branch) => gh.commits[gh.branches[branch]] || null;
-  gh.file = (path, branch = defaultBranch) => filesOf(branch)?.[path] ?? null;
-  gh.text = (path, branch) => gh.file(path, branch)?.text ?? null;
-  gh.write = (path, text, branch = defaultBranch) => {
-    const commit = `c${++gh.seq}`;
-    gh.commits[commit] = { ...(filesOf(branch) || {}), [path]: { sha: `f${gh.seq}`, text } };
-    gh.branches[branch] = commit;
-    return commit;
-  };
-  gh.fetch = mockFetch(async (req, calls) => {
-    if (gh.override) { const r = await gh.override(req, calls); if (r) return r; }
-    const u = new URL(req.url);
-    const p = decodeURIComponent(u.pathname);
-    const isEmpty = !Object.keys(gh.branches).length;
-    let m;
-    if (p === REPO && req.method === 'GET') {
-      if (repoStatus !== 200) return { status: repoStatus, body: { message: 'Not Found' } };
-      return { body: { full_name: 'Mardar91/mauricio-datos', default_branch: defaultBranch, private: false, has_pages: hasPages, permissions: { push: true } } };
-    }
-    if ((m = /^\/repos\/Mardar91\/mauricio-datos\/git\/ref\/heads\/(.+)$/.exec(p)) && req.method === 'GET') {
-      if (isEmpty) return { status: 409, body: { message: 'Git Repository is empty.' } };
-      const sha = gh.branches[m[1]];
-      return sha ? { body: { ref: `refs/heads/${m[1]}`, object: { sha, type: 'commit' } } } : { status: 404, body: { message: 'Not Found' } };
-    }
-    if (p === `${REPO}/git/refs` && req.method === 'POST') {
-      const { ref, sha } = req.json();
-      const name = ref.replace('refs/heads/', '');
-      if (gh.branches[name]) return { status: 422, body: { message: 'Reference already exists' } };
-      if (!gh.commits[sha]) return { status: 422, body: { message: 'Object does not exist' } };
-      gh.branches[name] = sha;
-      return { status: 201, body: { ref, object: { sha } } };
-    }
-    if ((m = /^\/repos\/Mardar91\/mauricio-datos\/contents\/(.+)$/.exec(p))) {
-      const path = m[1];
-      if (req.method === 'GET') {
-        if (isEmpty) return { status: 404, body: { message: 'This repository is empty.' } };
-        const branch = u.searchParams.get('ref') || defaultBranch;
-        if (!gh.branches[branch]) return { status: 404, body: { message: `No commit found for the ref ${branch}` } };
-        const f = gh.file(path, branch);
-        if (!f) return { status: 404, body: { message: 'Not Found' } };
-        const b64 = Buffer.from(f.text, 'utf8').toString('base64');
-        return { body: { path, sha: f.sha, encoding: 'base64', content: b64.match(/.{1,60}/g).join('\n') } };
-      }
-      if (req.method === 'PUT') {
-        const body = req.json();
-        if (gh.beforePut) await gh.beforePut(path, body);
-        if (isEmpty && body.branch) return { status: 404, body: { message: `Branch ${body.branch} not found` } };
-        const branch = body.branch || defaultBranch;
-        if (!isEmpty && !gh.branches[branch]) return { status: 404, body: { message: `Branch ${branch} not found` } };
-        const cur = gh.file(path, branch);
-        if (cur && !body.sha) return { status: 422, body: { message: 'Invalid request.\n\n"sha" wasn\'t supplied.' } };
-        if (cur && body.sha !== cur.sha) return { status: 409, body: { message: `${path} does not match ${body.sha}` } };
-        if (!cur && body.sha) return { status: 404, body: { message: 'Not Found' } };
-        const commit = gh.write(path, Buffer.from(body.content, 'base64').toString('utf8'), branch);
-        return { status: cur ? 200 : 201, body: { content: { path, sha: gh.file(path, branch).sha }, commit: { sha: commit } } };
-      }
-    }
-    if ((m = /^\/repos\/Mardar91\/mauricio-datos\/git\/blobs\/(.+)$/.exec(p))) {
-      const f = Object.values(gh.commits).flatMap((c) => Object.values(c)).find((x) => x.sha === m[1]);
-      return f ? { body: { sha: f.sha, encoding: 'base64', content: Buffer.from(f.text).toString('base64') } } : { status: 404, body: {} };
-    }
-    return { status: 500, body: { message: `ruta no simulada ${req.method} ${p}` } };
-  });
-  return gh;
-}
 
 const device = (days = REAL_WEEK, sync = {}) => updateSettings(stateWith(days), { sync: { ...SYNC, ...sync } });
 const puts = (gh, from = 0) => gh.fetch.calls.slice(from).filter((c) => c.method === 'PUT');
@@ -171,6 +92,9 @@ test('syncNow: primera publicación en un repo vacío → backup.json cifrado (r
   assert.equal(res.pulled, false);
   assert.equal(res.rev, 1);
   assert.equal(res.state, s); // nada que fusionar
+  // El primero que sincroniza (sin copia remota) pasa a ser el que publica
+  assert.equal(res.readOnly, false);
+  assert.deepEqual(res.publisher, { deviceId: 'movil1', since: T0.toISOString() });
   // Sin rama: nada de ?ref ni branch; se crea la rama por defecto con el primer archivo
   for (const c of gh.fetch.calls) {
     assert.ok(!c.url.includes('?ref='), c.url);
@@ -179,8 +103,8 @@ test('syncNow: primera publicación en un repo vacío → backup.json cifrado (r
   assert.deepEqual(puts(gh).map((c) => c.url.split('/').pop()), ['backup.json', 'turnos.ics']);
   const doc = backupDoc(gh);
   assert.equal(doc.format, 'turnos-backup');
-  assert.equal(doc.v, 2);
-  assert.deepEqual(doc.meta, { rev: 1, savedAt: T0.toISOString(), deviceId: 'movil1', days: 7 });
+  assert.equal(doc.v, 3);
+  assert.deepEqual(doc.meta, { rev: 1, savedAt: T0.toISOString(), deviceId: 'movil1', days: 7, publisher: 'movil1', publisherSince: T0.toISOString() });
   assert.equal(doc.enc.alg, 'AES-GCM');
   const raw = gh.text('backup.json');
   for (const secret of ['Insulina', 'Ducuara', 'F52', TOKEN, KEY, 'changes', 'Mañana']) assert.ok(!raw.includes(secret), `en claro: ${secret}`);
@@ -200,6 +124,8 @@ test('syncNow: primera publicación en un repo vacío → backup.json cifrado (r
   assert.match(res.sync.lastIcsHash, /^[0-9a-f]{14}$/);
   assert.equal(res.sync.lastPushAt, T0.toISOString());
   assert.equal(res.sync.lastError, null);
+  assert.equal(res.sync.publisher, 'movil1');
+  assert.equal(res.sync.publisherSince, T0.toISOString());
   for (const c of gh.fetch.calls) assert.ok(!(c.body || '').includes(TOKEN), 'el token no viaja en el cuerpo');
 });
 
@@ -213,7 +139,8 @@ test('syncNow: sin cambios no publica; cambio real → rev 2; ICS estable de un 
   assert.equal(again.pushed, false);
   assert.equal(again.icsPushed, false);
   assert.equal(puts(gh, n).length, 0);
-  assert.deepEqual(gh.fetch.calls.slice(n).map((c) => `${c.method} ${c.url.replace(API + REPO, '')}`), ['GET /contents/backup.json']);
+  // Lee la copia y compara el calendario publicado (GET); no escribe nada
+  assert.deepEqual(gh.fetch.calls.slice(n).map((c) => `${c.method} ${c.url.replace(API + REPO, '')}`), ['GET /contents/backup.json', 'GET /contents/turnos.ics']);
   s = applySyncResult(s, again);
   s = setDay(s, '2026-10-19', ['F1', 'F51'], { now: at(DAY) });
   n = gh.fetch.calls.length;
@@ -242,7 +169,7 @@ test('syncNow: sin clave y sin copia remota → genera la clave', async () => {
   assert.equal(Object.keys(data.days).length, 7);
 });
 
-test('dispositivo atrasado: fusiona por día en lugar de sobrescribir', async () => {
+test('dispositivo atrasado: solo lee y fusiona; al pasar a publicar, fusiona en lugar de sobrescribir', async () => {
   const gh = fakeGitHub();
   // A publica 12 F1 y 13 S1
   const a0 = device({ '2026-10-12': ['F1'], '2026-10-13': ['S1'] });
@@ -251,25 +178,38 @@ test('dispositivo atrasado: fusiona por día en lugar de sobrescribir', async ()
   let b = device({}, { deviceId: 'safari' });
   b = setDay(b, '2026-10-13', ['N1'], { now: at(-DAY) });
   b = setDay(b, '2026-10-14', ['F1'], { now: at(DAY) });
+  const n = gh.fetch.calls.length;
   const rb = await run(b, gh, { now: at(DAY) });
   assert.equal(rb.ok, true, JSON.stringify(rb.error));
+  assert.equal(rb.readOnly, true);
   assert.equal(rb.pulled, true);
   assert.equal(rb.merged, true);
-  assert.equal(rb.pushed, true);
-  assert.equal(rb.rev, 2);
+  assert.equal(rb.pushed, false);
+  assert.equal(puts(gh, n).length, 0); // solo lee
   assert.deepEqual(rb.pulledDays, ['2026-10-12', '2026-10-13']);
   const codes = (st) => Object.fromEntries(Object.entries(st.days).map(([k, d]) => [k, d.codes.join(',')]));
   assert.deepEqual(codes(rb.state), { '2026-10-12': 'F1', '2026-10-13': 'S1', '2026-10-14': 'F1' });
+  assert.deepEqual(rb.unpublishedDays, ['2026-10-14']); // lo suyo que no está publicado
+  assert.equal(rb.sync.unpublished, 1);
+  // B pasa a publicar: fusiona primero y publica rev 2 con todo
+  const tb = await becomePublisher(applySyncResult(b, rb, { now: at(DAY) }), { fetchImpl: gh.fetch, now: at(DAY) });
+  assert.equal(tb.ok, true, JSON.stringify(tb.error));
+  assert.equal(tb.pushed, true);
+  assert.equal(tb.tookOver, true);
+  assert.equal(tb.rev, 2);
   const remote = await remoteData(gh);
   assert.deepEqual(Object.keys(remote.days).sort(), ['2026-10-12', '2026-10-13', '2026-10-14']);
   assert.deepEqual(remote.days['2026-10-13'].codes, ['S1']);
   assert.equal(backupDoc(gh).meta.deviceId, 'safari');
-  // A vuelve: recibe el 14 sin perder nada
+  assert.equal(backupDoc(gh).meta.publisher, 'safari');
+  // A vuelve: ahora solo lee y recibe el 14 sin perder nada
   const ra = await run(a1, gh, { now: at(2 * DAY) });
   assert.equal(ra.pulled, true);
-  assert.equal(ra.pushed, false); // ya estaba todo publicado
+  assert.equal(ra.readOnly, true);
+  assert.equal(ra.pushed, false);
   assert.deepEqual(codes(ra.state), { '2026-10-12': 'F1', '2026-10-13': 'S1', '2026-10-14': 'F1' });
   assert.equal(ra.sync.baseRev, 2);
+  assert.equal(ra.sync.publisher, 'safari');
 });
 
 test('dispositivo vacío (enlace abierto en Safari): restaura en vez de publicar vacío', async () => {
@@ -283,7 +223,8 @@ test('dispositivo vacío (enlace abierto en Safari): restaura en vez de publicar
   assert.equal(res.ok, true);
   assert.equal(res.pulled, true);
   assert.equal(res.pushed, false);
-  assert.equal(puts(gh, n).filter((c) => c.url.endsWith('backup.json')).length, 0);
+  assert.equal(res.readOnly, true);
+  assert.equal(puts(gh, n).length, 0);
   assert.equal(gh.text('backup.json'), before.backup);
   assert.equal(gh.text('turnos.ics'), before.ics);
   assert.equal(Object.keys(res.state.days).length, 7);
@@ -351,11 +292,11 @@ test('un borrado (tombstone) llega al otro dispositivo', async () => {
   assert.ok(rb.state.tombstones['2026-10-15']);
   assert.deepEqual(rb.state.days['2026-10-16'].codes, ['F1']);
   assert.ok(!gh.text('turnos.ics').includes('2026-10-15-S1'));
-  // Volver a poner el día después del borrado gana a la tombstone
+  // Volver a poner el día después del borrado gana a la tombstone (B pasa a publicar)
   b = applySyncResult(b, rb, { now: at(2 * DAY) });
   b = setDay(b, '2026-10-15', ['N1'], { now: at(3 * DAY) });
   assert.equal(b.tombstones['2026-10-15'], undefined);
-  const rb2 = await run(b, gh, { now: at(3 * DAY) });
+  const rb2 = await becomePublisher(b, { fetchImpl: gh.fetch, now: at(3 * DAY) });
   assert.equal(rb2.pushed, true);
   assert.deepEqual((await remoteData(gh)).days['2026-10-15'].codes, ['N1']);
 });
@@ -363,9 +304,9 @@ test('un borrado (tombstone) llega al otro dispositivo', async () => {
 test('conflicto de sha: otro dispositivo escribe entre la lectura y la escritura → relee, fusiona y publica encima', async () => {
   const gh = fakeGitHub();
   const { state: a } = await syncAndApply(device({ '2026-10-12': ['F1'] }), gh);
-  // B ya preparó su versión (rev 2) con el día 20
+  // Otra pestaña del mismo teléfono (mismo editor) ya preparó su versión (rev 2) con el día 20
   const other = setDay(device({ '2026-10-12': ['F1'] }), '2026-10-20', ['N1'], { now: at(DAY) });
-  const otherDoc = await encryptBackup(other, { rev: 2, now: at(DAY), deviceId: 'b', key: KEY });
+  const otherDoc = await encryptBackup(other, { rev: 2, now: at(DAY), deviceId: 'movil1', key: KEY });
   let injected = false;
   gh.beforePut = (path) => {
     if (path === 'backup.json' && !injected) { injected = true; gh.write('backup.json', JSON.stringify(otherDoc)); }
@@ -381,7 +322,7 @@ test('conflicto de sha: otro dispositivo escribe entre la lectura y la escritura
   assert.deepEqual(Object.keys(res.state.days).sort(), ['2026-10-12', '2026-10-20', '2026-10-21']);
   // Conflicto que no se resuelve → error pasajero, sin pisar nada
   const busy = [];
-  for (let r = 10; r < 13; r++) busy.push(await encryptBackup(other, { rev: r, now: at(DAY), deviceId: 'b', key: KEY }));
+  for (let r = 10; r < 13; r++) busy.push(await encryptBackup(other, { rev: r, now: at(DAY), deviceId: 'movil1', key: KEY }));
   gh.beforePut = (path) => { if (path === 'backup.json' && busy.length) gh.write('backup.json', JSON.stringify(busy.shift())); };
   const before = gh.fetch.calls.length;
   const stuck = await run(setDay(applySyncResult(a, res), '2026-10-22', ['F1'], { now: at(3 * DAY) }), gh, { now: at(3 * DAY) });
@@ -451,7 +392,7 @@ test('copia remota dañada o de una versión más nueva → no se publica', asyn
   let n = gh.fetch.calls.length;
   assert.equal((await run(device(), gh)).error.code, 'BAD_REMOTE');
   assert.equal(puts(gh, n).length, 0);
-  gh.write('backup.json', JSON.stringify({ format: 'turnos-backup', v: 3, meta: { rev: 4 }, enc: {} }));
+  gh.write('backup.json', JSON.stringify({ format: 'turnos-backup', v: 4, meta: { rev: 4 }, enc: {} }));
   n = gh.fetch.calls.length;
   const newer = await run(device(), gh);
   assert.equal(newer.error.code, 'NEWER_REMOTE');
@@ -477,7 +418,7 @@ test('compatibilidad: un turnos.json antiguo en claro se fusiona y se migra a ba
   assert.deepEqual(Object.keys((await remoteData(gh)).days).sort(), ['2026-09-01', '2026-10-12']);
 });
 
-test('pullOnly: fusiona sin escribir nada; después syncNow publica lo nuevo del teléfono', async () => {
+test('pullOnly: fusiona sin escribir nada; dice quién publica; becomePublisher publica lo nuevo del teléfono', async () => {
   const gh = fakeGitHub();
   await run(device({ '2026-10-12': ['F1'] }), gh);
   const n = gh.fetch.calls.length;
@@ -486,18 +427,33 @@ test('pullOnly: fusiona sin escribir nada; después syncNow publica lo nuevo del
   assert.equal(res.ok, true);
   assert.equal(res.pulled, true);
   assert.equal(res.pushed, false);
+  assert.equal(res.readOnly, true); // otro dispositivo publica → la UI puede ofrecer «Usar este dispositivo»
+  assert.equal(res.publisher.deviceId, 'movil1');
   assert.equal(puts(gh, n).length, 0);
   assert.deepEqual(Object.keys(res.state.days).sort(), ['2026-10-12', '2026-10-30']);
   assert.equal(res.sync.baseRev, 1);
   s = applySyncResult(s, res, { now: at(DAY) });
-  const pushed = await run(s, gh, { now: at(DAY) });
+  assert.equal(s.settings.sync.publisher, 'movil1');
+  // syncNow sin confirmar: sigue leyendo, no escribe
+  assert.equal((await run(s, gh, { now: at(DAY) })).pushed, false);
+  assert.equal(puts(gh, n).length, 0);
+  const pushed = await becomePublisher(s, { fetchImpl: gh.fetch, now: at(DAY) });
   assert.equal(pushed.pushed, true);
   assert.equal(pushed.rev, 2);
-  // Sin copia remota: no hay nada que traer, y tampoco se escribe
+  // Sin copia remota: no hay nada que traer, y tampoco se escribe; este dispositivo publicaría
   const none = await pullOnly(device(), { fetchImpl: fakeGitHub().fetch, now: T0 });
   assert.equal(none.ok, true);
   assert.equal(none.pulled, false);
   assert.equal(none.remote, null);
+  assert.equal(none.readOnly, false);
+  assert.equal(none.publisher, null);
+  // Una rama indicada que no existe no se crea al solo leer
+  const g2 = fakeGitHub();
+  const nb = await pullOnly(device(REAL_WEEK, { branch: 'datos' }), { fetchImpl: g2.fetch, now: T0 });
+  assert.equal(nb.ok, true);
+  assert.equal(nb.remote, null);
+  assert.equal(g2.branches.datos, undefined);
+  assert.ok(g2.fetch.calls.every((c) => c.method === 'GET'));
 });
 
 test('applySyncResult: respeta lo editado durante la sincronización y otra configuración', async () => {

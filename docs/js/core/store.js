@@ -3,12 +3,14 @@
 import { DEFAULT_CODES, KINDS, SHAPES, baseCode, cleanCode, guessCode, nominalMinutes, normalizeDayCodes } from './codes.js';
 import { isKey, parseHHMM } from './dates.js';
 import { scanToDays } from './diff.js';
-import { clone, isPlainObject, isSafeKey, stableStringify } from './util.js';
+import { clone, hashString, isPlainObject, isSafeKey, stableStringify } from './util.js';
 
 export const STORAGE_KEY = 'turnos-mauricio:v1';
 export const CORRUPT_PREFIX = 'turnos-mauricio:corrupt:';
 export const BEFORE_IMPORT_PREFIX = 'turnos-mauricio:before-import:';
 export const NEWER_SCHEMA_KEY = 'turnos-mauricio:newer-schema';
+// Hash de lo último que ESTA versión guardó encima de datos más nuevos (para no confundirlo con ellos)
+const NEWER_OWN_KEY = 'turnos-mauricio:newer-schema:own';
 export const SCHEMA = 1;
 export const MAX_SCANS = 30;
 export const MAX_CHANGES = 300;
@@ -30,17 +32,25 @@ export const DEFAULT_SETTINGS = Object.freeze({
   reminders: { eveningBefore: true, eveningTime: '20:00', beforeStart: true, minutesBefore: 60 },
   // Última vez que cambió algo que afecta al calendario publicado (recordatorios, lugares)
   calendarUpdatedAt: null,
+  // Cuándo se cambiaron los avisos / publishPlaces: al fusionar gana el cambio más reciente
+  remindersUpdatedAt: null,
+  placesUpdatedAt: null,
   sync: {
     enabled: false, owner: 'Mardar91', repo: 'mauricio-datos', branch: '', token: '', key: '', deviceId: '',
     baseRev: 0, lastPushAt: null, lastPushHash: null, lastIcsHash: null, lastPullAt: null,
-    lastError: null, lastErrorCode: null, lastErrorDetail: null, publishPlaces: false,
+    lastError: null, lastErrorCode: null, lastErrorDetail: null, lastErrorSince: null, publishPlaces: false,
+    // Dispositivo que publica (el único que escribe en GitHub), tal como se vio en la última lectura
+    publisher: null, publisherSince: null,
+    unpublished: 0,      // cambios de aquí que no están publicados (días + códigos + avisos/lugares; solo lectura)
   },
   ntfy: { enabled: false, server: 'https://ntfy.sh', topic: '', scheduled: {}, lastRunAt: null, lastError: null },
   onboardingDone: false,
 });
 
-// Ajustes del usuario que viajan en las copias y en la sincronización (sync/ntfy son del dispositivo)
-export const USER_SETTINGS = ['name', 'weeklyHours', 'workDaysPerWeek', 'holidaysReduceSoll', 'reminders', 'calendarUpdatedAt'];
+// Ajustes del usuario que viajan en las copias y en la sincronización (sync/ntfy son del dispositivo;
+// publishPlaces viaja aparte en syncPayload)
+export const USER_SETTINGS = ['name', 'weeklyHours', 'workDaysPerWeek', 'holidaysReduceSoll', 'reminders',
+  'calendarUpdatedAt', 'remindersUpdatedAt', 'placesUpdatedAt'];
 
 export function createDefaultState() {
   return {
@@ -68,17 +78,21 @@ function isoOrNull(v) {
 const validCode = (c) => typeof c === 'string' && c.length > 0 && c.length <= MAX_CODE_LEN && isSafeKey(c);
 
 // Mezcla profunda de ajustes. El mapa ntfy.scheduled se reemplaza entero; los valores de tipo
-// incorrecto y las claves peligrosas (__proto__…) se ignoran.
-function mergeSettings(base, patch) {
+// incorrecto y las claves peligrosas (__proto__…) se ignoran. null vale para borrar un campo que por
+// defecto es null (lastError, lastPushAt…); defaults: el subárbol de DEFAULT_SETTINGS que corresponde.
+function mergeSettings(base, patch, defaults = DEFAULT_SETTINGS) {
   const out = clone(base);
   if (!isPlainObject(patch)) return out;
   for (const [k, v] of Object.entries(patch)) {
     if (!isSafeKey(k) || v === undefined) continue;
     const cur = out[k];
+    const def = isPlainObject(defaults) ? defaults[k] : undefined;
     if (k === 'scheduled') {
       if (isPlainObject(v)) out[k] = sanitizeScheduled(v);
     } else if (isPlainObject(cur)) {
-      if (isPlainObject(v)) out[k] = mergeSettings(cur, v);
+      if (isPlainObject(v)) out[k] = mergeSettings(cur, v, def);
+    } else if (v === null && def === null) {
+      out[k] = null;
     } else if (cur === null || cur === undefined || typeof cur === typeof v) {
       if (!isPlainObject(v) || cur === null || cur === undefined) out[k] = clone(v);
     }
@@ -108,11 +122,15 @@ function fixSettings(st) {
   const r = st.reminders;
   if (parseHHMM(r.eveningTime) === null) r.eveningTime = DEFAULT_SETTINGS.reminders.eveningTime;
   r.minutesBefore = Math.min(1440, Math.max(0, Math.round(Number(r.minutesBefore) || 0)));
-  st.calendarUpdatedAt = isoOrNull(st.calendarUpdatedAt);
+  for (const k of ['calendarUpdatedAt', 'remindersUpdatedAt', 'placesUpdatedAt']) st[k] = isoOrNull(st[k]);
   const s = st.sync;
   for (const [k, n] of [['owner', 39], ['repo', 100], ['branch', 100], ['token', 300], ['key', 64], ['deviceId', 40]]) s[k] = capStr(s[k], n).trim();
   s.baseRev = Number.isSafeInteger(s.baseRev) && s.baseRev > 0 ? s.baseRev : 0;
   s.publishPlaces = s.publishPlaces === true;
+  s.publisher = typeof s.publisher === 'string' && s.publisher.trim() ? capStr(s.publisher, 40).trim() : null;
+  s.publisherSince = isoOrNull(s.publisherSince);
+  s.lastErrorSince = isoOrNull(s.lastErrorSince);
+  s.unpublished = Number.isSafeInteger(s.unpublished) && s.unpublished > 0 ? s.unpublished : 0;
   if (!isPlainObject(st.ntfy.scheduled)) st.ntfy.scheduled = {};
   st.ntfy.server = capStr(st.ntfy.server, 200);
   st.ntfy.topic = capStr(st.ntfy.topic, 64);
@@ -131,8 +149,9 @@ export function safeColor(c, fallback) {
 export function sanitizeCodeDef(def, code) {
   const c = cleanCode(code ?? def?.code);
   const template = DEFAULT_CODES[c] ? { ...DEFAULT_CODES[c] } : guessCode(c);
+  // Solo los campos conocidos (nada de claves extra que inflen el estado)
   const src = {};
-  if (isPlainObject(def)) for (const [k, v] of Object.entries(def)) if (isSafeKey(k)) src[k] = v;
+  if (isPlainObject(def)) for (const k of Object.keys(baseCode(c))) if (k in def) src[k] = def[k];
   const out = { ...baseCode(c), ...template, ...src, code: c };
   if (!KINDS.includes(out.kind)) out.kind = template.kind;
   if (!SHAPES.includes(out.shape)) out.shape = template.shape;
@@ -244,8 +263,19 @@ export function migrateState(raw) {
     for (const map of ['days', 'codes']) {
       for (const k of Object.keys(state[map])) overlayUnknown(raw[map]?.[k], state[map][k]);
     }
+    // Un tipo de código que esta versión no conoce se conserva (se trata como 'other')
+    for (const [c, def] of Object.entries(state.codes)) {
+      const k = raw.codes?.[c]?.kind;
+      if (typeof k === 'string' && k && k.length <= 40 && !KINDS.includes(k)) def.kind = k;
+    }
     state.schema = Number(raw.schema);
     state.__newerSchema = true;
+  }
+  // Copia compartida (backup.json / archivo): publishPlaces viaja fuera de settings.sync
+  const rs = isPlainObject(raw.settings) ? raw.settings : null;
+  if (rs && 'publishPlaces' in rs) {
+    if (typeof rs.publishPlaces === 'boolean' && !isPlainObject(rs.sync)) state.settings.sync.publishPlaces = rs.publishPlaces;
+    delete state.settings.publishPlaces;
   }
   return state;
 }
@@ -305,9 +335,14 @@ export function loadState(storage = globalThis.localStorage) {
   if (raw === null || raw === undefined || raw === '') return createDefaultState();
   const state = parseStored(raw);
   if (state) {
-    // Datos de una versión más nueva: se guarda una copia intacta (solo la primera vez)
+    // Datos de una versión más nueva: se guarda una copia intacta. Se renueva cada vez que la versión
+    // nueva guarda algo distinto (pero no con lo que esta versión reescribió).
     if (state.__newerSchema) {
-      try { if (storage.getItem(NEWER_SCHEMA_KEY) === null) storage.setItem(NEWER_SCHEMA_KEY, raw); } catch { /* nada */ }
+      try {
+        if (storage.getItem(NEWER_OWN_KEY) !== hashString(raw) && storage.getItem(NEWER_SCHEMA_KEY) !== raw) {
+          storage.setItem(NEWER_SCHEMA_KEY, raw);
+        }
+      } catch { /* nada */ }
     }
     return state;
   }
@@ -334,7 +369,11 @@ export function pruneTombstones(state, now = new Date(), maxDays = TOMBSTONE_DAY
 function writeState(state, storage, now) {
   if (!storage) return { ok: false, error: { code: 'NO_STORAGE', message: SAVE_ERROR, detail: 'Sin almacenamiento' } };
   try {
-    storage.setItem(STORAGE_KEY, JSON.stringify(persistable(pruneTombstones(state, now))));
+    const text = JSON.stringify(persistable(pruneTombstones(state, now)));
+    storage.setItem(STORAGE_KEY, text);
+    if (state?.__newerSchema) {
+      try { storage.setItem(NEWER_OWN_KEY, hashString(text)); } catch { /* nada */ }
+    }
     return { ok: true, error: null };
   } catch (e) {
     const quota = /quota/i.test(`${e?.name} ${e?.message}`);
@@ -544,6 +583,9 @@ export function upsertCode(state, def, { now } = {}) {
   if (timesChanged && nominal !== null && nominal <= 360 && prev.breakMin === DEFAULT_BREAK && merged.breakMin === DEFAULT_BREAK) {
     merged.breakMin = 0;
   }
+  // Sin cambios reales: no se sella (si no, una copia vieja ganaría al fusionar)
+  if (state.codes?.[c] && !state.codeTombstones?.[c]
+    && stableStringify({ ...merged, updatedAt: null }) === stableStringify({ ...prev, updatedAt: null })) return state;
   merged.updatedAt = nowIso(now);
   const next = ensureMaps(clone(state));
   next.codes[c] = merged;
@@ -568,14 +610,18 @@ export function deleteCode(state, code, { now } = {}) {
   return next;
 }
 
-// Mezcla profunda de ajustes. Si cambian los recordatorios o publishPlaces, anota calendarUpdatedAt.
+// Mezcla profunda de ajustes. Si cambian los recordatorios o publishPlaces, anota calendarUpdatedAt
+// (sello del .ics) y remindersUpdatedAt / placesUpdatedAt (para fusionar entre dispositivos).
 export function updateSettings(state, patch, { now } = {}) {
   const next = clone(state);
   next.settings = fixSettings(mergeSettings(state.settings, patch));
   const before = state.settings || {};
-  const calendarChanged = stableStringify(before.reminders) !== stableStringify(next.settings.reminders)
-    || Boolean(before.sync?.publishPlaces) !== next.settings.sync.publishPlaces;
-  if (calendarChanged) next.settings.calendarUpdatedAt = nowIso(now);
+  const remindersChanged = stableStringify(before.reminders) !== stableStringify(next.settings.reminders);
+  const placesChanged = Boolean(before.sync?.publishPlaces) !== next.settings.sync.publishPlaces;
+  const at = nowIso(now);
+  if (remindersChanged) next.settings.remindersUpdatedAt = at;
+  if (placesChanged) next.settings.placesUpdatedAt = at;
+  if (remindersChanged || placesChanged) next.settings.calendarUpdatedAt = at;
   return next;
 }
 
@@ -586,12 +632,12 @@ function pick(obj, keys) {
 }
 
 // Contenido que se comparte entre dispositivos (cifrado en backup.json). Sin token, clave,
-// ni ajustes del dispositivo (sync, ntfy, onboarding).
+// ni ajustes del dispositivo (sync, ntfy, onboarding); de sync solo viaja publishPlaces.
 export function syncPayload(state) {
   return {
     app: 'turnos-mauricio',
     schema: SCHEMA,
-    settings: pick(state.settings, USER_SETTINGS),
+    settings: { ...pick(state.settings, USER_SETTINGS), publishPlaces: state.settings?.sync?.publishPlaces === true },
     codes: clone(state.codes || {}),
     days: clone(state.days || {}),
     tombstones: clone(state.tombstones || {}),
@@ -614,11 +660,22 @@ export function backupFingerprint(state) {
   return stableStringify(syncPayload(state));
 }
 
-// Copia de seguridad en JSON para un archivo (sin token, clave ni ajustes del dispositivo)
+// Copia de seguridad en JSON para un archivo (sin token, clave ni ajustes del dispositivo).
+// Con datos de una versión más nueva lanza Error (code 'NEWER'): la copia los recortaría.
 export function exportBackup(state, { now } = {}) {
+  if (state?.__newerSchema) {
+    throw importError('Tus datos son de una versión más nueva de la app. Actualiza la app antes de exportar una copia.', 'NEWER');
+  }
   const data = syncPayload(state);
   data.settings.onboardingDone = Boolean(state.settings?.onboardingDone);
   return JSON.stringify({ app: data.app, schema: data.schema, exportedAt: nowIso(now), ...data }, null, 2);
+}
+
+// Une dos mapas de borrados quedándose con la fecha más reciente de cada clave
+function newestStamps(a, b) {
+  const out = { ...a };
+  for (const [k, v] of Object.entries(b || {})) if (!out[k] || tsOf(v) > tsOf(out[k])) out[k] = v;
+  return out;
 }
 
 function importError(message, code) {
@@ -627,8 +684,10 @@ function importError(message, code) {
   return e;
 }
 
-// Restaura una copia (texto JSON u objeto). Lo importado pasa a ser la versión más nueva:
-// los días que cambian se sellan con `now` y los que desaparecen quedan como tombstones.
+// Restaura una copia (texto JSON u objeto). En un teléfono ya conectado (sync activa y ya leyó o
+// publicó) lo importado pasa a ser la versión más nueva: los días que cambian se sellan con `now` y
+// los que desaparecen quedan como tombstones. En uno sin conectar se conservan las fechas de la copia
+// (al conectarlo se fusiona por fechas reales y no pisa cambios posteriores).
 // No toca settings.sync ni settings.ntfy de este dispositivo. Lanza Error en español.
 // options: { now, force } — force permite importar una copia con 0 días sobre un teléfono con días.
 export function importBackup(state, json, { now, force = false } = {}) {
@@ -664,24 +723,34 @@ export function importBackup(state, json, { now, force = false } = {}) {
   }
   // Ajustes propios de este dispositivo
   const cur = state.settings || {};
-  next.settings.sync = mergeSettings(DEFAULT_SETTINGS.sync, cur.sync);
-  next.settings.ntfy = clone(mergeSettings(DEFAULT_SETTINGS.ntfy, cur.ntfy));
+  next.settings.sync = mergeSettings(DEFAULT_SETTINGS.sync, cur.sync, DEFAULT_SETTINGS.sync);
+  next.settings.ntfy = clone(mergeSettings(DEFAULT_SETTINGS.ntfy, cur.ntfy, DEFAULT_SETTINGS.ntfy));
   if (cur.onboardingDone) next.settings.onboardingDone = true;
   const at = nowIso(now);
-  // Días: lo importado gana (sello nuevo) salvo que sea idéntico a lo que ya hay
-  next.tombstones = { ...sanitizeStamps(state.tombstones, isKey), ...next.tombstones };
+  const restamp = Boolean(cur.sync?.enabled && (cur.sync.lastPullAt || cur.sync.lastPushAt));
+  // Avisos: vienen de la copia; si cambian, el .ics debe notarlo (su sello nunca retrocede)
+  if (stableStringify(cur.reminders) !== stableStringify(next.settings.reminders)) {
+    next.settings.calendarUpdatedAt = at;
+    if (restamp) next.settings.remindersUpdatedAt = at;
+  } else {
+    next.settings.calendarUpdatedAt = isoOrNull(cur.calendarUpdatedAt) ?? next.settings.calendarUpdatedAt;
+    next.settings.remindersUpdatedAt = isoOrNull(cur.remindersUpdatedAt) ?? next.settings.remindersUpdatedAt;
+  }
+  next.settings.placesUpdatedAt = isoOrNull(cur.placesUpdatedAt); // publishPlaces es de este dispositivo
+  // Días: lo importado gana salvo que sea idéntico a lo que ya hay
+  next.tombstones = newestStamps(sanitizeStamps(state.tombstones, isKey), next.tombstones);
   for (const [key, d] of Object.entries(next.days)) {
     const local = localDays[key];
     if (local && sameList(local.codes, d.codes) && local.note === d.note) {
       next.days[key] = { ...d, source: local.source, updatedAt: local.updatedAt };
     } else {
-      next.days[key] = { ...d, source: 'import', updatedAt: at };
+      next.days[key] = { ...d, source: 'import', updatedAt: restamp ? at : d.updatedAt };
     }
     delete next.tombstones[key];
   }
-  for (const key of Object.keys(localDays)) if (!next.days[key]) next.tombstones[key] = at;
+  if (restamp) for (const key of Object.keys(localDays)) if (!next.days[key]) next.tombstones[key] = at;
   // Códigos: los de la copia ganan si son distintos; los que la copia no trae se quedan como están
-  next.codeTombstones = { ...sanitizeStamps(state.codeTombstones, validCode), ...next.codeTombstones };
+  next.codeTombstones = newestStamps(sanitizeStamps(state.codeTombstones, validCode), next.codeTombstones);
   const inFile = new Set(Object.keys(isPlainObject(data.codes) ? data.codes : {}).filter(isSafeKey).map(cleanCode));
   for (const c of new Set([...Object.keys(next.codes), ...Object.keys(state.codes || {})])) {
     if (!validCode(c)) continue;
@@ -692,7 +761,7 @@ export function importBackup(state, json, { now, force = false } = {}) {
     }
     const def = next.codes[c];
     const same = local && stableStringify({ ...local, updatedAt: null }) === stableStringify({ ...def, updatedAt: null });
-    next.codes[c] = { ...def, updatedAt: same ? local.updatedAt : at };
+    next.codes[c] = { ...def, updatedAt: same ? local.updatedAt : restamp ? at : def.updatedAt };
     delete next.codeTombstones[c];
   }
   // Registra los días que cambian respecto al teléfono
@@ -722,12 +791,13 @@ export function listBeforeImport(storage = globalThis.localStorage) {
   });
 }
 
-// Deshace la última importación: devuelve el estado anterior (como una importación nueva, para que
-// gane al sincronizar y conserve sync/ntfy actuales) y borra esa copia. null si no hay copia.
+// Deshace UNA importación: key = la clave que devolvió saveBeforeImport para esa importación
+// (obligatoria: nunca se elige «la más nueva», que podría ser de otra importación anterior).
+// Devuelve el estado anterior (como una importación nueva, conservando sync/ntfy actuales) y borra
+// esa copia; null si no hay key o la copia ya no existe (p. ej. un segundo toque en «Deshacer»).
 export function undoImport(storage = globalThis.localStorage, current, { now, key } = {}) {
-  if (!storage) return null;
-  const k = key ?? keysWithPrefix(storage, BEFORE_IMPORT_PREFIX).at(-1);
-  if (!k) return null;
+  if (!storage || typeof key !== 'string' || !key.startsWith(BEFORE_IMPORT_PREFIX)) return null;
+  const k = key;
   let text = null;
   try { text = storage.getItem(k); } catch { return null; }
   if (!text) return null;
@@ -786,9 +856,31 @@ function unionList(a, b, max) {
     .map(([, x]) => clone(x)).slice(-max);
 }
 
+// Ajustes que se adoptan del remoto solo en un dispositivo vacío (adoptSettings)
+const ADOPT_SETTINGS = ['name', 'weeklyHours', 'workDaysPerWeek', 'holidaysReduceSoll'];
+
+// Ajustes que dan forma al calendario publicado (uno solo para todos): convergen entre dispositivos.
+// Avisos y publishPlaces: gana el cambio más reciente; calendarUpdatedAt: el mayor (nunca retrocede).
+function convergeSettings(L, R, adopt) {
+  if (!isPlainObject(R)) return null;
+  const patch = adopt ? pick(R, ADOPT_SETTINGS) : {};
+  const lr = tsOf(L.remindersUpdatedAt), rr = tsOf(R.remindersUpdatedAt);
+  if (isPlainObject(R.reminders) && (rr > lr || (adopt && rr >= lr))) {
+    patch.reminders = clone(R.reminders);
+    patch.remindersUpdatedAt = R.remindersUpdatedAt ?? null;
+  }
+  if (tsOf(R.placesUpdatedAt) > tsOf(L.placesUpdatedAt) && typeof R.sync?.publishPlaces === 'boolean') {
+    patch.placesUpdatedAt = R.placesUpdatedAt;
+    patch.sync = { publishPlaces: R.sync.publishPlaces };
+  }
+  if (tsOf(R.calendarUpdatedAt) > tsOf(L.calendarUpdatedAt)) patch.calendarUpdatedAt = R.calendarUpdatedAt;
+  return Object.keys(patch).length ? patch : null;
+}
+
 // Fusiona el estado local con uno remoto (ya migrado). Por día y por código gana el updatedAt más
-// reciente (las tombstones cuentan como versión). Ajustes: los del dispositivo; con adoptSettings
-// (dispositivo vacío) se toman del remoto los del usuario (nombre, horas, recordatorios).
+// reciente (las tombstones cuentan como versión). Ajustes: los del dispositivo, salvo los que dan forma
+// al calendario (avisos, publishPlaces: gana el cambio más reciente); con adoptSettings (dispositivo
+// vacío) se toman además del remoto nombre y horas.
 // since: ISO de la última sincronización (para contar conflictos: cambiados en los dos lados).
 // → { state, changed, conflictCount, pulledDays: [key], pulledCodes: [code] }
 export function mergeStates(local, remote, { now, since = null, adoptSettings = false } = {}) {
@@ -832,12 +924,12 @@ export function mergeStates(local, remote, { now, since = null, adoptSettings = 
   for (const d of Object.values(out.days)) ensureCodes(out, d.codes);
   out.scans = unionList(L.scans, R.scans, MAX_SCANS);
   out.changes = unionList(L.changes, R.changes, MAX_CHANGES);
-  if (adoptSettings && isPlainObject(R.settings)) {
-    out.settings = fixSettings(mergeSettings(out.settings, pick(R.settings, USER_SETTINGS)));
-  }
+  const sp = convergeSettings(out.settings || {}, R.settings, adoptSettings);
+  if (sp) out.settings = fixSettings(mergeSettings(out.settings, sp));
   const pruned = pruneTombstones(out, now instanceof Date ? now : new Date());
   const changed = dataFingerprint(pruned) !== dataFingerprint(local)
     || stableStringify(pick(pruned.settings, USER_SETTINGS)) !== stableStringify(pick(local.settings, USER_SETTINGS))
+    || Boolean(pruned.settings?.sync?.publishPlaces) !== Boolean(local.settings?.sync?.publishPlaces)
     || stableStringify([pruned.scans, pruned.changes]) !== stableStringify([local.scans || [], local.changes || []]);
   return { state: changed ? pruned : local, changed, conflictCount, pulledDays, pulledCodes };
 }

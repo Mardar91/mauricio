@@ -21,9 +21,11 @@ test('createDefaultState: forma del estado (§3)', () => {
   assert.deepEqual(s.settings.sync, {
     enabled: false, owner: 'Mardar91', repo: 'mauricio-datos', branch: '', token: '', key: '', deviceId: '', baseRev: 0,
     lastPushAt: null, lastPushHash: null, lastIcsHash: null, lastPullAt: null, lastError: null, lastErrorCode: null,
-    lastErrorDetail: null, publishPlaces: false,
+    lastErrorDetail: null, lastErrorSince: null, publishPlaces: false, publisher: null, publisherSince: null, unpublished: 0,
   });
   assert.equal(s.settings.calendarUpdatedAt, null);
+  assert.equal(s.settings.remindersUpdatedAt, null);
+  assert.equal(s.settings.placesUpdatedAt, null);
   assert.deepEqual(s.settings.ntfy, { enabled: false, server: 'https://ntfy.sh', topic: '', scheduled: {}, lastRunAt: null, lastError: null });
   assert.equal(s.settings.onboardingDone, false);
   assert.deepEqual(Object.keys(s.codes).sort(), Object.keys(DEFAULT_CODES).sort());
@@ -231,7 +233,8 @@ test('exportBackup no incluye token, clave ni ajustes del dispositivo; importBac
   assert.equal(data.settings.name, 'Mauri');
   assert.deepEqual(data.tombstones, {});
 
-  let phone = updateSettings(createDefaultState(), { sync: { token: 'OTRO_TOKEN' } });
+  // Teléfono ya conectado (sync activa y ya leyó): lo importado pasa a ser lo más nuevo
+  let phone = updateSettings(createDefaultState(), { sync: { token: 'OTRO_TOKEN', enabled: true, lastPullAt: T0.toISOString() } });
   phone = setDay(phone, '2026-10-20', ['N1'], { now: T0 });
   const NOW = new Date('2026-10-14T10:00:00Z');
   const restored = importBackup(phone, json, { now: NOW });
@@ -242,7 +245,8 @@ test('exportBackup no incluye token, clave ni ajustes del dispositivo; importBac
   assert.equal(restored.tombstones['2026-10-20'], NOW.toISOString()); // el borrado llegará a otros dispositivos
   assert.equal(restored.settings.name, 'Mauri');
   assert.equal(restored.settings.sync.token, 'OTRO_TOKEN');
-  assert.equal(restored.settings.sync.enabled, false); // la sync de este teléfono no cambia
+  assert.equal(restored.settings.sync.enabled, true); // la sync de este teléfono no cambia
+  assert.equal(restored.settings.sync.lastPullAt, T0.toISOString());
   assert.ok(restored.changes.some((c) => c.source === 'import' && c.dayKey === '2026-10-20'));
 });
 

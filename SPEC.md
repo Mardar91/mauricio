@@ -22,9 +22,10 @@ docs/                       ← lo que publica GitHub Pages (raíz de la app)
   js/app.js                 ← entrada de la UI
   js/ui/*.js                ← vistas y componentes de UI
   js/core/*.js              ← lógica pura (sin DOM al importar), testeada con node --test
-  js/recognize/index.js     ← reconocimiento de fotos: export async function recognize(input, options)
+  js/recognize/index.js     ← reconocimiento: combina phone-a (color-first) + phone-b (rectify-rows) + pc (tabla del PC); ocr-pool.js comparte un worker de Tesseract
   vendor/tesseract/         ← tesseract.js 7.0.0 auto-alojado (OCR en el navegador)
-    tesseract.min.js  worker.min.js  core/*.wasm.js  lang/best_int/eng.traineddata.gz  lang/legacy/eng.traineddata.gz
+    tesseract.min.js  worker.min.js  core/tesseract-core{,-simd,-relaxedsimd}-lstm.wasm.js  lang/best_int/eng.traineddata.gz
+                            (solo motor LSTM, OEM 1; el navegador elige la variante SIMD que soporte)
 test/
   fotos/*.jpg               ← fotos reales de los planes (ver test/lab/ground-truth.json)
   lab/ground-truth.json     ← verdad de referencia por foto
@@ -182,7 +183,7 @@ export async function recognize(input, options = {}) → Promise<RecognizeResult
 export async function dispose()   // termina workers de Tesseract
 // input: Blob | File | ImageBitmap | HTMLImageElement | HTMLCanvasElement
 // options: {
-//   tesseract: { workerPath, corePath, langPath, langPathLegacy },  // URLs absolutas; por defecto derivadas de import.meta.url → ../../vendor/tesseract/
+//   tesseract: { workerPath, corePath, langPath },  // URLs absolutas; por defecto derivadas de import.meta.url → ../../vendor/tesseract/
 //   knownCodes?: string[],        // códigos conocidos para "ajustar" el OCR
 //   employeeName?: 'Ducuara',     // para la tabla del PC con varias filas
 //   onProgress?: (fraction, label) => void,

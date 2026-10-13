@@ -81,11 +81,13 @@ export function triggerDuration(ms) {
   return `-PT${h ? `${h}H` : ''}${m || !h ? `${m}M` : ''}`;
 }
 
-// Sello estable del evento: lo más reciente entre el día, sus códigos y los ajustes del calendario.
-// Nunca "ahora": el mismo contenido da siempre el mismo ICS (y el mismo hash para publicar).
+// Sello estable del evento: lo más reciente entre el día, sus códigos (también si se borraron) y los
+// ajustes del calendario. Nunca "ahora": el mismo contenido da siempre el mismo ICS.
 function stampFor(state, key, entry) {
   let best = 0;
-  const vals = [entry?.updatedAt, state?.settings?.calendarUpdatedAt, ...(entry?.codes || []).map((c) => getCode(state, c).updatedAt)];
+  const codes = entry?.codes || [];
+  const vals = [entry?.updatedAt, state?.settings?.calendarUpdatedAt,
+    ...codes.map((c) => getCode(state, c).updatedAt), ...codes.map((c) => state?.codeTombstones?.[c])];
   for (const v of vals) {
     const t = Date.parse(v);
     if (Number.isFinite(t) && t > best) best = t;
