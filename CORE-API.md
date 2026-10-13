@@ -2,7 +2,19 @@
 
 API final de la lógica (SPEC §9–§13). Todo se importa desde `docs/js/core/index.js`, que también reexporta `cipher.js`. Este archivo está en la raíz del repo y no dentro de `docs/`, porque `docs/` se publica en GitHub Pages.
 
-## Lo nuevo de esta ronda (SPEC §11 y §13)
+## 1.4.3: turnos sin nombre, nombre del calendario publicado y ramas nuevas
+
+> **`docs/sw.js` / `js/app.js`:** `VERSION` y `APP_VERSION` = `'1.4.3'`. No hay archivos nuevos que precachear.
+
+1. **Turnos sin nombre ante el calendario de alguien (§3.7, `otherPerson.unnamed`).** Un dispositivo **sin nombre**, con turnos y que nunca leyó ni publicó (Ana escanea y salta «¿Cómo te llamas?») que abre un enlace de un calendario **con nombre** (el de la copia, el del enlace o el del calendario publicado) ya no se conecta sin más: `trySetupConfig` / `q.setup` dan `OTHER_PERSON` con `otherPerson.reason: 'name'` y **`unnamed: true`** («Este enlace es del calendario de Mauricio, y en este dispositivo ya hay turnos sin nombre (no se sabe de quién son). No se cambió nada.»). Antes la cola guardaba el enlace y, con «Usar este dispositivo», sus turnos acababan en el calendario de otra persona (el día más nuevo gana: pisaban los suyos) sin copia para deshacer. La UI pregunta **«¿Estos turnos son de Mauricio?»**:
+   - **Sí** → `store.set((s) => updateSettings(s, { name: otherPerson.name }))` y repetir `q.setup(cfg)` (ya no hay motivo: se juntan, como con el mismo nombre). Si falla, se vuelve a poner el nombre de antes.
+   - **No** → «¿Cambiar este teléfono al calendario de Mauricio?»: el contrato de §3.7 (`saveBeforeImport` → `q.setup(cfg, { switchPerson: true })`), o **Cancelar** (nada cambió).
+   - Sin turnos, o sin nombre del calendario, no se pregunta (un teléfono nuevo, o un calendario «Mis turnos»).
+2. **Nombre del calendario publicado.** Si ni la copia (`meta.name`) ni el enlace traen nombre, `trySetupConfig` lee el `X-WR-CALNAME` de su `turnos.ics` («Turnos de Mauricio» → `'Mauricio'`), solo cuando hace falta (aquí hay turnos que no son de ningún destino). Y **el que publica reescribe una vez** una copia cuyo `meta.name` no es su nombre de pila (copias de 1.4.1 o antes, o tras cambiar el nombre): `pushed: true` con los mismos datos. Los que solo leen nunca la reescriben.
+3. **Rama que no existe (§3.3, `res.missingBranch`).** Cambiar a otro calendario (cualquier motivo de §3.7) en una **rama que no existe** ya no la crea desde la rama por defecto (copiaba la copia cifrada y el calendario de la raíz, y luego daba `DECRYPT`): `trySetupConfig` responde `{ ok:false, error.code: 'CONFIG', message: NEW_BRANCH_MESSAGE }` («Esa rama todavía no existe, y al crearla se copiarían los archivos del calendario principal. Para el calendario de otra persona, usa «Crear enlace para otra persona» (le crea su carpeta). No se cambió nada.»), también con `switchPerson`, y sin preguntar antes. Un dispositivo sin datos de ningún destino sí puede estrenar una rama (como antes). El resultado de `syncNow` / `pullOnly` lleva `missingBranch` (la rama indicada no existe y no se creó).
+4. **Tomar el relevo después de cambiar (UI, §4.2 paso 5).** La pregunta nombra el calendario: «¿Usar este iPhone para actualizar el calendario de Ana? … Hazlo solo si este es el iPhone de Ana.» (y, si aquí hay turnos que no eran de ningún calendario, «Los N días con turnos de este iPhone pasarán a ese calendario.»). **Tras un cambio confirmado a otra persona** (nombres distintos, o alguno sin saber) **no se pregunta**: el dispositivo solo lee, y «Deshacer» no deja el calendario de esa persona apuntando a este dispositivo. Con la misma persona (otra carpeta, repositorio o rama suyos) se pregunta y se recomienda; si tomó el relevo, «Deshacer» avisa de tocar «Usar este dispositivo» en el otro. Sin cambiar, si el dispositivo es de otra persona que el calendario, la pregunta no se recomienda (`confirmDialog({ prefer: 'cancel' })`: «No, solo leer» primero). «Usar este dispositivo» (Ajustes) también nombra el calendario, y «Restaurar» avisa si este dispositivo publica el calendario que va a dejar.
+
+## Ronda 1.4.2 (SPEC §11 y §13)
 
 > **`docs/sw.js`:** no hay módulos nuevos (suplementos y saldos están en `hours.js`), pero cambió el código de `js/core/*`: al publicar hay que **subir `VERSION`** en `sw.js` y `APP_VERSION` en `js/app.js`.
 
@@ -30,20 +42,10 @@ API final de la lógica (SPEC §9–§13). Todo se importa desde `docs/js/core/i
 
 ### Pendiente en la UI
 
-- **Cambio de calendario** (`setup.js`, `runSetup`, también desde el formulario avanzado): `OTHER_PERSON` **y** `OTHER_TARGET` se tratan igual, con el contrato exacto de §3.7 (preguntar → `saveBeforeImport` → `syncQueue.setup(cfg, { switchPerson: true })` → «Deshacer» con `undoImport`). Un `lastErrorCode === 'OTHER_TARGET'` (configuración cambiada por debajo) se arregla igual, con la configuración guardada como `cfg`. En el dispositivo de quien ayuda, lo normal es «Cancelar».
-- **«Crear enlace para <nombre>»** (`settings.js`): poner el nombre también en el enlace de la raíz, para que el diálogo diga «para Mauricio» y el guardián tenga el nombre: `buildSetupLink(location.href, { ...sync, name: publicName(settings.name) })` (ya lo admite).
-- **Primer uso en el ordenador** (`onboarding.js`): no preguntar «¿Cómo te llamas?» si `platform() === 'desktop'` (lo usa quien ayuda; su nombre acabaría en el calendario publicado), o preguntar «¿De quién son estos turnos?».
-- **Escanear** (`scan.js`): un aviso que empieza por `OTHER_SHEET_WARNING` («Esta hoja parece de otra persona») va como `notice-warn`, no `notice-info`.
-- **`sw.js` / `app.js`:** subir `VERSION` y `APP_VERSION` (no hay archivos nuevos que precachear).
-- **Primer uso / Ajustes:** pedir `name` (nombre de pila) y `planName` (como en el Dienstplan), saltables. Si `planName` está vacío, proponer `suggestPlanName(state)` (instalación antigua de Mauricio → «Ducuara Mauricio»). Saludo: `name` vacío → «Hola 👋» (ya no caer en `'Mauricio'`, p. ej. `onboarding.js`).
-- **Escanear:** `employeeName: state.settings.planName || suggestPlanName(state) || 'Ducuara'` (hoy es una constante). Con solo el apellido, una hoja de varias filas no da ninguna (avisa «Pon tu nombre como sale en el plan»).
-- **Calendario en Android:** botón «Ver mis turnos en el calendario» → `calendarUrls(sync).android`; siempre también «Copiar enlace» con `calendarUrls(sync).https` (Google Calendar «Desde URL» se configura desde un ordenador). En iOS sigue `webcal`.
-- **Editor de códigos:** campo «Tiempo de viaje (min)» (`travelMin`, 0–180), sobre todo en lugares. En Hoy/editor del día: «Sal a las …» con `travelText(item)` y «Abrir en Mapas» con `mapsUrl(def, platform)` si el lugar tiene dirección.
-- **Paleta:** `K` (Enfermedad) en «Otros».
-- **Recordatorios:** interruptor «Recordarme subir el plan del mes siguiente» (`reminders.planUpload`).
-- **Horas:** suplementos del mes (`monthSummary(...).supplements`, con `SUPPLEMENT_NOTE` «comprueba tu contrato»), saldo de horas (`overtimeBalance`) y vacaciones del año (`vacationSummary`); en Ajustes, sus valores (`supplements`, `balances`).
-- **Ajustes → «Calendarios de la familia»:** `listCalendars(sync)`; cada uno con «Ver sus turnos en mi calendario» (`c.urls`). **Opciones avanzadas → «Crear enlace para otra persona»:** pedir el nombre → `buildPersonLink(location.href, sync, { name, existingDirs })` (§3.6).
-- **Consejos:** pasar `{ platform }` a `getAdvice` (Hoy y Horas).
+Todo lo de la ronda 1.4.2 ya está en la UI (cambio de calendario con «Deshacer», enlace de la raíz con nombre, primer uso en el ordenador, aviso de hoja de otra persona, nombre y `planName`, `employeeName`, Android, viaje, `K`, «Sube el plan», suplementos y saldos, «Calendarios de la familia», consejos con `platform`, «Cambiar la clave»). Límites conocidos:
+
+- Un calendario sin ningún nombre (copia sin `meta.name` y `.ics` «Mis turnos», p. ej. si quien publica no tiene nombre) no dice de quién es: con un enlace sin nombre, el guardián no tiene con qué comparar. La pregunta «¿Usar este…?» avisa de los días de aquí que pasarían a ese calendario.
+- Tras «Usar este dispositivo» en un calendario al que se cambió, «Deshacer»/«Restaurar» no devuelve el relevo: lo avisan, y el otro dispositivo lo recupera con «Usar este dispositivo».
 
 ### Rondas anteriores (resumen)
 
@@ -165,7 +167,8 @@ isReadOnlyDevice(sync)                                           // true → otr
     - hay copia y no hay clave (`NO_KEY`);
     - el token o el repo fallan (`AUTH`, `FORBIDDEN`, `NOT_FOUND`…);
     - no hay red (`NETWORK`…) y el dispositivo ya tenía una configuración que funcionaba;
-    - el enlace es del calendario de **otra persona** (`OTHER_PERSON`) o los datos de aquí son de **otro destino** (`OTHER_TARGET`), §3.7. Un error al leer va antes (salvo uno pasajero en un dispositivo que no funcionaba: el guardián no necesita la red).
+    - el enlace es del calendario de **otra persona** (`OTHER_PERSON`, también con turnos sin nombre: `unnamed`) o los datos de aquí son de **otro destino** (`OTHER_TARGET`), §3.7. Un error al leer va antes (salvo uno pasajero en un dispositivo que no funcionaba: el guardián no necesita la red);
+    - es otro calendario en una **rama que no existe** (`CONFIG`, `NEW_BRANCH_MESSAGE`: no se crea).
   - Sin red en un dispositivo **sin configurar**, responde `ok:true` con `error` pasajero: se guarda y se reintentará solo.
   - `apply(state)` guarda la configuración, la identidad probada (o una clave nueva si no había copia remota) y lo leído (`applySyncResult`).
   - Con el mismo destino, recuerda quién publicaba. Con otro, empieza de cero.
@@ -188,6 +191,7 @@ isReadOnlyDevice(sync)                                           // true → otr
   pulledDays,      // ['YYYY-MM-DD', …] que vinieron del remoto
   unpublishedDays, unpublishedCodes, unpublishedSettings, // solo si readOnly: lo de aquí que no está publicado
   rev, remote: { rev, days, savedAt, deviceId, publisher, legacy, name } | null,   // name: meta.name o null
+  missingBranch,   // true: la rama indicada no existe (y no se creó: solo lectura, o quien recuerda a otro publisher)
   startedAt,       // ISO: cuándo empezó (para descartar resultados viejos)
   sync,            // PARCHE para settings.sync (aplicar con applySyncResult)
   error: { code, message, detail, status, retry } | null,
@@ -284,7 +288,7 @@ Regla: **los turnos (y la clave) de un calendario nunca llegan a otro**. Un cale
 | `otherPerson.reason` | `error.code` | Cuándo |
 |---|---|---|
 | `'folder'` | `OTHER_PERSON` | los datos de aquí son de otra carpeta (`dir`) |
-| `'name'` | `OTHER_PERSON` | el calendario nuevo es de otro nombre (`meta.name` de su copia o, sin ella, el `name` del enlace; primera palabra, sin mayúsculas ni acentos) y aquí hay datos de un destino, o turnos y un nombre (solo `trySetupConfig`) |
+| `'name'` | `OTHER_PERSON` | el calendario nuevo es de otro nombre (`meta.name` de su copia o, sin ella, el `name` del enlace o el `X-WR-CALNAME` de su `turnos.ics`; primera palabra, sin mayúsculas ni acentos) y aquí hay datos de un destino, o turnos y un nombre; **o** aquí hay turnos **sin nombre** que no son de ningún destino (`unnamed: true`: preguntar «¿Estos turnos son de…?», ver 1.4.3) (solo `trySetupConfig`) |
 | `'target'` | `OTHER_TARGET` | los datos de aquí son de otro destino en la misma carpeta: otro owner, repo o rama (p. ej. el formulario avanzado con otro repositorio) |
 
 El mismo destino (otra clave, otro token, otras mayúsculas) nunca se bloquea. Respuesta: `{ ok:false, error: { code, message, detail, retry:false }, res, otherPerson }` con
@@ -292,18 +296,26 @@ El mismo destino (otra clave, otro token, otras mayúsculas) nunca se bloquea. R
 ```js
 otherPerson = { reason, name /* del calendario nuevo | null */, dir /* carpeta nueva */,
   current: { name /* de este dispositivo | null */, dir }, working /* sync activa que leyó o publicó */,
-  bound /* los datos de aquí son de un destino */, from /* 'Mardar91/mauricio-datos' | null */,
+  bound /* los datos de aquí son de un destino */, unnamed /* turnos sin nombre ni destino: ¿son suyos? */,
+  from /* 'Mardar91/mauricio-datos' | null */,
   to /* 'Mardar91/sorella-datos', 'Mardar91/mauricio-datos, carpeta ana' o '…, rama datos' */ }
 ```
 
 `message` (siempre termina en «No se cambió nada.»):
-- `OTHER_PERSON`: «Este enlace es del calendario de Ana y este dispositivo usa el de Mauricio.» · sin nombre aquí: «Este enlace es del calendario de Ana, no del que usa este dispositivo.» · sin datos de un destino (motivo `'name'`): «… y en este dispositivo hay turnos de Mauricio.» · mismo nombre en los dos: «Este enlace es de otro calendario, no del que usa este dispositivo.» · sin nombre del calendario nuevo: `SYNC_MESSAGES.OTHER_PERSON` («Este enlace es del calendario de otra persona.»).
+- `OTHER_PERSON`: «Este enlace es del calendario de Ana y este dispositivo usa el de Mauricio.» · sin nombre aquí: «Este enlace es del calendario de Ana, no del que usa este dispositivo.» · sin datos de un destino (motivo `'name'`): «… y en este dispositivo hay turnos de Mauricio.» · ni nombre ni destino (`unnamed`): «Este enlace es del calendario de Ana, y en este dispositivo ya hay turnos sin nombre (no se sabe de quién son).» · mismo nombre en los dos: «Este enlace es de otro calendario, no del que usa este dispositivo.» · sin nombre del calendario nuevo: `SYNC_MESSAGES.OTHER_PERSON` («Este enlace es del calendario de otra persona.»).
 - `OTHER_TARGET`: «Este dispositivo ya tiene el calendario de Mauricio (Mardar91/mauricio-datos). Esta conexión es a otro calendario (Mardar91/sorella-datos).» (sin nombre: «ya tiene otro calendario (…)»).
 
 **Contrato para la UI** (enlace, «Tengo un enlace», formulario avanzado y «Cambiar al calendario conectado»):
 
 ```js
 let t = await syncQueue.setup(cfg);
+if (!t.ok && t.otherPerson?.unnamed) {
+  // «¿Estos turnos son de Ana?» → Sí: poner su nombre y repetir; No: el cambio de abajo (o cancelar)
+  if (await confirmDialog({ title: `¿Estos turnos son de ${t.otherPerson.name}?`, ok: `Sí, son de ${t.otherPerson.name}`, cancel: 'No' })) {
+    store.set((s) => updateSettings(s, { name: t.otherPerson.name }));
+    t = await syncQueue.setup(cfg);
+  }
+}
 if (!t.ok && (t.error.code === 'OTHER_PERSON' || t.error.code === 'OTHER_TARGET')) {
   const ok = await confirmDialog({
     title: t.otherPerson.name ? `¿Cambiar al calendario de ${t.otherPerson.name}?` : '¿Cambiar de calendario?',
@@ -316,7 +328,8 @@ if (!t.ok && (t.error.code === 'OTHER_PERSON' || t.error.code === 'OTHER_TARGET'
   if (!t.ok) { /* borrar la copia undoKey */ alertDialog({ text: t.error.message }); return false; } // nada cambió
 }
 if (!t.ok) { alertDialog({ title: 'No se pudo conectar', text: t.error.message }); return false; }
-// seguir con §4.2 paso 5 (t.readOnly → «¿Usar este…?»; si no, syncQueue.sync()) y el paso «Suscribirme»:
+// seguir con §4.2 paso 5 (t.readOnly → «¿Usar este…?», salvo tras cambiar a otra persona; si no,
+// syncQueue.sync()) y el paso «Suscribirme»:
 // con otra carpeta, repo o rama la dirección del calendario cambia
 // «Deshacer»: const prev = undoImport(localStorage, store.get(), { key: undoKey }); if (prev) store.set(() => prev);
 ```
@@ -327,7 +340,7 @@ if (!t.ok) { alertDialog({ title: 'No se pudo conectar', text: t.error.message }
 - **«Deshacer»:** `undoImport` con la copia de antes de cambiar vuelve al estado anterior **entero** (su conexión, su clave y sus turnos; ntfy y `onboardingDone` los de ahora), nunca importa sus turnos en el calendario nuevo. Con una copia del mismo calendario sigue como siempre (§4.5).
 - **`applySyncConfig` directo** lanza `SyncError` con `code` `OTHER_PERSON`/`OTHER_TARGET` y `e.otherPerson` (no mira nombres: no lee); `applySyncConfig(s, cfg, { switchPerson: true })` cambia desde cero. `syncConfigPatch` es de bajo nivel y no comprueba nada, pero conserva `boundTarget`: si la configuración cambia por debajo (`syncConfigPatch` o `updateSettings` con otro owner, repo, rama o carpeta), `syncNow`, `pullOnly` y `becomePublisher` dan `OTHER_TARGET` sin ninguna petición (`lastError` = `SYNC_MESSAGES.OTHER_TARGET`). Para salir: el flujo de arriba con la configuración guardada (`normalizeSyncConfig({ ...sync })`): `OTHER_TARGET` → confirmar → `switchPerson`. Volver a aplicar el destino de los datos (`boundTarget`) lo arregla sin borrar nada.
 - `q.setup`: si el estado cambió mientras se comprobaba (otra pestaña conectó otro calendario), devuelve `{ ok:false, error OTHER_PERSON|OTHER_TARGET, otherPerson }` y no guarda nada.
-- **Ramas:** una rama nueva se crea desde la rama por defecto y git copia sus archivos (también el `backup.json` de la raíz): para otra persona, otra carpeta (`buildPersonLink`), no otra rama.
+- **Ramas:** una rama nueva se crearía desde la rama por defecto y git copiaría sus archivos (también el `backup.json` de la raíz): por eso cambiar a otro calendario en una rama que no existe da `CONFIG` con `NEW_BRANCH_MESSAGE` (sin crearla ni preguntar). Para otra persona, otra carpeta (`buildPersonLink`), no otra rama.
 
 **Enlace de la raíz con nombre:** `buildSetupLink(location.href, { ...sync, name: publicName(settings.name) })`. Sin nombre el enlace es el de siempre. Con nombre, el guardián tiene con qué comparar aunque la raíz aún no tenga `meta.name` (el teléfono de Ana con sus turnos → `OTHER_PERSON` «Este enlace es del calendario de Mauricio y en este dispositivo hay turnos de Ana.»), y el teléfono sin nombre lo toma (al publicar, «Turnos de Mauricio»).
 
@@ -376,9 +389,9 @@ Al arrancar (`app.js`): `const cfg = parseSetupLink(location.hash)`. Después, l
    if (!t.ok) { alertDialog({ title: 'No se pudo conectar', text: t.error.message }); return; } // nada cambió
    ```
 
-   Errores típicos: `DECRYPT` (el enlace trae otra clave: «pide un enlace nuevo»), `NO_KEY`, `AUTH` (token caducado), y `NETWORK` si ya estaba conectado («inténtalo con internet»). `OTHER_PERSON` / `OTHER_TARGET`: el enlace o el formulario es de otro calendario → preguntar y, si dice que sí, `syncQueue.setup(cfg, { switchPerson: true })` (contrato exacto en §3.7).
+   Errores típicos: `DECRYPT` (el enlace trae otra clave: «pide un enlace nuevo»), `NO_KEY`, `AUTH` (token caducado), y `NETWORK` si ya estaba conectado (la UI: «Sin conexión a internet: no se cambió nada. Abre el enlace otra vez cuando tengas internet.»; en el formulario, «Inténtalo otra vez…»). En el ordenador de quien ayuda, `NO_KEY`/`DECRYPT` explican cómo volver a un calendario que ya usaba (Restaurar → «Copia de antes de cambiar de calendario») en vez de «Pide ayuda a quien te configuró la app». `OTHER_PERSON` / `OTHER_TARGET`: el enlace o el formulario es de otro calendario → preguntar y, si dice que sí, `syncQueue.setup(cfg, { switchPerson: true })` (contrato exacto en §3.7).
 5. Según quién publica:
-   - `t.readOnly` (ya publica otro, p. ej. el navegador de quien ayuda) → `confirmDialog`: «¿Usar este iPhone para actualizar el calendario? El otro dispositivo (por ejemplo, el de quien te ayuda) dejará de hacerlo. Primero se juntan los turnos de los dos.» (Recomendado si este es tu iPhone.)
+   - `t.readOnly` (ya publica otro, p. ej. el navegador de quien ayuda) → `confirmDialog`: «¿Usar este iPhone para actualizar el calendario de Mauricio? Ahora lo actualiza otro dispositivo (el de Mauricio o el de quien te ayuda), que dejará de hacerlo. Primero se juntan los turnos de los dos. Hazlo solo si este es el iPhone de Mauricio.» (sin nombre del calendario: «… Recomendado si este es tu iPhone.»). No se recomienda si el dispositivo es de otra persona, y tras cambiar a otra persona no se pregunta (1.4.3).
      - **Sí:** `const r = await syncQueue.becomePublisher()`. Si `!r.ok`, mostrar `r.error.message`.
      - **No:** este dispositivo solo lee (§4.4).
    - si no: `await syncQueue.sync()`. Si no hay copia ni calendario, este pasa a publicar y crea `backup.json` y `turnos.ics`. Si devuelve `EMPTY_LOCAL`, mostrar su mensaje.
@@ -395,7 +408,7 @@ Al arrancar (`app.js`): `const cfg = parseSetupLink(location.hash)`. Después, l
 4. Enviar el enlace nuevo a los demás dispositivos. Hasta entonces dan `DECRYPT` y no escriben nada.
 
 - Mientras no hay `backup.json`, cualquier otro dispositivo que sincronice queda en solo lectura (`publisher: '?'`) y no pisa el calendario.
-- Un enlace con clave nueva: `buildSetupLink(location.href, { ...sync, key: generateSyncKey() })` (hoy la UI no tiene esa acción: ver «Pendiente en la UI»).
+- Un enlace con clave nueva: `buildSetupLink(location.href, { ...sync, key: generateSyncKey() })` (en la UI: «Opciones avanzadas → Cambiar la clave», solo en el que publica).
 - Si se aplica la clave nueva **antes** de borrar la copia, la sincronización recupera la anterior (`prevKey`) y no cambia nada.
 
 ### 4.3 Sincronización de fondo (`ui/background.js`)
@@ -662,6 +675,6 @@ Además:
 - la primera sincronización de un estado sin `deviceId` o sin clave no escribe nada (`RETRY`) si no se usa `ensureSyncIdentity` o la cola;
 - los enlaces de prueba usan un token con formato real (`` `github_pat_${'A'.repeat(22)}_${'B'.repeat(59)}` ``).
 
-`test/unit/helpers.mjs` (`fakeGitHub`, con listado de carpetas; `multiRepo` para varios repositorios) es una referencia completa. Los escenarios de esta ronda: varias personas en `test/unit/people.test.mjs` y `person-switch.test.mjs` (enlace de otra persona, adopción de ajustes), cambio de destino en `target-switch.test.mjs` (`OTHER_TARGET`, `switchPerson`, «Deshacer», enlace de la raíz con nombre, «nunca, por ningún camino»), la tabla del PC con la foto real y `employeeName` en `recognize-pc-photo.test.mjs` (Chromium; se salta sin Playwright), suplementos en `supplements.test.mjs`, saldos en `balances.test.mjs`, viaje y «Sube el plan» en `travel-plan.test.mjs`. Los de rondas anteriores: `sync-recheck3.test.mjs`, `sync-recovery.test.mjs` y `day-times.test.mjs` (horario especial).
+`test/unit/helpers.mjs` (`fakeGitHub`, con listado de carpetas; `multiRepo` para varios repositorios) es una referencia completa. Los de 1.4.3 (turnos sin nombre, `X-WR-CALNAME`, `meta.name` reescrito una vez, rama que no existe) están en `test/unit/guard-143.test.mjs`. Los escenarios de 1.4.2: varias personas en `test/unit/people.test.mjs` y `person-switch.test.mjs` (enlace de otra persona, adopción de ajustes), cambio de destino en `target-switch.test.mjs` (`OTHER_TARGET`, `switchPerson`, «Deshacer», enlace de la raíz con nombre, «nunca, por ningún camino»), la tabla del PC con la foto real y `employeeName` en `recognize-pc-photo.test.mjs` (Chromium; se salta sin Playwright), suplementos en `supplements.test.mjs`, saldos en `balances.test.mjs`, viaje y «Sube el plan» en `travel-plan.test.mjs`. Los de rondas anteriores: `sync-recheck3.test.mjs`, `sync-recovery.test.mjs` y `day-times.test.mjs` (horario especial).
 
 Un `.ics` puede llevar ahora el evento «Sube el plan» (`UID:plan-…`): al contar turnos en un test, no contarlo (`icsEventCount`).
