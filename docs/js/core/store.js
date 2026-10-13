@@ -1,5 +1,6 @@
 // Estado de la app en localStorage: carga/migración, mutaciones puras, copias de seguridad y fusión
 // entre dispositivos (días y códigos con updatedAt + tombstones, ver SPEC §9).
+import { isSyncKey } from './cipher.js';
 import { DEFAULT_CODES, KINDS, SHAPES, baseCode, cleanCode, guessCode, nominalMinutes, normalizeDayCodes } from './codes.js';
 import { isKey, parseHHMM } from './dates.js';
 import { scanToDays } from './diff.js';
@@ -42,6 +43,8 @@ export const DEFAULT_SETTINGS = Object.freeze({
     // Dispositivo que publica (el único que escribe en GitHub), tal como se vio en la última lectura
     publisher: null, publisherSince: null,
     unpublished: 0,      // cambios de aquí que no están publicados (días + códigos + avisos/lugares; solo lectura)
+    prevKey: '',         // clave anterior a un enlace con otra clave (se recupera si la nueva no descifra)
+    lastSyncStartedAt: null, // inicio de la última sincronización aplicada (descarta resultados viejos)
   },
   ntfy: { enabled: false, server: 'https://ntfy.sh', topic: '', scheduled: {}, lastRunAt: null, lastError: null },
   onboardingDone: false,
@@ -124,12 +127,13 @@ function fixSettings(st) {
   r.minutesBefore = Math.min(1440, Math.max(0, Math.round(Number(r.minutesBefore) || 0)));
   for (const k of ['calendarUpdatedAt', 'remindersUpdatedAt', 'placesUpdatedAt']) st[k] = isoOrNull(st[k]);
   const s = st.sync;
-  for (const [k, n] of [['owner', 39], ['repo', 100], ['branch', 100], ['token', 300], ['key', 64], ['deviceId', 40]]) s[k] = capStr(s[k], n).trim();
+  for (const [k, n] of [['owner', 39], ['repo', 100], ['branch', 100], ['token', 300], ['key', 64], ['prevKey', 64], ['deviceId', 40]]) s[k] = capStr(s[k], n).trim();
   s.baseRev = Number.isSafeInteger(s.baseRev) && s.baseRev > 0 ? s.baseRev : 0;
   s.publishPlaces = s.publishPlaces === true;
   s.publisher = typeof s.publisher === 'string' && s.publisher.trim() ? capStr(s.publisher, 40).trim() : null;
   s.publisherSince = isoOrNull(s.publisherSince);
   s.lastErrorSince = isoOrNull(s.lastErrorSince);
+  s.lastSyncStartedAt = isoOrNull(s.lastSyncStartedAt);
   s.unpublished = Number.isSafeInteger(s.unpublished) && s.unpublished > 0 ? s.unpublished : 0;
   if (!isPlainObject(st.ntfy.scheduled)) st.ntfy.scheduled = {};
   st.ntfy.server = capStr(st.ntfy.server, 200);
@@ -590,7 +594,16 @@ export function upsertCode(state, def, { now } = {}) {
   const next = ensureMaps(clone(state));
   next.codes[c] = merged;
   delete next.codeTombstones[c];
+  if (merged.kind !== prev.kind) resortDays(next, c);
   return next;
+}
+
+// Vuelve a ordenar (sin sellar) los días que usan un código cuyo tipo cambió: el orden canónico
+// depende del tipo, y al leer la copia se normaliza igual (si no, nunca coincidiría con lo publicado)
+function resortDays(state, code) {
+  for (const d of Object.values(state.days || {})) {
+    if (d?.codes?.includes(code)) d.codes = normalizeDayCodes(state, d.codes);
+  }
 }
 
 // Borra un código propio (queda una tombstone); uno de fábrica vuelve a su definición original.
@@ -601,17 +614,20 @@ export function deleteCode(state, code, { now } = {}) {
   const at = nowIso(now);
   if (DEFAULT_CODES[c]) {
     next.codes[c] = { ...clone({ ...DEFAULT_CODES[c] }), updatedAt: at };
+    resortDays(next, c);
     return next;
   }
   if (!state.codes?.[c]) return state;
   delete next.codes[c];
   next.codeTombstones[c] = at;
   if (Object.values(next.days).some((d) => d.codes.includes(c))) ensureCodes(next, [c]);
+  resortDays(next, c);
   return next;
 }
 
 // Mezcla profunda de ajustes. Si cambian los recordatorios o publishPlaces, anota calendarUpdatedAt
-// (sello del .ics) y remindersUpdatedAt / placesUpdatedAt (para fusionar entre dispositivos).
+// (sello del .ics) y remindersUpdatedAt / placesUpdatedAt (para fusionar entre dispositivos). Un
+// remindersUpdatedAt / placesUpdatedAt explícito en el parche se respeta (p. ej. el de un enlace).
 export function updateSettings(state, patch, { now } = {}) {
   const next = clone(state);
   next.settings = fixSettings(mergeSettings(state.settings, patch));
@@ -619,8 +635,15 @@ export function updateSettings(state, patch, { now } = {}) {
   const remindersChanged = stableStringify(before.reminders) !== stableStringify(next.settings.reminders);
   const placesChanged = Boolean(before.sync?.publishPlaces) !== next.settings.sync.publishPlaces;
   const at = nowIso(now);
-  if (remindersChanged) next.settings.remindersUpdatedAt = at;
-  if (placesChanged) next.settings.placesUpdatedAt = at;
+  const given = (k) => isPlainObject(patch) && k in patch;
+  // Red de seguridad: una clave buena sustituida por otra queda en prevKey (sync la recupera si la
+  // nueva no descifra la copia), salvo que el parche diga qué hacer con prevKey
+  const oldKey = before.sync?.key;
+  if (isSyncKey(oldKey) && next.settings.sync.key !== oldKey && !(isPlainObject(patch?.sync) && 'prevKey' in patch.sync)) {
+    next.settings.sync.prevKey = oldKey;
+  }
+  if (remindersChanged && !given('remindersUpdatedAt')) next.settings.remindersUpdatedAt = at;
+  if (placesChanged && !given('placesUpdatedAt')) next.settings.placesUpdatedAt = at;
   if (remindersChanged || placesChanged) next.settings.calendarUpdatedAt = at;
   return next;
 }
@@ -922,6 +945,9 @@ export function mergeStates(local, remote, { now, since = null, adoptSettings = 
   out.codes = codes;
   out.codeTombstones = codeTombstones;
   for (const d of Object.values(out.days)) ensureCodes(out, d.codes);
+  // Orden canónico con los tipos ya fusionados (como migrateState al leer la copia): si no, el que
+  // publica subiría una rev nueva en cada sincronización y los que leen verían «cambios sin publicar»
+  for (const d of Object.values(out.days)) d.codes = normalizeDayCodes(out, d.codes);
   out.scans = unionList(L.scans, R.scans, MAX_SCANS);
   out.changes = unionList(L.changes, R.changes, MAX_CHANGES);
   const sp = convergeSettings(out.settings || {}, R.settings, adoptSettings);

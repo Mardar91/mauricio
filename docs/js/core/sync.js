@@ -6,7 +6,9 @@
 // UN SOLO EDITOR: solo el dispositivo meta.publisher escribe en GitHub. Los demás leen y fusionan en
 // local, pero nunca escriben (readOnly). Para cambiar de editor: becomePublisher (tras confirmarlo).
 // Siempre se lee, se descifra y se fusiona por día antes de publicar. Nunca se publica una copia
-// vacía encima de una con datos.
+// vacía encima de una con datos (ni encima de un turnos.ics con eventos si backup.json desapareció).
+// La UI hace TODAS las llamadas (syncNow, pullOnly, becomePublisher, trySetupConfig) desde una única
+// cola (createSyncQueue) y aplica cada resultado con applySyncResult, que descarta los resultados viejos.
 import { decryptText, encryptText, generateSyncKey, isSyncKey, randomId } from './cipher.js';
 import { buildICS } from './ics.js';
 import { SCHEMA, USER_SETTINGS, dataFingerprint, mergeStates, migrateState, syncPayload, updateSettings } from './store.js';
@@ -43,9 +45,11 @@ export const SYNC_MESSAGES = Object.freeze({
   NEWER_LOCAL: 'Esta copia de la app está desactualizada. Ciérrala del todo y vuelve a abrirla para actualizarla.',
   EMPTY_LOCAL: 'Este teléfono no tiene turnos y en internet sí. No se ha enviado nada para no borrarlos.',
   NO_REMOTE: 'Todavía no hay ninguna copia guardada en internet.',
+  RETRY: 'Preparando el calendario. Se volverá a intentar en un momento.',
 });
-// Errores pasajeros: se reintenta solo; el resto necesita ayuda
-const RETRY_CODES = new Set(['RATE_LIMIT', 'SERVER', 'NETWORK', 'CONFLICT']);
+// Errores pasajeros: se reintenta solo; el resto necesita ayuda. RETRY: repetir en cuanto se guarde el
+// resultado (la identidad recién creada ya está a salvo)
+const RETRY_CODES = new Set(['RATE_LIMIT', 'SERVER', 'NETWORK', 'CONFLICT', 'RETRY']);
 
 // Error con mensaje humano (message), código (code), detalle técnico (detail) y HTTP (status, 0 = sin red)
 export class SyncError extends Error {
@@ -101,18 +105,58 @@ export function normalizeSyncConfig(data) {
   return out;
 }
 
-// Parche para settings.sync al aplicar una configuración nueva (enlace o formulario):
-// activa la sync y reinicia la contabilidad para que lo primero sea leer y fusionar el remoto.
-export function syncConfigPatch(cfg) {
+// Parche para settings.sync al aplicar una configuración nueva (enlace o formulario): activa la sync
+// y reinicia la contabilidad para que lo primero sea leer y fusionar el remoto.
+// current (State, opcional): con el mismo repositorio y rama se recuerda quién publicaba (por si
+// backup.json desaparece); si la clave cambia, la anterior queda en prevKey (red de seguridad).
+// El publishPlaces del enlace NO va aquí: lo aplica applySyncConfig (solo si aquí nunca se eligió).
+export function syncConfigPatch(cfg, current = null) {
+  const cur = current?.settings?.sync ?? null;
+  const branch = String(cfg.branch ?? '').trim();
   const patch = {
-    owner: cfg.owner, repo: cfg.repo, branch: cfg.branch ?? '', token: cfg.token, enabled: true,
+    owner: cfg.owner, repo: cfg.repo, branch, token: cfg.token, enabled: true,
     baseRev: 0, lastPushAt: null, lastPushHash: null, lastIcsHash: null, lastPullAt: null,
-    lastError: null, lastErrorCode: null, lastErrorDetail: null, lastErrorSince: null,
-    publisher: null, publisherSince: null, unpublished: 0,
+    lastError: null, lastErrorCode: null, lastErrorDetail: null, lastErrorSince: null, unpublished: 0,
   };
-  if (cfg.key) patch.key = cfg.key;
-  if (typeof cfg.publishPlaces === 'boolean') patch.publishPlaces = cfg.publishPlaces;
+  const same = Boolean(cur) && String(cur.owner || '').trim() === String(cfg.owner).trim()
+    && String(cur.repo || '').trim() === String(cfg.repo).trim() && branchName(cur) === branch;
+  if (!same) Object.assign(patch, { publisher: null, publisherSince: null });
+  if (cfg.key) {
+    patch.key = cfg.key;
+    if (isSyncKey(cur?.key) && cur.key !== cfg.key) patch.prevKey = cur.key;
+  }
   return patch;
+}
+
+// Sello mínimo: los lugares que sugiere un enlace pierden ante cualquier decisión real (con fecha)
+export const LINK_PLACES_AT = '1970-01-01T00:00:00.001Z';
+
+// Crea lo que falte de la identidad (deviceId y clave) ANTES de la primera petición de red. Puro: para
+// usarlo dentro de store.set al configurar. Devuelve el mismo estado si no falta nada.
+// options: { getRandomValues, deviceId, key } — valores a usar en vez de aleatorios; key: false = no crear clave.
+export function ensureSyncIdentity(state, { getRandomValues, deviceId, key } = {}) {
+  const s = state?.settings?.sync || {};
+  const patch = {};
+  if (!s.deviceId) patch.deviceId = typeof deviceId === 'string' && deviceId.trim() ? deviceId.trim().slice(0, 40) : randomId(12, getRandomValues);
+  if (!isSyncKey(s.key) && key !== false) patch.key = isSyncKey(key) ? key : generateSyncKey(getRandomValues);
+  return Object.keys(patch).length ? updateSettings(state, { sync: patch }) : state;
+}
+
+// Aplica una configuración (enlace o formulario) a un estado. Puro: usar dentro de store.set.
+// = syncConfigPatch(cfg, state) + publishPlaces del enlace (solo si este dispositivo nunca eligió, y con
+// el sello mínimo para que gane cualquier decisión publicada) + ensureSyncIdentity. Lanza SyncError
+// CONFIG si cfg no es válida. options: { now, getRandomValues, deviceId, key } (ver ensureSyncIdentity).
+export function applySyncConfig(state, cfg, { now, getRandomValues, deviceId, key } = {}) {
+  const c = normalizeSyncConfig(cfg);
+  if (!c) throw syncError('CONFIG', 'Configuración de sincronización no válida.');
+  const st = state?.settings || {};
+  const patch = { sync: syncConfigPatch(c, state) };
+  const neverChose = !st.placesUpdatedAt && !st.sync?.lastPullAt && !st.sync?.lastPushAt;
+  if (typeof c.publishPlaces === 'boolean' && neverChose) {
+    patch.sync.publishPlaces = c.publishPlaces;
+    patch.placesUpdatedAt = LINK_PLACES_AT;
+  }
+  return ensureSyncIdentity(updateSettings(state, patch, { now }), { getRandomValues, deviceId, key });
 }
 
 const enc = encodeURIComponent;
@@ -263,11 +307,16 @@ async function afterFirstWrite(ctx, commit) {
   if (made.status === 422 && !/exists/i.test(made.data?.message || '')) throw httpError(422, ctx.sync, made.data, null, 'POST git/refs');
 }
 
-// Calendario: solo se escribe si cambió; reintenta una vez si otro lo cambió entre medias
-async function putIcs(ctx, content, message) {
+// Calendario: solo se escribe si cambió; reintenta una vez si otro lo cambió entre medias.
+// backupSha: el backup.json que esta sincronización leyó o escribió. Si cambió (otro pasó a publicar
+// mientras esta estaba congelada), no se pisa su calendario → CONFLICT (se reintenta y ya solo lee).
+async function putIcs(ctx, content, message, backupSha) {
   for (let attempt = 0; attempt < 2; attempt++) {
     const cur = await getFile(ctx, ICS_FILE);
     if (cur && (await fileText(ctx, cur)) === content) return { changed: false };
+    if (backupSha && (await getFile(ctx, BACKUP_FILE))?.sha !== backupSha) {
+      throw syncError('CONFLICT', `${BACKUP_FILE} cambió antes de escribir ${ICS_FILE} (otro dispositivo publicó).`, 409);
+    }
     const r = await putContents(ctx, ICS_FILE, content, message, cur?.sha ?? null);
     if (!r.conflict) {
       await afterFirstWrite(ctx, r.commit);
@@ -359,6 +408,31 @@ async function readRemote(ctx) {
   return null;
 }
 
+// Eventos del turnos.ics publicado (0 si no hay)
+async function publishedEvents(ctx) {
+  if (ctx.missing) return 0;
+  const f = await getFile(ctx, ICS_FILE);
+  return f ? ((await fileText(ctx, f)).match(/^BEGIN:VEVENT/gm) || []).length : 0;
+}
+
+// Descifra la copia. Si la clave actual no vale pero la anterior (prevKey, de antes de un enlace) sí,
+// el enlace traía una clave equivocada: se recupera la anterior (res.keyRestored)
+async function decryptRemote(doc, sync, patch, res) {
+  try {
+    const data = await decryptBackup(doc, sync.key);
+    if (sync.prevKey) patch.prevKey = ''; // la clave actual ya está comprobada
+    return data;
+  } catch (e) {
+    if (e?.code !== 'DECRYPT' || !isSyncKey(sync.prevKey) || sync.prevKey === sync.key) throw e;
+    let data;
+    try { data = await decryptBackup(doc, sync.prevKey); } catch { throw e; }
+    sync.key = patch.key = sync.prevKey;
+    patch.prevKey = '';
+    res.keyRestored = true;
+    return data;
+  }
+}
+
 const lastSyncOf = (sync) => [sync.lastPushAt, sync.lastPullAt].filter(Boolean).sort().at(-1) ?? null;
 const daysIn = (state) => Object.keys(state?.days || {}).length;
 const CLEAR_ERRORS = Object.freeze({ lastError: null, lastErrorCode: null, lastErrorDetail: null, lastErrorSince: null });
@@ -384,17 +458,20 @@ function unpublishedOf(a, b) {
 const keyTag = (key) => (key ? hashString(`turnos-key|${key}`).slice(0, 8) : '');
 
 const isoOr = (v, fallback) => (typeof v === 'string' && Number.isFinite(Date.parse(v)) ? v : fallback);
+const errorInfo = (err) => ({ code: err.code, message: err.message, detail: err.detail || '', status: err.status ?? 0, retry: err.retry });
 
 // Sincroniza: lee el remoto, lo descifra y fusiona, y, SOLO si este dispositivo es el que publica,
 // publica backup.json (rev+1, si hay algo nuevo) y turnos.ics (si difiere del publicado).
 // options: { fetchImpl, now, force, allowEmpty, pullOnly, takeover, getRandomValues }
 //   force: volver a publicar aunque no haya cambios (solo el que publica); takeover: ver becomePublisher.
+// Si tiene que crear el deviceId o la clave, no escribe nada en esta llamada: devuelve RETRY con la
+// identidad en el parche (se publica en la siguiente, ya guardada). Mejor crearla antes (ensureSyncIdentity).
 // Nunca lanza. → {
 //   ok, readOnly (otro dispositivo publica: aquí solo se lee), publisher: {deviceId, since}|null,
-//   tookOver, state (fusionado, o el mismo objeto si no cambió), merged, pulled, pushed, icsPushed,
-//   conflictCount, pulledDays, unpublishedDays / unpublishedCodes / unpublishedSettings (solo lectura:
-//   lo de aquí que no está publicado),
-//   rev, remote: {rev,days,savedAt,deviceId,publisher,legacy}|null,
+//   tookOver, keyRestored, state (fusionado, o el mismo objeto si no cambió), merged, pulled, pushed,
+//   icsPushed, conflictCount, pulledDays, unpublishedDays / unpublishedCodes / unpublishedSettings
+//   (solo lectura: lo de aquí que no está publicado),
+//   rev, remote: {rev,days,savedAt,deviceId,publisher,legacy}|null, startedAt (ISO = now),
 //   sync: parche para settings.sync (aplicar con applySyncResult), error: {code,message,detail,status,retry}|null,
 //   target: {owner,repo,branch,keyTag} }
 export async function syncNow(state, fetchArg) {
@@ -403,10 +480,10 @@ export async function syncNow(state, fetchArg) {
   const sync = { ...(state?.settings?.sync || {}) };
   const patch = {};
   const res = {
-    ok: false, readOnly: false, publisher: null, tookOver: false,
+    ok: false, readOnly: false, publisher: null, tookOver: false, keyRestored: false,
     state, merged: false, pulled: false, pushed: false, icsPushed: false, conflictCount: 0, pulledDays: [],
     unpublishedDays: [], unpublishedCodes: [], unpublishedSettings: false,
-    rev: null, remote: null, sync: patch, error: null,
+    rev: null, remote: null, sync: patch, error: null, startedAt: now.toISOString(),
     target: { owner: String(sync.owner || '').trim(), repo: String(sync.repo || '').trim(), branch: branchName(sync), keyTag: keyTag(sync.key) },
   };
   let fresh = false; // deviceId o clave creados en esta llamada
@@ -416,10 +493,15 @@ export async function syncNow(state, fetchArg) {
     if (state?.__newerSchema) throw syncError('NEWER_LOCAL', `Estado con esquema ${state.schema} (esta app: ${SCHEMA}).`);
     if (sync.key && !isSyncKey(sync.key)) throw syncError('NO_KEY', 'La clave guardada no tiene el formato correcto (base64url de 32 bytes).');
     if (!sync.deviceId) { sync.deviceId = patch.deviceId = randomId(12, getRandomValues); fresh = true; }
+    // Quién publicaba según la última lectura: vale si backup.json desaparece (no se adueña cualquiera)
+    const remembered = sync.publisher && sync.publisher !== sync.deviceId
+      ? { deviceId: sync.publisher, since: isoOr(sync.publisherSince, null) } : null;
     const base = ctxOf(sync, fetchImpl);
-    const ctx = { ...base, ...(await branchInfo(base, !onlyPull)) };
+    // Una rama que no existe solo la crea quien puede publicar
+    const ctx = { ...base, ...(await branchInfo(base, !onlyPull && (takeover || !remembered))) };
     const baseRev = Number(sync.baseRev) || 0;
     let local = state;
+    let backupSha = null;
     for (let attempt = 1; ; attempt++) {
       const remote = ctx.missing ? null : await readRemote(ctx);
       res.remote = remote ? {
@@ -429,7 +511,7 @@ export async function syncNow(state, fetchArg) {
       let merged = local, remoteState = null;
       // 1) Si hay copia: siempre descifrar (comprueba la clave) y fusionar por día
       if (remote) {
-        const plain = remote.legacy ? remote.plain : await decryptBackup(remote.doc, sync.key);
+        const plain = remote.legacy ? remote.plain : await decryptRemote(remote.doc, sync, patch, res);
         if (Number(plain.schema) > SCHEMA) throw syncError('NEWER_REMOTE', `Esquema ${plain.schema} (esta app: ${SCHEMA}).`);
         remoteState = migrateState(plain);
         const m = mergeStates(local, remoteState, { now, since: lastSyncOf(sync), adoptSettings: daysIn(local) === 0 });
@@ -444,7 +526,8 @@ export async function syncNow(state, fetchArg) {
         res.rev = remote.rev;
       }
       // 2) ¿Quién publica? Solo un dispositivo escribe; los demás solo leen
-      const pub = remote?.publisher ?? null;
+      // Sin copia (borrada): si otro publicaba, sigue publicando él (aquí solo se lee)
+      const pub = remote?.publisher ?? remembered;
       const mine = !pub || pub.deviceId === sync.deviceId;
       res.publisher = pub ? { ...pub } : null;
       res.readOnly = !mine;
@@ -455,7 +538,8 @@ export async function syncNow(state, fetchArg) {
           Object.assign(res, { unpublishedDays: u.days, unpublishedCodes: u.codes, unpublishedSettings: u.settings });
         }
         const pending = res.unpublishedDays.length + res.unpublishedCodes.length + (res.unpublishedSettings ? 1 : 0);
-        Object.assign(patch, { unpublished: pending }, CLEAR_ERRORS);
+        if (remoteState || mine) patch.unpublished = pending; // sin copia no se puede comparar
+        Object.assign(patch, CLEAR_ERRORS);
         res.ok = true;
         return res;
       }
@@ -473,6 +557,14 @@ export async function syncNow(state, fetchArg) {
       if (needBackup && daysIn(merged) === 0 && remoteDays > 0 && !allowEmpty) {
         throw syncError('EMPTY_LOCAL', `Publicar dejaría 0 días encima de ${remoteDays} días (rev ${remote.rev}).`);
       }
+      // Sin copia pero con calendario publicado: una copia vacía no lo vacía
+      if ((!remote || remote.legacy) && daysIn(merged) === 0 && !allowEmpty) {
+        const events = await publishedEvents(ctx);
+        if (events) throw syncError('EMPTY_LOCAL', `Sin ${BACKUP_FILE}: publicar dejaría 0 días encima de ${events} eventos de ${ICS_FILE}.`);
+      }
+      // Identidad creada en esta llamada: primero se guarda (applySyncResult); se publica en la siguiente.
+      // Así nunca queda en GitHub una copia cifrada con una clave que ningún dispositivo guardó.
+      if (fresh) throw syncError('RETRY', 'deviceId o clave creados ahora: se publica en la siguiente sincronización, ya guardados.');
       if (needBackup) {
         const rev = Math.max(remote && !remote.legacy ? remote.rev : 0, baseRev) + 1;
         if (!isSyncKey(sync.key)) throw syncError('NO_KEY', 'No hay clave para cifrar la copia.');
@@ -481,27 +573,23 @@ export async function syncNow(state, fetchArg) {
         });
         const put = await putContents(ctx, BACKUP_FILE, JSON.stringify(doc), `Turnos: copia cifrada (rev ${rev})`, remote && !remote.legacy ? remote.sha : null);
         if (put.conflict) {
-          if (fresh) {
-            // Otra pestaña u otro dispositivo escribió a la vez: la clave o el identificador recién
-            // creados no valen (los suyos ganaron) → no se guardan; se reintentará
-            delete patch.key;
-            delete patch.deviceId;
-            throw syncError('CONFLICT', `${BACKUP_FILE} lo escribió otro a la vez (clave/identificador nuevos descartados).`, 409);
-          }
           // Otro escribió entre medias: volver a leer y fusionar (si ya no publicamos, solo se lee)
           if (attempt >= MAX_ATTEMPTS) throw syncError('CONFLICT', `${BACKUP_FILE} cambió ${attempt} veces mientras se guardaba.`, 409);
           local = merged;
           continue;
         }
         await afterFirstWrite(ctx, put.commit);
+        backupSha = put.sha;
         Object.assign(patch, { baseRev: rev, lastPushHash: localHash, lastPushAt: now.toISOString() });
         res.pushed = true;
         res.rev = rev;
         res.tookOver = Boolean(pub) && pub.deviceId !== sync.deviceId;
       } else {
+        backupSha = remote.sha;
         Object.assign(patch, { baseRev: remote.rev, lastPushHash: localHash });
         res.rev = remote.rev;
       }
+      if (sync.prevKey) patch.prevKey = ''; // se publicó (o se leyó) con la clave actual
       res.publisher = { deviceId: sync.deviceId, since };
       res.readOnly = false;
       Object.assign(patch, { publisher: sync.deviceId, publisherSince: since, unpublished: 0 });
@@ -509,7 +597,7 @@ export async function syncNow(state, fetchArg) {
       // Así el que publica repara un calendario que otro dejó atrasado.
       const ics = buildICS(merged, { now, places: merged?.settings?.sync?.publishPlaces === true, notes: false });
       const stamp = now.toISOString().slice(0, 16).replace('T', ' ');
-      const r = await putIcs(ctx, ics, `Turnos: calendario (${stamp})`);
+      const r = await putIcs(ctx, ics, `Turnos: calendario (${stamp})`, backupSha);
       res.icsPushed = r.changed;
       patch.lastIcsHash = hashString(ics);
       Object.assign(patch, CLEAR_ERRORS);
@@ -518,12 +606,17 @@ export async function syncNow(state, fetchArg) {
     }
   } catch (e) {
     const err = e instanceof SyncError ? e : syncError('UNKNOWN', String(e?.message || e));
-    res.error = { code: err.code, message: err.message, detail: err.detail || '', status: err.status ?? 0, retry: err.retry };
-    Object.assign(patch, {
-      lastError: err.message, lastErrorCode: err.code, lastErrorDetail: err.detail || null,
-      // Desde cuándo falla (se mantiene mientras dure el error; se borra al ir bien)
-      lastErrorSince: (sync.lastError && isoOr(sync.lastErrorSince, null)) || now.toISOString(),
-    });
+    res.error = errorInfo(err);
+    // Conflicto: otro escribió entre medias; quién publica lo dirá la próxima lectura (no se presupone)
+    if (err.code === 'CONFLICT') for (const k of ['publisher', 'publisherSince', 'unpublished']) delete patch[k];
+    // RETRY no es un fallo (solo hay que guardar la identidad y repetir): no se anota como error
+    if (err.code !== 'RETRY') {
+      Object.assign(patch, {
+        lastError: err.message, lastErrorCode: err.code, lastErrorDetail: err.detail || null,
+        // Desde cuándo falla (se mantiene mientras dure el error; se borra al ir bien)
+        lastErrorSince: (sync.lastError && isoOr(sync.lastErrorSince, null)) || now.toISOString(),
+      });
+    }
     return res;
   }
 }
@@ -547,9 +640,17 @@ export function isReadOnlyDevice(sync) {
   return Boolean(sync?.enabled && sync.publisher && sync.publisher !== sync.deviceId);
 }
 
+// Campos que un resultado viejo no debe tocar (lo que dice quién publica y hasta dónde se llegó)
+const STALE_FIELDS = ['baseRev', 'publisher', 'publisherSince', 'unpublished', 'lastPullAt', 'lastPushAt',
+  'lastPushHash', 'lastIcsHash', 'lastError', 'lastErrorCode', 'lastErrorDetail', 'lastErrorSince', 'prevKey'];
+
 // Aplica el resultado de syncNow/pullOnly/becomePublisher sobre el estado ACTUAL del store (puede
 // haber cambiado mientras se sincronizaba): fusiona los datos traídos y guarda el parche de settings.sync.
-// Si la configuración cambió entre medias (otro repo), no aplica nada.
+// - Si la configuración cambió entre medias (otro repo), no aplica nada.
+// - Resultado viejo (empezó antes que el último aplicado, sync.lastSyncStartedAt): solo fusiona los
+//   datos; no toca quién publica, baseRev, unpublished ni errores (no deshace un «Usar este dispositivo»).
+// - Un deviceId o clave del resultado solo rellenan los que falten (la clave anterior recuperada con
+//   prevKey sí sustituye, si la sincronización empezó con la clave que sigue guardada).
 export function applySyncResult(current, res, { now } = {}) {
   if (!res || !current) return current;
   const s = current.settings?.sync || {};
@@ -559,18 +660,94 @@ export function applySyncResult(current, res, { now } = {}) {
   if (res.merged && res.state && res.state !== current) {
     next = mergeStates(current, res.state, { now, adoptSettings: daysIn(current) === 0 }).state;
   }
-  // Un identificador o clave nuevos no sustituyen a los guardados (p. ej. por otra pestaña) salvo que
-  // con ellos se haya publicado
   const p = { ...(res.sync || {}) };
-  if (!res.pushed) {
-    if (p.deviceId && s.deviceId && p.deviceId !== s.deviceId) delete p.deviceId;
-    if (p.key && s.key && p.key !== s.key) delete p.key;
-  }
-  // Error de una sincronización que empezó con otra clave (otra pestaña ya guardó una): no vale
-  if (res.error && t?.keyTag !== undefined && t.keyTag !== keyTag(s.key)) {
-    for (const k of ['lastError', 'lastErrorCode', 'lastErrorDetail', 'lastErrorSince']) delete p[k];
-  }
+  const sameKey = t?.keyTag === undefined || t.keyTag === keyTag(s.key);
+  const started = Date.parse(res.startedAt), last = Date.parse(s.lastSyncStartedAt);
+  // (una marca en el futuro, de un reloj que se adelantó, no cuenta: si no, todo parecería viejo)
+  const nowTs = (now instanceof Date ? now : new Date()).getTime();
+  const stale = Number.isFinite(started) && Number.isFinite(last) && started < last && last <= nowTs + 60000;
+  if (p.deviceId && s.deviceId) delete p.deviceId;
+  if (p.key && s.key && (stale || !sameKey || !res.keyRestored)) delete p.key;
+  // Sincronización que empezó con otra clave (otra pestaña u otro enlace ya guardó una): sus errores
+  // y su prevKey no valen
+  if (!sameKey) for (const k of ['lastError', 'lastErrorCode', 'lastErrorDetail', 'lastErrorSince', 'prevKey']) delete p[k];
+  if (stale) for (const k of STALE_FIELDS) delete p[k];
+  else if (Number.isFinite(started)) p.lastSyncStartedAt = res.startedAt;
   return updateSettings(next, { sync: p }, { now });
+}
+
+// Comprueba una configuración nueva (enlace #setup= o formulario) ANTES de guardarla: con una COPIA del
+// estado lee y descifra el remoto (pullOnly: no escribe nada). Si la clave no descifra la copia, falta
+// la clave, el token no vale… → { ok:false } y la configuración actual sigue intacta.
+// Un fallo pasajero (sin red) solo se acepta en un dispositivo que aún no tenía una configuración que
+// funcionara (se reintentará solo). options: { fetchImpl, now, getRandomValues }
+// → { ok:true, res, readOnly, publisher, error (pasajero o null), apply(state) → state }
+//   | { ok:false, error, res }
+// apply: store.set((s) => t.apply(s)) guarda configuración + identidad (la probada) + lo leído.
+export async function trySetupConfig(state, cfg, options) {
+  const o = opts(options);
+  const now = o.now instanceof Date ? o.now : new Date();
+  const c = normalizeSyncConfig(cfg);
+  if (!c) return { ok: false, error: errorInfo(syncError('CONFIG', 'Enlace o configuración no válidos.')), res: null };
+  const cur = state?.settings?.sync || {};
+  const deviceId = cur.deviceId || randomId(12, o.getRandomValues);
+  const key = c.key || (isSyncKey(cur.key) ? cur.key : '');
+  // Copia de prueba con la clave que se va a usar (sin la red de seguridad prevKey: se prueba ESTA);
+  // sin clave se prueba sin ninguna (NO_KEY si ya hay copia cifrada)
+  let trial = applySyncConfig(state, c, { now, getRandomValues: o.getRandomValues, deviceId, key: key || false });
+  trial = updateSettings(trial, { sync: { prevKey: '', ...(key ? {} : { key: '' }) } });
+  const res = await pullOnly(trial, { ...o, now });
+  const working = Boolean(cur.enabled && (cur.lastPullAt || cur.lastPushAt));
+  if (res.error && (!res.error.retry || working)) return { ok: false, error: res.error, res };
+  // Sin clave y sin copia remota: se crea ahora (antes de guardar nada y de publicar)
+  const finalKey = key || (res.ok ? generateSyncKey(o.getRandomValues) : false);
+  return {
+    ok: true, res, readOnly: res.readOnly, publisher: res.publisher, error: res.error,
+    apply: (s) => applySyncResult(applySyncConfig(s, c, { now, getRandomValues: o.getRandomValues, deviceId, key: finalKey }), res, { now }),
+  };
+}
+
+// Cola única para TODAS las llamadas de sincronización de la UI: una cada vez, y cada resultado se
+// aplica al store en cuanto llega (applySyncResult). Un RETRY (identidad recién creada) se repite solo.
+// store: { get, set } (createStore). options: { fetchImpl, clock: () => Date }
+// → { sync(opts), pull(opts), becomePublisher(opts), setup(cfg, opts), idle() }  (promesas del resultado)
+export function createSyncQueue(store, { fetchImpl, clock = () => new Date() } = {}) {
+  let tail = Promise.resolve();
+  let last = null;    // último trabajo encolado
+  let waiting = null; // syncNow normal aún sin empezar: si es el último encolado, se reutiliza
+  const enqueue = (job) => {
+    const p = tail.then(job, job);
+    tail = p.catch(() => {});
+    last = p;
+    return p;
+  };
+  const call = (fn, extra = {}) => async () => {
+    let res;
+    for (let i = 0; i < 3; i++) {
+      const now = clock();
+      res = await fn(store.get(), { ...extra, fetchImpl: extra.fetchImpl ?? fetchImpl, now });
+      store.set((cur) => applySyncResult(cur, res, { now }));
+      if (res.error?.code !== 'RETRY') break;
+    }
+    return res;
+  };
+  return {
+    sync(extra) {
+      if (!extra && waiting && waiting === last) return waiting;
+      const job = call(syncNow, extra);
+      const p = enqueue(() => { if (waiting === p) waiting = null; return job(); });
+      if (!extra) waiting = p;
+      return p;
+    },
+    pull: (extra) => enqueue(call(pullOnly, extra)),
+    becomePublisher: (extra) => enqueue(call(becomePublisher, extra)),
+    setup: (cfg, extra = {}) => enqueue(async () => {
+      const t = await trySetupConfig(store.get(), cfg, { ...extra, fetchImpl: extra.fetchImpl ?? fetchImpl, now: clock() });
+      if (t.ok) store.set((s) => t.apply(s));
+      return t;
+    }),
+    idle: () => tail,
+  };
 }
 
 // Descarga y descifra la copia del remoto (para restaurar reemplazando con importBackup)
@@ -593,9 +770,10 @@ export async function pullBackup(sync, fetchArg) {
 }
 
 // Compatibilidad (obsoleto): como syncNow pero lanza SyncError; devuelve también state y sync completos.
-// Sin clave no hace nada: quien usa esta API antigua no guarda res.sync.key (la copia quedaría ilegible).
+// Sin clave o sin deviceId no hace nada: quien usa esta API antigua no los guarda.
 export async function pushData(state, fetchArg) {
   if (!isSyncKey(state?.settings?.sync?.key)) throw syncError('NO_KEY', 'pushData (obsoleto) sin clave: usa syncNow + applySyncResult.');
+  if (!state.settings.sync.deviceId) throw syncError('CONFIG', 'pushData (obsoleto) sin deviceId: usa ensureSyncIdentity + syncNow + applySyncResult.');
   const res = await syncNow(state, { ...opts(fetchArg), takeover: false, pullOnly: false });
   if (res.error) throw new SyncError(res.error.message, res.error.status, res.error);
   return { ...res, pushed: res.pushed || res.icsPushed, changed: res.pushed || res.icsPushed, hash: res.sync.lastPushHash ?? null, sync: { ...state.settings.sync, ...res.sync } };

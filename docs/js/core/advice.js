@@ -251,7 +251,7 @@ function remindersRule(state, out) {
   });
 }
 
-const TRANSIENT = ['NETWORK', 'SERVER', 'RATE_LIMIT', 'CONFLICT'];
+const TRANSIENT = ['NETWORK', 'SERVER', 'RATE_LIMIT', 'CONFLICT', 'RETRY'];
 const DAY_MS = 24 * 3600 * 1000;
 
 // El calendario no se actualiza (token caducado, clave distinta…): avisar en Hoy

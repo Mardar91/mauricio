@@ -221,11 +221,12 @@ Pruebas de borde (`node test/lab/ensemble/edge.mjs`, 58/58 correctas):
   («Lectura cancelada.»); después, con las rutas buenas, 11/11. Antes, idioma 404 o descarga colgada dejaban
   `recognize()` y `dispose()` colgados para siempre.
 
-Tests de la app: `npm test` verde (209, con `test/unit/recognize-merge.test.mjs`); `npm run e2e` 20/20 (incluye «el reconocedor actual procesa una foto sin
-errores» y «precache completo») sobre una copia del árbol con `docs/js/core` de HEAD. En el árbol compartido
-fallan tests por el trabajo en curso de otro agente en `docs/js/core` (sincronización, copia de seguridad) y por
-`docs/js/core/CHANGES-FOR-UI.md`, que no debería estar dentro de `docs/js/` (el test exige precachear todo lo
-que hay ahí); `js/core/cipher.js` ya está en PRECACHE.
+Tests de la app: `npm test` verde (209, con `test/unit/recognize-merge.test.mjs`). `npm run e2e` en el árbol
+compartido: «el reconocedor actual procesa una foto sin errores» pasa; fallan 5 pruebas ajenas al reconocedor
+(copia de seguridad y enlaces #setup, en obras de otro agente, y «precache completo» por
+`docs/js/core/CHANGES-FOR-UI.md`, que no debería estar dentro de `docs/js/`). Lectura sin conexión con el
+service worker de la app (Chromium, script ad hoc): 1ª lectura en línea 11/11, recarga sin conexión y 2ª
+lectura 11/11 (worker, núcleo e idioma servidos desde la caché `vendor`).
 
 ## Limpieza de `docs/vendor/tesseract/`
 

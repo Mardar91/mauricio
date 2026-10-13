@@ -22,6 +22,7 @@ test('createDefaultState: forma del estado (§3)', () => {
     enabled: false, owner: 'Mardar91', repo: 'mauricio-datos', branch: '', token: '', key: '', deviceId: '', baseRev: 0,
     lastPushAt: null, lastPushHash: null, lastIcsHash: null, lastPullAt: null, lastError: null, lastErrorCode: null,
     lastErrorDetail: null, lastErrorSince: null, publishPlaces: false, publisher: null, publisherSince: null, unpublished: 0,
+    prevKey: '', lastSyncStartedAt: null,
   });
   assert.equal(s.settings.calendarUpdatedAt, null);
   assert.equal(s.settings.remindersUpdatedAt, null);

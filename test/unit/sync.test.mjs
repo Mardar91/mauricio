@@ -106,8 +106,11 @@ test('syncNow: primera publicación en un repo vacío → backup.json cifrado (r
   assert.equal(doc.v, 3);
   assert.deepEqual(doc.meta, { rev: 1, savedAt: T0.toISOString(), deviceId: 'movil1', days: 7, publisher: 'movil1', publisherSince: T0.toISOString() });
   assert.equal(doc.enc.alg, 'AES-GCM');
-  const raw = gh.text('backup.json');
-  for (const secret of ['Insulina', 'Ducuara', 'F52', TOKEN, KEY, 'changes', 'Mañana']) assert.ok(!raw.includes(secret), `en claro: ${secret}`);
+  // Nada en claro fuera de enc.iv/enc.data (base64url aleatorio: podrían contener «F52» por casualidad)
+  const clear = JSON.stringify({ ...doc, enc: { ...doc.enc, iv: '', data: '' } });
+  assert.match(doc.enc.iv, /^[A-Za-z0-9_-]{16}$/);
+  assert.match(doc.enc.data, /^[A-Za-z0-9_-]+$/);
+  for (const secret of ['Insulina', 'Ducuara', 'F52', TOKEN, KEY, 'changes', 'Mañana']) assert.ok(!clear.includes(secret), `en claro: ${secret}`);
   const data = await remoteData(gh);
   assert.deepEqual(data.days['2026-10-12'].codes, ['F1', 'F52']);
   assert.equal(data.days['2026-10-12'].note, 'Frau Müller: Insulina');
@@ -159,12 +162,22 @@ test('syncNow: sin cambios no publica; cambio real → rev 2; ICS estable de un 
   assert.equal(forced.icsPushed, false);
 });
 
-test('syncNow: sin clave y sin copia remota → genera la clave', async () => {
+test('syncNow: sin clave y sin copia remota → genera la clave, pero publica en la llamada siguiente (ya guardada)', async () => {
   const gh = fakeGitHub();
-  const res = await run(device(REAL_WEEK, { key: '', deviceId: '' }), gh);
-  assert.equal(res.ok, true);
+  const s = device(REAL_WEEK, { key: '', deviceId: '' });
+  const res = await run(s, gh);
+  assert.equal(res.ok, false);
+  assert.equal(res.error.code, 'RETRY');
+  assert.equal(res.error.retry, true);
   assert.ok(isSyncKey(res.sync.key));
   assert.match(res.sync.deviceId, /^[a-z0-9]{12}$/);
+  assert.equal(res.sync.lastError, undefined); // no es un fallo
+  assert.equal(puts(gh).length, 0); // nada escrito con una clave que aún no está guardada
+  const saved = applySyncResult(s, res, { now: T0 });
+  assert.equal(saved.settings.sync.key, res.sync.key);
+  const again = await run(saved, gh, { now: at(1) });
+  assert.equal(again.ok, true, JSON.stringify(again.error));
+  assert.equal(again.pushed, true);
   const data = await remoteData(gh, res.sync.key);
   assert.equal(Object.keys(data.days).length, 7);
 });

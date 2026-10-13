@@ -1,5 +1,5 @@
 // Un solo dispositivo publica en GitHub (backup.json y turnos.ics); los demás solo leen y fusionan.
-import { stateWith, fakeGitHub, memoryStorage, REAL_WEEK, T0, KEY, SYNC } from './helpers.mjs';
+import { stateWith, fakeGitHub, memoryStorage, REAL_WEEK, T0, KEY, OTHER_KEY, SYNC } from './helpers.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -182,7 +182,7 @@ test('solo lectura: también cuentan como no publicados los horarios de códigos
   assert.ok(!gh.text('turnos.ics').includes('TRIGGER:-PT15M'));
 });
 
-test('Safari congelado a mitad de publicar: si la app pasa a publicar, su calendario viejo se repara solo', async () => {
+test('Safari congelado a mitad de publicar: si la app pasa a publicar, Safari ya no pisa su calendario', async () => {
   const gh = fakeGitHub();
   let S = device('safari', { '2026-10-20': ['F1'] });
   ({ state: S } = await sync(S, gh, T0));
@@ -203,15 +203,17 @@ test('Safari congelado a mitad de publicar: si la app pasa a publicar, su calend
   I = setDay(I, '2026-10-20', ['S1'], { now: at(30) });
   ({ state: I } = await sync(I, gh, at(30)));
   assert.ok(gh.text('turnos.ics').includes('UID:2026-10-20-S1@'));
-  // Safari se reanuda y escribe su calendario viejo (F1 el 20)
+  // Safari se reanuda: backup.json ya no es el que escribió → no escribe su calendario viejo (F1 el 20)
   release();
-  await pending;
-  assert.ok(gh.text('turnos.ics').includes('UID:2026-10-20-F1@'));
-  // La próxima sincronización de la app (sin cambios) compara el calendario publicado y lo repara
+  const late = await pending;
+  assert.equal(late.error?.code, 'CONFLICT');
+  assert.equal(late.error.retry, true);
+  assert.ok(!gh.text('turnos.ics').includes('UID:2026-10-20-F1@'));
+  // La próxima sincronización de la app (sin cambios) no tiene nada que reparar
   const r = await run(I, gh, at(2 * DAY));
   assert.equal(r.ok, true);
   assert.equal(r.pushed, false);
-  assert.equal(r.icsPushed, true);
+  assert.equal(r.icsPushed, false);
   const ics = gh.text('turnos.ics');
   assert.ok(ics.includes('UID:2026-10-20-S1@') && !ics.includes('UID:2026-10-20-F1@'));
   assert.ok(ics.includes('UID:2026-10-21-N1@')); // lo de Safari llegó con la fusión
@@ -293,58 +295,58 @@ test('quién publica va autenticado: cambiarlo a mano en backup.json → no se p
   assert.equal((await run(device('app'), gh, at(DAY))).error?.code, 'BAD_REMOTE');
 });
 
-test('dos pestañas en la primera sincronización (sin clave ni identificador): una gana y el teléfono sigue siendo el que publica', async () => {
-  for (const order of ['ganador-primero', 'perdedor-primero']) {
+test('dos pestañas en la primera sincronización (sin clave ni identificador): ninguna escribe; la identidad que se guarda primero publica', async () => {
+  for (const order of ['1-primero', '2-primero']) {
     const gh = fakeGitHub();
     const st = memoryStorage();
     const tab1 = createStore(st, { target: null });
     tab1.set((s) => setDay(updateSettings(s, { sync: { ...SYNC, key: '', deviceId: '' } }), '2026-10-12', ['F1'], { now: T0 }));
     const tab2 = createStore(st, { target: null });
-    // La primera escritura de backup.json espera un poco: las dos pestañas leen antes de escribir
-    let delayed = false;
-    const slow = async (url, init) => {
-      if (init?.method === 'PUT' && url.endsWith('backup.json') && !delayed) {
-        delayed = true;
-        await new Promise((r) => setTimeout(r, 10));
-      }
-      return gh.fetch(url, init);
-    };
     const [r1, r2] = await Promise.all([
-      syncNow(tab1.get(), { fetchImpl: slow, now: at(1000) }),
-      syncNow(tab2.get(), { fetchImpl: slow, now: at(1000) }),
+      syncNow(tab1.get(), { fetchImpl: gh.fetch, now: at(1000) }),
+      syncNow(tab2.get(), { fetchImpl: gh.fetch, now: at(1000) }),
     ]);
-    const winner = r1.ok ? r1 : r2, loser = r1.ok ? r2 : r1;
-    assert.equal(winner.ok, true, JSON.stringify(winner.error));
-    assert.equal(loser.error?.code, 'CONFLICT');
-    assert.equal(loser.error.retry, true);
-    assert.equal(loser.sync.key, undefined); // su clave no vale: no se guarda
-    assert.equal(loser.sync.deviceId, undefined);
-    const apply = (r) => tab1.set((cur) => applySyncResult(cur, r, { now: at(1000) }));
-    if (order === 'ganador-primero') { apply(winner); apply(loser); } else { apply(loser); apply(winner); }
+    for (const r of [r1, r2]) {
+      assert.equal(r.error?.code, 'RETRY');
+      assert.equal(r.error.retry, true);
+      assert.ok(r.sync.key && r.sync.deviceId);
+    }
+    assert.notEqual(r1.sync.key, r2.sync.key);
+    assert.deepEqual(gh.puts(), []); // nada cifrado con una clave sin guardar
+    const [first, second] = order === '1-primero' ? [[tab1, r1], [tab2, r2]] : [[tab2, r2], [tab1, r1]];
+    first[0].set((cur) => applySyncResult(cur, first[1], { now: at(1000) }));
+    second[0].set((cur) => applySyncResult(cur, second[1], { now: at(1000) })); // relee: ya hay identidad
     const saved = createStore(st, { target: null }).get();
-    assert.equal(saved.settings.sync.key, winner.sync.key);
-    assert.equal(saved.settings.sync.deviceId, doc(gh).meta.publisher);
-    assert.equal(saved.settings.sync.lastError, null, order); // el error de la otra pestaña caducó
-    await decryptBackup(doc(gh), saved.settings.sync.key); // el teléfono puede leer su copia
+    assert.equal(saved.settings.sync.key, first[1].sync.key, order);
+    assert.equal(saved.settings.sync.deviceId, first[1].sync.deviceId);
+    assert.equal(saved.settings.sync.lastError, null);
+    // Las dos pestañas parten ya de la identidad guardada: la siguiente publica con ella
     const next = await run(saved, gh, at(DAY));
     assert.equal(next.ok, true, JSON.stringify(next.error));
-    assert.equal(next.readOnly, false);
+    assert.equal(next.pushed, true);
+    assert.equal(doc(gh).meta.publisher, saved.settings.sync.deviceId);
+    await decryptBackup(doc(gh), saved.settings.sync.key);
   }
 });
 
-test('applySyncResult: un identificador nuevo de un resultado que solo leyó no sustituye al guardado', async () => {
+test('applySyncResult: el deviceId o la clave de un resultado solo rellenan los que faltan', async () => {
   const gh = fakeGitHub();
+  await sync(device('app', { '2026-10-12': ['F1'] }), gh, T0); // otro publica
   const fresh = device('', { '2026-10-12': ['F1'] });
-  const r1 = await run(fresh, gh, T0); // publica con un id nuevo
-  assert.equal(r1.pushed, true);
-  const r2 = await run(fresh, gh, at(1)); // otra pestaña con el estado viejo: id nuevo, solo lee
-  assert.equal(r2.readOnly, true);
+  const r1 = await run(fresh, gh, at(1)); // solo lee: puede crear el id en la misma llamada
+  assert.equal(r1.ok, true, JSON.stringify(r1.error));
+  assert.equal(r1.readOnly, true);
+  const r2 = await run(fresh, gh, at(2)); // otra pestaña con el estado viejo: otro id
   assert.notEqual(r2.sync.deviceId, r1.sync.deviceId);
   for (const [a, b] of [[r1, r2], [r2, r1]]) {
-    const s = applySyncResult(applySyncResult(fresh, a, { now: at(2) }), b, { now: at(2) });
-    assert.equal(s.settings.sync.deviceId, r1.sync.deviceId);
-    assert.equal(isReadOnlyDevice(s.settings.sync), false);
+    const s = applySyncResult(applySyncResult(fresh, a, { now: at(3) }), b, { now: at(3) });
+    assert.equal(s.settings.sync.deviceId, a.sync.deviceId); // el que se guardó primero
+    assert.equal(s.settings.sync.publisher, 'app');
+    assert.equal(isReadOnlyDevice(s.settings.sync), true);
   }
+  // Una clave de otro resultado tampoco sustituye a la guardada
+  const withKey = applySyncResult(device('x'), { ...r1, target: { ...r1.target }, sync: { key: OTHER_KEY } }, { now: at(4) });
+  assert.equal(withKey.settings.sync.key, KEY);
 });
 
 test('encryptBackup: publisher por defecto = deviceId; los metadatos llevan quién publica y desde cuándo', async () => {
