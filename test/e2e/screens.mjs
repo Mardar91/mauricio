@@ -656,18 +656,27 @@ scenario('v142', async (_ctx, theme) => {
   await page.waitForFunction(() => JSON.parse(localStorage.getItem('turnos-mauricio:v1')).settings.sync.lastPullAt, null, { timeout: 10000 });
   const anaHash = core.buildSetupLink(APP, { owner: OWNER, repo: REPO, branch: '', token: TOKEN, key: OTHER_KEY, dir: 'ana', name: 'Ana' }).slice(APP.length);
   await page.evaluate((hsh) => { location.hash = hsh; }, anaHash);
-  await page.waitForSelector('.dialog-wrap.open');
-  await page.click('.dialog-wrap.open .btn-primary');
+  // Ya usa otro calendario: directamente la pregunta (sin «Conectar…»)
   await page.waitForSelector('.dialog-wrap.open .dialog-title:text("¿Cambiar al calendario de Ana?")', { timeout: 15000 });
   await snap(page, '30-cambiar-calendario', { theme });
   await page.click('.dialog-wrap.open .btn-primary');
-  await page.waitForSelector('.dialog-wrap.open .dialog-title:text("¿Usar este teléfono para actualizar el calendario?")', { timeout: 15000 });
-  await page.click('.dialog-wrap.open .btn-secondary');
+  // Es de Ana y este teléfono es de Mauricio: solo lee (no se ofrece tomar el relevo)
   await page.waitForSelector('[data-testid="subscribe-step"]', { timeout: 15000 });
   await page.waitForSelector('.sheet-subscribe [data-testid="webcal"][aria-disabled="false"]', { timeout: 15000 });
   await snap(page, '30-cambiado-ultimo-paso', { theme });
   for (const e of page.__errors) problems.push(`[v142/${theme}] ${e}`);
   await ctx.close();
+  // 1.4.3: teléfono sin nombre y con turnos que abre el enlace de Mauricio: «¿Estos turnos son de Mauricio?»
+  const ctxB = await iphoneContext(browser, { theme, scale, device: 'android', width: 360, height: 740 });
+  let anaSt = core.updateSettings(core.createDefaultState(), { onboardingDone: true });
+  anaSt = core.setDay(anaSt, '2026-10-15', ['N1'], { now: new Date('2026-10-12T10:00:00Z') });
+  const pB = await open(ctxB, { state: anaSt, gh: await familyGitHub(), standalone: false });
+  const mauHash = core.buildSetupLink(APP, { owner: OWNER, repo: REPO, branch: '', token: TOKEN, key: KEY, name: 'Mauricio' }).slice(APP.length);
+  await pB.evaluate((hsh) => { location.hash = hsh; }, mauHash);
+  await pB.waitForSelector('.dialog-wrap.open .dialog-title:text("¿Estos turnos son de Mauricio?")', { timeout: 15000 });
+  await snap(pB, '31-de-quien-son-los-turnos', { theme });
+  for (const e of pB.__errors) problems.push(`[v143/${theme}] ${e}`);
+  await ctxB.close();
   // Ordenador de quien ayuda: guardar sin internet
   const ctx2 = await iphoneContext(browser, { theme, scale: 1, device: 'desktop', width: 1280, height: 800 });
   const gh2 = fakeGitHub({ empty: true });

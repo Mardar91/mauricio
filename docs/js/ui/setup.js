@@ -95,8 +95,9 @@ export async function runSetup(ctx, cfg, { confirm = true, helper = false } = {}
   const prev = ctx.store.get().settings.sync;
   const prevUrl = prev.enabled && isConfigured(prev) ? webcalUrl(prev) : null;
   const prevWorked = Boolean(prevUrl && (prev.lastPushAt || prev.lastPullAt));
-  // De quién es este dispositivo (su nombre antes de conectar)
+  // De quién es este dispositivo (su nombre antes de conectar) y sus turnos que no son de ningún calendario
   let prevName = publicName(ctx.store.get().settings.name || '');
+  const ownDays = dataTargetOf(prev) ? 0 : Object.keys(ctx.store.get().days || {}).length;
 
   let t = await checkSetup(ctx, cfg);
   let switched = null;
@@ -144,7 +145,7 @@ export async function runSetup(ctx, cfg, { confirm = true, helper = false } = {}
   // dispositivo solo lee: el calendario de otra persona nunca pasa a publicarse desde aquí sin más).
   // Sin cambiar, se pregunta nombrando el calendario, y no se recomienda si es de otra persona.
   const offerTakeover = switched ? samePerson : true;
-  const takeoverAsk = () => askUseThisDevice({ who: calWho, recommended: !otherPerson });
+  const takeoverAsk = () => askUseThisDevice({ who: calWho, recommended: !otherPerson, days: switched ? 0 : ownDays });
   const takeover = async () => {
     const ok = await becomePublisherNow(ctx);
     if (ok && switched) switched.tookOver = true;
@@ -173,7 +174,7 @@ export async function runSetup(ctx, cfg, { confirm = true, helper = false } = {}
     waiting = true;
   } else if (offerTakeover) {
     // Sin internet: todavía no se sabe si otro dispositivo publica. Se preguntará al conectar.
-    rememberAskTakeover(ctx.store.get().settings.sync, { who: calWho, recommended: !otherPerson });
+    rememberAskTakeover(ctx.store.get().settings.sync, { who: calWho, recommended: !otherPerson, days: switched ? 0 : ownDays });
   }
   if (helper) {
     ctx.go('ajustes', { section: 'github' });
@@ -352,24 +353,26 @@ export function restoreCopy(ctx, key) {
 }
 
 // «¿Usar este iPhone para actualizar el calendario de Ana?». who: de quién es el calendario ('' = no se
-// sabe); recommended: false si este dispositivo es de otra persona («No, solo leer» va primero)
-function askUseThisDevice({ who = '', recommended = true } = {}) {
+// sabe); recommended: false si este dispositivo es de otra persona («No, solo leer» va primero); days:
+// turnos de aquí que aún no son de ningún calendario (pasarán a este)
+function askUseThisDevice({ who = '', recommended = true, days = 0 } = {}) {
   const dev = deviceWord();
+  const mine = days > 0 ? ` Los ${plural(days, 'día', 'días')} con turnos de este ${dev} pasarán a ese calendario.` : '';
   return confirmDialog({
     icon: '📲',
     title: who ? `¿Usar este ${dev} para actualizar el calendario de ${who}?` : `¿Usar este ${dev} para actualizar el calendario?`,
     text: who
-      ? `Ahora lo actualiza otro dispositivo (el de ${who} o el de quien te ayuda), que dejará de hacerlo. Primero se juntan los turnos de los dos. Hazlo solo si este es el ${dev} de ${who}.`
-      : `Ahora lo actualiza otro dispositivo (por ejemplo, el de quien te ayuda), que dejará de hacerlo. Primero se juntan los turnos de los dos. Recomendado si este es tu ${dev}.`,
+      ? `Ahora lo actualiza otro dispositivo (el de ${who} o el de quien te ayuda), que dejará de hacerlo. Primero se juntan los turnos de los dos.${mine} Hazlo solo si este es el ${dev} de ${who}.`
+      : `Ahora lo actualiza otro dispositivo (por ejemplo, el de quien te ayuda), que dejará de hacerlo. Primero se juntan los turnos de los dos.${mine} Recomendado si este es tu ${dev}.`,
     ok: 'Sí, usar este', cancel: 'No, solo leer',
     prefer: recommended ? 'ok' : 'cancel',
   });
 }
 
-function rememberAskTakeover(sync, { who = '', recommended = true } = {}) {
+function rememberAskTakeover(sync, { who = '', recommended = true, days = 0 } = {}) {
   try {
     safeStorage()?.setItem(ASK_TAKEOVER_KEY, JSON.stringify({
-      target: `${sync.owner}/${sync.repo}/${sync.branch || ''}`, dir: String(sync.dir || ''), who, recommended, at: new Date().toISOString(),
+      target: `${sync.owner}/${sync.repo}/${sync.branch || ''}`, dir: String(sync.dir || ''), who, recommended, days, at: new Date().toISOString(),
     }));
   } catch { /* nada */ }
 }
@@ -390,7 +393,8 @@ export async function maybeAskTakeover(ctx, res) {
   const who = publicName(res.remote?.name || '') || publicName(pending.who || '');
   const mine = publicName(ctx.store.get().settings.name || '');
   const other = Boolean(who && mine && firstNameKey(who) !== firstNameKey(mine));
-  if (await askUseThisDevice({ who, recommended: pending.recommended !== false && !other })) await becomePublisherNow(ctx);
+  const days = Number(pending.days) > 0 ? Number(pending.days) : 0;
+  if (await askUseThisDevice({ who, recommended: pending.recommended !== false && !other, days })) await becomePublisherNow(ctx);
 }
 
 // «Usar este dispositivo» (tras confirmarlo): lee + fusiona + publica desde aquí

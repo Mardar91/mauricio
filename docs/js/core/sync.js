@@ -596,7 +596,8 @@ function newResult(state, now, patch = {}) {
 //   tookOver, keyRestored, state (fusionado, o el mismo objeto si no cambió), merged, pulled, pushed,
 //   icsPushed, conflictCount, pulledDays, unpublishedDays / unpublishedCodes / unpublishedSettings
 //   (solo lectura: lo de aquí que no está publicado),
-//   rev, remote: {rev,days,savedAt,deviceId,publisher,legacy}|null, startedAt (ISO = now),
+//   rev, remote: {rev,days,savedAt,deviceId,publisher,legacy,name}|null, startedAt (ISO = now),
+//   missingBranch (la rama indicada no existe y no se creó),
 //   sync: parche para settings.sync (aplicar con applySyncResult), error: {code,message,detail,status,retry}|null,
 //   target: {owner,repo,branch,keyTag} }
 export async function syncNow(state, fetchArg) {
@@ -836,6 +837,8 @@ export function applySyncResult(current, res, { now } = {}) {
 // { ok:false, error OTHER_PERSON | OTHER_TARGET, otherPerson } y no cambia nada. Con switchPerson: true
 // (tras confirmarlo) el dispositivo pasa a ese calendario desde un estado limpio (personSwitchState):
 // nada de lo de aquí se fusiona ni se publica allí, y hace falta poder leerlo (→ switched: true).
+// Turnos sin nombre y sin destino ante un calendario con nombre: OTHER_PERSON con otherPerson.unnamed
+// (la UI pregunta de quién son). Otro calendario en una rama que no existe: CONFIG (NEW_BRANCH_MESSAGE).
 export async function trySetupConfig(state, cfg, options) {
   const o = opts(options);
   const now = o.now instanceof Date ? o.now : new Date();
