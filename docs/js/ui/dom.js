@@ -59,6 +59,15 @@ export function clear(el) {
 
 export const cap = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
 
+// '1 día' / '3 días'
+export const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+
+// 'a, b y c'
+export function listText(items) {
+  const a = items.filter(Boolean);
+  return a.length <= 1 ? (a[0] || '') : `${a.slice(0, -1).join(', ')} y ${a[a.length - 1]}`;
+}
+
 // Número con coma decimal ('38,5')
 export function fmtNum(n, max = 2) {
   return new Intl.NumberFormat('es-ES', { maximumFractionDigits: max }).format(n);
@@ -135,6 +144,11 @@ export async function copyText(text) {
     ta.remove();
     return ok;
   }
+}
+
+// localStorage sin lanzar (Safari privado o almacenamiento bloqueado)
+export function safeStorage() {
+  try { const s = globalThis.localStorage; s.getItem('x'); return s; } catch { return null; }
 }
 
 export function isIOS() {

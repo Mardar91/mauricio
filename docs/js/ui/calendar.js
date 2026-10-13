@@ -6,6 +6,7 @@ import {
 import { badgeRow } from './badge.js';
 import { cap, h, setChildren } from './dom.js';
 import { icon } from './icons.js';
+import { banners } from './banners.js';
 import { daySummary } from './shifts.js';
 
 export function createCalendar(ctx) {
@@ -20,9 +21,11 @@ export function createCalendar(ctx) {
   const todayBtn = h('button', { class: 'btn btn-tinted btn-sm today-btn', type: 'button', 'aria-label': 'Ir a hoy', on: { click: () => goToday() } }, 'Hoy');
   const header = h('header', { class: 'navbar' },
     h('div', { class: 'navbar-inner' }, todayBtn, h('div', { class: 'month-switch' }, prevBtn, title, nextBtn), h('span', { class: 'navbar-spacer' })));
+  const bannerHost = h('div', { class: 'banner-host' });
   const summary = h('div', { class: 'month-summary' });
+  const partial = h('p', { class: 'month-partial', hidden: true });
   const list = h('ol', { class: 'month-list', 'aria-label': 'Días del mes' });
-  el.append(header, summary, list);
+  el.append(header, bannerHost, summary, partial, list);
 
   function shift(n) {
     const d = new Date(year, month - 1 + n, 1);
@@ -106,14 +109,21 @@ export function createCalendar(ctx) {
     title.textContent = cap(formatMonth(year, month));
 
     const ms = monthSummary(state, year, month);
-    const diffCls = ms.diff >= 0 ? 'pos' : ms.diff > -8 * 60 ? 'neg-soft' : 'neg';
+    // Mes vacío o a medias: la diferencia todavía no dice nada (sin colores de alarma)
+    const complete = ms.daysKnown === ms.days.length;
+    const diffCls = !complete ? 'muted-strong' : ms.diff >= 0 ? 'pos' : ms.diff > -8 * 60 ? 'neg-soft' : 'neg';
     setChildren(summary, 
       h('div', { class: 'ms-item' }, h('span', { class: 'ms-label' }, 'Planificado'), h('b', { class: 'ms-value' }, formatHours(ms.total))),
       h('div', { class: 'ms-item' }, h('span', { class: 'ms-label' }, 'Objetivo'), h('b', { class: 'ms-value' }, formatHours(ms.soll))),
-      h('div', { class: 'ms-item' }, h('span', { class: 'ms-label' }, 'Diferencia'), h('b', { class: ['ms-value', diffCls] }, formatSignedHours(ms.diff))),
+      h('div', { class: 'ms-item' }, h('span', { class: 'ms-label' }, 'Diferencia'), h('b', { class: ['ms-value', diffCls] }, ms.daysKnown ? formatSignedHours(ms.diff) : '—')),
     );
-    summary.classList.toggle('incomplete', ms.daysKnown < ms.days.length);
-    summary.title = ms.daysKnown < ms.days.length ? `Faltan ${ms.days.length - ms.daysKnown} días por cargar` : '';
+    setChildren(bannerHost, banners(ctx, state, 'calendario'));
+    const missing = ms.days.length - ms.daysKnown;
+    summary.classList.toggle('incomplete', missing > 0 && ms.daysKnown > 0);
+    // Mes a medias: el planificado todavía no se puede comparar con el objetivo
+    partial.hidden = !(missing > 0 && ms.daysKnown > 0);
+    partial.textContent = missing === 1 ? 'Falta 1 día del plan de este mes: el total todavía puede cambiar.'
+      : `Faltan ${missing} días del plan de este mes: el total todavía puede cambiar.`;
 
     // Una tarjeta por semana (lunes a domingo) con su total
     const weeks = new Map();
@@ -129,8 +139,10 @@ export function createCalendar(ctx) {
     if (!ms.daysKnown) {
       list.prepend(h('li', { class: 'card month-empty' },
         h('p', { class: 'month-empty-title' }, `Sin turnos en ${formatMonth(year, month)}`),
-        h('p', { class: 'muted small' }, 'Escanea el plan o toca cualquier día para añadir el turno a mano.'),
-        h('button', { class: 'btn btn-tinted btn-sm', type: 'button', on: { click: () => ctx.go('escanear') } }, icon('camera'), 'Escanear el plan')));
+        h('p', { class: 'muted small' }, 'Escanea el plan, o toca cualquier día de abajo para elegir su turno a mano.'),
+        h('div', { class: 'btn-row btn-row-center' },
+          h('button', { class: 'btn btn-tinted btn-sm', type: 'button', on: { click: () => ctx.go('escanear') } }, icon('camera'), 'Escanear el plan'),
+          h('button', { class: 'btn btn-secondary btn-sm', type: 'button', on: { click: () => ctx.go('escanear', { manual: true }) } }, icon('pencil'), 'Escribir a mano'))));
     }
   }
 
@@ -154,7 +166,10 @@ export function createCalendar(ctx) {
       }
       if (!shown) {
         shown = true;
-        requestAnimationFrame(() => scrollToKey(ctx.today()));
+        // Mes sin turnos: se queda arriba para que se vea la explicación
+        const t0 = ctx.today();
+        if (monthSummary(ctx.store.get(), +t0.slice(0, 4), +t0.slice(5, 7)).daysKnown === 0) { window.scrollTo(0, 0); return true; }
+        requestAnimationFrame(() => scrollToKey(t0));
         return true;
       }
       return false;

@@ -368,3 +368,81 @@ test('recognize: con el OCR caído hace poco no vuelve a esperar', () => withTes
   assert.deepEqual(r.warnings, [OCR_FAILED]);
   assert.equal(r.ocrFailed, true);
 }));
+
+// ---------- ocr-pool: conversión del lienzo y dispose() a mitad de una lectura ----------
+
+// Tesseract falso que apunta las llamadas; tras terminate(), llamar al worker es un error (como tesseract.js)
+function recordingTesseract(log, { setParamsMs = 0 } = {}) {
+  const make = () => {
+    let dead = false;
+    return {
+      setParameters: async (p) => {
+        if (dead) throw new TypeError('worker terminado');
+        if ('debug_file' in p) return;
+        log.setParams.push(p);
+        if (setParamsMs) await new Promise((r) => setTimeout(r, setParamsMs));
+      },
+      recognize: async (image) => {
+        if (dead) throw new TypeError('worker terminado');
+        log.images.push(image);
+        return { data: { text: 'F1', confidence: 90, blocks: [] } };
+      },
+      terminate: async () => { dead = true; log.terminated++; },
+    };
+  };
+  return { createWorker: () => { log.calls++; return Promise.resolve(make()); } };
+}
+async function withRecording(opts, fn) {
+  const log = { calls: 0, terminated: 0, setParams: [], images: [] };
+  const prev = globalThis.Tesseract;
+  globalThis.Tesseract = recordingTesseract(log, opts);
+  try { await disposePool(); await fn(log); } finally { await disposePool(); globalThis.Tesseract = prev; }
+}
+const PNG = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3]);
+// Lienzo falso: toBlob (HTMLCanvasElement) o convertToBlob (OffscreenCanvas), con retraso opcional
+const fakeCanvas = (ms = 0, bytes = PNG) => ({ toBlob: (cb) => setTimeout(() => cb(bytes && new Blob([bytes], { type: 'image/png' })), ms) });
+const fakeOffscreen = () => ({ convertToBlob: async () => new Blob([PNG], { type: 'image/png' }) });
+const bytesOf = (b) => [...new Uint8Array(b)];
+
+test('pool: el lienzo llega a tesseract como bytes PNG (toBlob y convertToBlob); Blob → bytes; otros tal cual', () => withRecording({}, async (log) => {
+  await recognizeImage(TESS, fakeCanvas(), {});
+  await recognizeImage(TESS, fakeOffscreen(), {});
+  await recognizeImage(TESS, new Blob([PNG]), {});
+  const other = { width: 1 };
+  await recognizeImage(TESS, other, {});
+  assert.equal(log.images.length, 4);
+  for (const im of log.images.slice(0, 3)) assert.deepEqual(bytesOf(im), [...PNG]);
+  assert.equal(log.images[3], other);
+}));
+
+test('pool: lienzo que no se puede leer (toBlob da null) → la lectura falla, no se cuelga', () => withRecording({}, async (log) => {
+  await assert.rejects(recognizeImage(TESS, fakeCanvas(0, null), {}), /no se pudo leer el lienzo/);
+  assert.equal(log.images.length, 0);
+  // el worker sigue sirviendo
+  assert.equal((await recognizeImage(TESS, fakeCanvas(), {})).text, 'F1');
+}));
+
+test('pool: dispose() mientras se convierte el lienzo → no se llama a tesseract y la lectura se cancela', () => withRecording({}, async (log) => {
+  await ready(TESS);
+  const p = recognizeImage(TESS, fakeCanvas(60), { psm: 6 });
+  await new Promise((r) => setTimeout(r, 15));
+  await disposePool();
+  await assert.rejects(p, /OCR cancelado/);
+  await new Promise((r) => setTimeout(r, 100));
+  assert.deepEqual([log.setParams.length, log.images.length, log.terminated], [0, 0, 1]);
+  assert.deepEqual([poolInfo().workers, poolInfo().queued], [0, 0]);
+}));
+
+test('pool: dispose() durante setParameters → no se llama a recognize', () => withRecording({ setParamsMs: 60 }, async (log) => {
+  await ready(TESS);
+  const p = recognizeImage(TESS, fakeCanvas(), { psm: 6 });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(log.setParams.length, 1);
+  await disposePool();
+  await assert.rejects(p, /OCR cancelado/);
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(log.images.length, 0);
+  // y se puede volver a leer con un worker nuevo
+  assert.equal((await recognizeImage(TESS, fakeCanvas(), {})).text, 'F1');
+  assert.equal(log.calls, 2);
+}));

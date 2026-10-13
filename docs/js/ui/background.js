@@ -1,58 +1,88 @@
-// Tareas de fondo: publicar en GitHub (calendario) y programar avisos de ntfy tras cada cambio.
-import { pushData, syncNtfy, updateSettings } from '../core/index.js';
+// Tareas de fondo: mantener al día el Calendario del iPhone (sincronización con GitHub, siempre por
+// la cola única ctx.syncQueue) y programar los avisos de ntfy (opcional) tras cada cambio.
+import { syncNtfy, updateSettings } from '../core/index.js';
+import { isIOS, isStandalone } from './dom.js';
 
-const PUSH_DELAY = 4000;      // espera tras un cambio antes de publicar
-const NTFY_DELAY = 2500;
+const SYNC_DELAY = 1500;       // espera corta tras un cambio (junta varios toques seguidos)
+const NTFY_DELAY = 1500;
 const PERIODIC = 30 * 60 * 1000;
+const RETRY_STEPS = [60 * 1000, 5 * 60 * 1000, 30 * 60 * 1000];
 
-// Clave de los datos que afectan al calendario y a los avisos (sin metadatos de sincronización)
-function dataKey(state) {
-  const s = state.settings;
-  return JSON.stringify([state.days, state.codes, s.reminders, s.weeklyHours, s.workDaysPerWeek,
-    s.sync.enabled, s.sync.owner, s.sync.repo, s.sync.branch, s.sync.token,
-    s.ntfy.enabled, s.ntfy.topic, s.ntfy.server]);
+// Lo que importa para publicar (CORE-API §4.3)
+function syncKey(state) {
+  const s = state.settings || {};
+  const y = s.sync || {};
+  return JSON.stringify([state.days, state.tombstones, state.codes, state.codeTombstones, s.reminders,
+    y.enabled, y.owner, y.repo, y.branch, y.token, y.key, y.publishPlaces]);
+}
+
+function ntfyKey(state) {
+  const s = state.settings || {};
+  const n = s.ntfy || {};
+  return JSON.stringify([state.days, state.codes, s.reminders, n.enabled, n.topic, n.server]);
 }
 
 export function createBackground(ctx) {
   const { store } = ctx;
-  let lastKey = null;
-  let pushTimer = null, ntfyTimer = null;
-  let pushing = null, ntfying = null;
-  let pushAgain = false, ntfyAgain = false;
+  let lastSyncKey = null, lastNtfyKey = null;
+  let syncTimer = null, ntfyTimer = null, retryTimer = null, retryStep = 0;
+  let running = 0;
+  let ntfying = null, ntfyAgain = false;
+  const busySubs = new Set();
 
   const online = () => navigator.onLine !== false;
+  // En Safari de iOS sin instalar nunca se sincroniza solo (sus datos no son los de la app)
+  const autoAllowed = () => !(isIOS() && !isStandalone());
 
-  async function runPush({ manual = false, force = false } = {}) {
+  function setBusy(d) {
+    const was = running > 0;
+    running = Math.max(0, running + d);
+    if (was !== running > 0) for (const fn of [...busySubs]) { try { fn(running > 0); } catch (e) { console.error(e); } }
+  }
+
+  // §4.3 runSync: devuelve el resultado de la cola (o null si no toca)
+  async function runSync({ manual = false, force = false } = {}) {
     const s = store.get().settings.sync;
-    if (!s.enabled || !s.token) return manual ? { ok: false, message: 'La sincronización no está activada.' } : null;
-    if (!online()) {
-      if (manual) return { ok: false, message: 'Sin conexión a internet. Se enviará cuando vuelva la conexión.' };
+    if (!s.enabled) {
+      if (manual) ctx.toast('El calendario no está conectado.', { type: 'error' });
       return null;
     }
-    if (pushing) { pushAgain = true; return pushing; }
-    pushing = (async () => {
-      try {
-        const res = await pushData(store.get(), { now: new Date(), force });
-        const cur = store.get().settings.sync;
-        if (res.pushed || cur.lastError || cur.lastPushHash !== res.hash) {
-          store.set((st) => updateSettings(st, { sync: { lastPushAt: res.sync.lastPushAt ?? st.settings.sync.lastPushAt, lastPushHash: res.hash, lastError: null } }));
-        }
-        return { ok: true, pushed: res.pushed, message: res.pushed ? 'Calendario actualizado.' : 'El calendario ya estaba al día.' };
-      } catch (e) {
-        const message = e?.message || 'No se pudo enviar a GitHub.';
-        if (store.get().settings.sync.lastError !== message) {
-          store.set((st) => updateSettings(st, { sync: { lastError: message } }));
-        }
-        return { ok: false, message };
-      } finally {
-        pushing = null;
-        if (pushAgain) { pushAgain = false; schedulePush(); }
-      }
-    })();
-    return pushing;
+    if (!manual && !autoAllowed()) return null;
+    if (!manual && !online()) return null; // se intentará con el evento 'online'
+    clearTimeout(syncTimer); syncTimer = null;
+    setBusy(+1);
+    let res;
+    try {
+      res = await ctx.syncQueue.sync(force ? { force: true } : undefined);
+    } catch (e) {
+      console.error(e);
+      res = { ok: false, error: { message: 'No se pudo actualizar el calendario.', retry: true } };
+    } finally {
+      setBusy(-1);
+    }
+    if (manual) {
+      ctx.toast(res.ok ? (res.readOnly ? 'Datos al día (este dispositivo solo lee).' : 'Calendario actualizado.') : res.error.message,
+        { type: res.ok ? 'ok' : 'error', duration: res.ok ? undefined : 7000 });
+    }
+    if (res.keyRestored) ctx.toast('La clave nueva no servía para tus turnos guardados: se sigue usando la anterior.', { type: 'info', duration: 7000 });
+    if (res.ok) {
+      retryStep = 0;
+      clearTimeout(retryTimer); retryTimer = null;
+    } else if (res.error?.retry) {
+      scheduleRetry();
+    }
+    return res;
+  }
+
+  function scheduleRetry() {
+    if (retryTimer) return;
+    const d = RETRY_STEPS[Math.min(retryStep, RETRY_STEPS.length - 1)];
+    retryStep++;
+    retryTimer = setTimeout(() => { retryTimer = null; runSync(); }, d);
   }
 
   async function runNtfy({ manual = false } = {}) {
+    clearTimeout(ntfyTimer); ntfyTimer = null;
     const n = store.get().settings.ntfy;
     const hasScheduled = Object.keys(n.scheduled || {}).length > 0;
     if (!n.enabled && !hasScheduled) return null; // nada que programar ni cancelar
@@ -78,39 +108,50 @@ export function createBackground(ctx) {
     return ntfying;
   }
 
-  function schedulePush(delay = PUSH_DELAY) {
-    clearTimeout(pushTimer);
-    pushTimer = setTimeout(() => runPush(), delay);
+  function scheduleSync(delay = SYNC_DELAY) {
+    clearTimeout(syncTimer);
+    syncTimer = setTimeout(() => { syncTimer = null; runSync(); }, delay);
   }
 
   function scheduleNtfy(delay = NTFY_DELAY) {
     clearTimeout(ntfyTimer);
-    ntfyTimer = setTimeout(() => runNtfy(), delay);
+    ntfyTimer = setTimeout(() => { ntfyTimer = null; runNtfy(); }, delay);
   }
 
   function onChange(state) {
-    const key = dataKey(state);
-    if (key === lastKey) return;
-    lastKey = key;
-    schedulePush();
-    scheduleNtfy();
+    const k = syncKey(state);
+    if (k !== lastSyncKey) { lastSyncKey = k; scheduleSync(); }
+    const n = ntfyKey(state);
+    if (n !== lastNtfyKey) { lastNtfyKey = n; scheduleNtfy(); }
+  }
+
+  // iOS congela la app poco después de salir: lo pendiente se lanza ya
+  function flush() {
+    if (ntfyTimer) runNtfy();
+    if (syncTimer) runSync();
   }
 
   return {
     start() {
-      lastKey = dataKey(store.get());
+      lastSyncKey = syncKey(store.get());
+      lastNtfyKey = ntfyKey(store.get());
       store.subscribe(onChange);
-      // Al abrir la app: comprobar ambos (no hacen nada si no hay cambios)
-      schedulePush(1500);
+      // Al abrir la app
+      scheduleSync(SYNC_DELAY);
       scheduleNtfy(1200);
-      window.addEventListener('online', () => { schedulePush(500); scheduleNtfy(500); });
+      window.addEventListener('online', () => { scheduleSync(500); scheduleNtfy(500); });
       document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible') { schedulePush(1500); scheduleNtfy(1000); }
+        if (document.visibilityState === 'hidden') flush();
+        else { scheduleSync(SYNC_DELAY); scheduleNtfy(1000); }
       });
-      setInterval(() => { if (!document.hidden) { runNtfy(); runPush(); } }, PERIODIC);
+      window.addEventListener('pagehide', flush);
+      setInterval(() => { if (!document.hidden) { runNtfy(); runSync(); } }, PERIODIC);
     },
-    syncNow: (opts) => { clearTimeout(pushTimer); return runPush(opts); },
-    ntfyNow: (opts) => { clearTimeout(ntfyTimer); return runNtfy(opts); },
-    busy: () => Boolean(pushing || ntfying),
+    runSync,
+    syncNow: (opts = {}) => runSync({ manual: true, ...opts }),
+    ntfyNow: (opts) => runNtfy(opts),
+    flush,
+    busy: () => running > 0,
+    onBusy(fn) { busySubs.add(fn); return () => busySubs.delete(fn); },
   };
 }

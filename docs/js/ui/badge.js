@@ -1,6 +1,5 @@
 // Insignias de códigos con la misma forma y color que la app Dienstplan original.
-import { getCode, hasTime, nominalMinutes } from '../core/index.js';
-import { formatHours } from '../core/index.js';
+import { formatHours, getCode, hasTime, nominalMinutes } from '../core/index.js';
 import { h } from './dom.js';
 
 // size: 'sm' | 'md' | 'lg' | 'xl'
@@ -30,9 +29,9 @@ export function badgeRow(state, codes, opts = {}) {
   return h('span', { class: ['badges', opts.class] }, (codes || []).map((c) => badge(state, c, opts)));
 }
 
-// Nombre para mostrar (los lugares sin nombre propio muestran su dirección)
+// Nombre para mostrar (los lugares sin nombre propio muestran su dirección, o «Lugar S51»)
 export function displayName(def) {
-  if (def.kind === 'place' && (!def.name || def.name === `Lugar ${def.code}`)) return def.place || 'Lugar de trabajo';
+  if (def.kind === 'place' && (!def.name || def.name === `Lugar ${def.code}`)) return def.place || `Lugar ${def.code}`;
   return def.name;
 }
 

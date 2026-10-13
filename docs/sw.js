@@ -1,21 +1,24 @@
 // Service worker: la app funciona sin conexión y avisa de nuevas versiones.
 // IMPORTANTE: sube VERSION (y APP_VERSION en js/app.js) en cada cambio publicado,
 // y añade aquí cualquier archivo nuevo de la app (los tests e2e lo comprueban).
-const VERSION = '1.1.0';
+const VERSION = '1.2.0';
 const SHELL = `turnos-shell-${VERSION}`;
 const RUNTIME = `turnos-runtime-${VERSION}`;
-const VENDOR = 'turnos-vendor-v1'; // Tesseract: grande y cambia poco (no depende de VERSION)
+// Tesseract (vendor/): grande y cambia poco, por eso va aparte de VERSION.
+// Sube VENDOR_VERSION cada vez que cambie algo en docs/vendor/ (la caché vieja se borra al activar).
+const VENDOR_VERSION = 'tesseract-7.0.0-1';
+const VENDOR = `turnos-vendor-${VENDOR_VERSION}`;
 
 const PRECACHE = [
   './',
   'index.html',
   'manifest.webmanifest',
   'css/app.css',
-  'icons/icon.svg',
+  'icons/apple-touch-icon.png',
   'icons/icon-192.png',
   'icons/icon-512.png',
+  'icons/icon.svg',
   'icons/maskable-512.png',
-  'icons/apple-touch-icon.png',
   'js/app.js',
   'js/core/advice.js',
   'js/core/cipher.js',
@@ -70,18 +73,21 @@ const PRECACHE = [
   'js/ui/attention.js',
   'js/ui/background.js',
   'js/ui/badge.js',
+  'js/ui/banners.js',
   'js/ui/calendar.js',
   'js/ui/codeEditor.js',
   'js/ui/dayEditor.js',
   'js/ui/dom.js',
   'js/ui/hours.js',
   'js/ui/icons.js',
+  'js/ui/install.js',
   'js/ui/onboarding.js',
   'js/ui/scan.js',
   'js/ui/settings.js',
   'js/ui/setup.js',
   'js/ui/sheet.js',
   'js/ui/shifts.js',
+  'js/ui/syncStatus.js',
   'js/ui/toast.js',
   'js/ui/today.js',
 ];
@@ -95,6 +101,7 @@ self.addEventListener('install', (event) => {
 self.addEventListener('activate', (event) => {
   event.waitUntil((async () => {
     const keys = await caches.keys();
+    // Borra las cachés de versiones anteriores (también las de vendor/ con otra VENDOR_VERSION)
     await Promise.all(keys
       .filter((k) => k.startsWith('turnos-') && k !== SHELL && k !== RUNTIME && k !== VENDOR)
       .map((k) => caches.delete(k)));
@@ -104,12 +111,12 @@ self.addEventListener('activate', (event) => {
 
 self.addEventListener('message', (event) => {
   if (event.data?.type === 'SKIP_WAITING') self.skipWaiting();
-  if (event.data?.type === 'GET_VERSION') event.ports?.[0]?.postMessage({ version: VERSION });
+  if (event.data?.type === 'GET_VERSION') event.ports?.[0]?.postMessage({ version: VERSION, vendor: VENDOR_VERSION });
 });
 
-async function cacheFirst(request, cacheName) {
+async function cacheFirst(request, cacheName, { ignoreSearch = true } = {}) {
   const cache = await caches.open(cacheName);
-  const hit = await cache.match(request, { ignoreSearch: true });
+  const hit = await cache.match(request, { ignoreSearch });
   if (hit) return hit;
   const res = await fetch(request);
   if (res.ok && res.type === 'basic') cache.put(request, res.clone()).catch(() => {});
@@ -126,7 +133,7 @@ self.addEventListener('fetch', (event) => {
   const rel = url.pathname.slice(scope.length);
 
   if (rel.startsWith('vendor/')) {
-    event.respondWith(cacheFirst(req, VENDOR));
+    event.respondWith(cacheFirst(req, VENDOR, { ignoreSearch: false }));
     return;
   }
   if (req.mode === 'navigate') {

@@ -5,6 +5,8 @@ import {
 import { badge, badgeRow, displayName, workText } from './badge.js';
 import { cap, h, setChildren } from './dom.js';
 import { icon } from './icons.js';
+import { banners } from './banners.js';
+import { syncStatusLine } from './syncStatus.js';
 import { countdown, dayLabel, daySummary, nextShift, remaining } from './shifts.js';
 
 export function adviceCard(ctx, a) {
@@ -15,11 +17,11 @@ export function adviceCard(ctx, a) {
       h('p', { class: 'advice-text' }, a.text),
       a.action ? h('button', {
         class: 'btn btn-tinted btn-sm', type: 'button',
-        on: { click: () => ctx.go(a.action.tab, a.code ? { code: a.code } : undefined) },
+        on: { click: () => ctx.go(a.action.tab, a.code ? { code: a.code } : a.action.section ? { section: a.action.section } : a.action.opts) },
       }, a.action.label) : null));
 }
 
-const DOW = ['L', 'M', 'X', 'J', 'V', 'S', 'D'];
+const DOW = ['L', 'M', 'Mi', 'J', 'V', 'S', 'D'];
 
 export function createToday(ctx) {
   const el = h('section', { 'aria-label': 'Hoy' });
@@ -30,7 +32,7 @@ export function createToday(ctx) {
       return h('article', { class: 'card hero hero-none' },
         h('p', { class: 'hero-kicker' }, 'Próximo turno'),
         h('p', { class: 'hero-empty-title' }, 'No hay más turnos en tu plan'),
-        h('p', { class: 'muted' }, 'Cuando tengas el plan del próximo mes, hazle una foto.'),
+        h('p', { class: 'muted' }, 'Cuando tengas el plan del próximo mes, tómale una foto.'),
         h('button', { class: 'btn btn-primary', type: 'button', on: { click: () => ctx.go('escanear') } },
           icon('camera'), 'Escanear el plan'));
     }
@@ -43,7 +45,11 @@ export function createToday(ctx) {
     ];
     if (places.length) {
       facts.push(h('div', { class: 'fact' }, icon('pin'), h('span', { class: 'fact-place' },
-        places.map((p) => [badge(state, p.code, { size: 'sm' }), ' ', displayName(p)]))));
+        places.map((p) => [badge(state, p.code, { size: 'sm' }), ' ',
+          p.place ? displayName(p) : h('button', {
+            class: 'link-btn link-inline', type: 'button', 'aria-label': `Poner la dirección del lugar ${p.code}`,
+            on: { click: () => ctx.openCode(p.code) },
+          }, 'Poner la dirección')]))));
     }
     const note = state.days[key]?.note;
     if (note) facts.push(h('div', { class: 'fact' }, icon('note'), h('span', {}, note)));
@@ -90,7 +96,7 @@ export function createToday(ctx) {
     const kinds = s.codes.map((c) => getCode(state, c).kind);
     let text = null;
     if (kinds.includes('vacation')) text = '🏖️ Hoy estás de vacaciones. ¡Disfruta!';
-    else if (kinds.includes('sick')) text = '🤒 Hoy estás de baja. Cuídate mucho.';
+    else if (kinds.includes('sick')) text = '🤒 Hoy es día de enfermedad. Cuídate mucho.';
     else if (kinds.includes('wish') || kinds.includes('off') || !s.codes.length) text = '🌿 Hoy tienes el día libre.';
     else if (s.holiday) text = `🎉 Hoy es festivo: ${s.holiday}`;
     return text ? h('p', { class: 'today-line' }, text) : null;
@@ -156,9 +162,9 @@ export function createToday(ctx) {
     return h('div', { class: 'empty' },
       h('div', { class: 'empty-art', 'aria-hidden': 'true' }, emptyArt()),
       h('h2', { class: 'empty-title' }, 'Aún no tienes turnos'),
-      h('p', { class: 'empty-text' }, 'Haz una foto de tu plan de turnos (en la app Dienstplan o la hoja del PC) y la app los apunta por ti.'),
+      h('p', { class: 'empty-text' }, 'Toma una foto de tu plan de turnos (en la app Dienstplan o la hoja del PC) y la app los anota por ti.'),
       h('button', { class: 'btn btn-primary btn-lg btn-block', type: 'button', on: { click: () => ctx.go('escanear') } }, icon('camera'), 'Escanear mi plan'),
-      h('button', { class: 'btn btn-plain btn-block', type: 'button', on: { click: () => ctx.go('calendario') } }, 'o añádelos a mano en el calendario'));
+      h('button', { class: 'btn btn-plain btn-block', type: 'button', 'data-testid': 'empty-manual', on: { click: () => ctx.go('escanear', { manual: true }) } }, 'o escríbelos a mano'));
   }
 
   function render(state) {
@@ -166,12 +172,15 @@ export function createToday(ctx) {
     const today = ctx.today();
     const name = (state.settings.name || '').trim();
     const hasData = Object.keys(state.days).length > 0;
-    const advice = getAdvice(state, now);
-    setChildren(el, 
+    // «Actualiza la app» ya sale como aviso fijo arriba
+    const advice = getAdvice(state, now).filter((a) => !(a.id === 'newer-schema' && state.__newerSchema));
+    setChildren(el,
       h('header', { class: 'page-head' },
         h('p', { class: 'eyebrow' }, formatLong(today)),
         h('h1', { class: 'large-title' }, name ? `Hola, ${name} 👋` : 'Hola 👋'),
-        hasData ? todayLine(state, today, now) : null),
+        hasData ? todayLine(state, today, now) : null,
+        syncStatusLine(ctx, state)),
+      banners(ctx, state, 'hoy'),
       ...(hasData ? [
         hero(state, now, today),
         weekCard(state, today),

@@ -3,8 +3,9 @@ import {
   formatHours, formatMonth, formatSignedHours, getAdvice, getCode, isoWeek, monthShort, monthSummary, addDays,
 } from '../core/index.js';
 import { badge } from './badge.js';
-import { cap, fmtNum, h, setChildren } from './dom.js';
+import { cap, fmtNum, h, plural, setChildren } from './dom.js';
 import { icon } from './icons.js';
+import { banners } from './banners.js';
 import { adviceCard } from './today.js';
 
 export function createHours(ctx) {
@@ -30,24 +31,31 @@ export function createHours(ctx) {
     const s = monthSummary(state, year, month);
     const weekly = (Number(state.settings.weeklyHours) || 35) * 60;
     const missing = s.days.length - s.daysKnown;
+    const partial = missing > 0 && s.daysKnown > 0;
     const pct = s.soll ? Math.min(100, (s.total / s.soll) * 100) : 0;
-    const diffCls = s.diff >= 0 ? 'pos' : s.diff > -8 * 60 ? 'neg-soft' : 'neg';
-    const diffText = Math.abs(s.diff) < 15 ? 'Justo tu objetivo 👌'
-      : s.diff > 0 ? 'por encima del objetivo' : 'por debajo del objetivo';
+    const diffCls = partial || !s.daysKnown ? 'muted-strong' : s.diff >= 0 ? 'pos' : s.diff > -8 * 60 ? 'neg-soft' : 'neg';
+    const diffText = !s.daysKnown ? 'todavía sin turnos este mes'
+      : partial ? 'por ahora (faltan días del plan)'
+        : Math.abs(s.diff) < 15 ? 'Justo tu objetivo 👌'
+          : s.diff > 0 ? 'por encima del objetivo' : 'por debajo del objetivo';
     const workdays = Math.round(s.soll / ((weekly / (Number(state.settings.workDaysPerWeek) || 5)) || 1));
 
-    const summary = h('article', { class: 'card hours-summary' },
+    const summary = h('article', { class: ['card', 'hours-summary', partial && 'is-partial'] },
+      partial ? h('div', { class: 'notice notice-warn hs-partial', 'data-testid': 'hours-partial' }, icon('info'), h('p', {},
+        h('b', {}, missing === 1 ? 'Falta 1 día del plan de este mes. ' : `Faltan ${missing} días del plan de este mes. `),
+        'El planificado todavía no está completo: compáralo con el objetivo cuando tengas todo el mes.')) : null,
       h('div', { class: 'hs-cols' },
-        h('div', { class: 'hs-col' }, h('span', { class: 'hs-label' }, 'Planificado'), h('span', { class: 'hs-value' }, formatHours(s.total))),
+        h('div', { class: 'hs-col' }, h('span', { class: 'hs-label' }, 'Planificado'), h('span', { class: 'hs-value' }, formatHours(s.total)),
+          partial ? h('span', { class: 'hs-note' }, 'hasta ahora') : null),
         h('div', { class: 'hs-col' }, h('span', { class: 'hs-label' }, 'Objetivo'), h('span', { class: 'hs-value muted-strong' }, formatHours(s.soll)))),
       h('div', { class: ['progress', 'progress-lg', s.total > s.soll && 'progress-over'], role: 'progressbar', 'aria-label': 'Horas del mes frente al objetivo', 'aria-valuemin': '0', 'aria-valuemax': String(Math.round(s.soll / 60)), 'aria-valuenow': String(Math.round(s.total / 60)) },
         h('div', { class: 'progress-fill', style: { width: `${pct}%` } })),
-      h('p', { class: 'hs-diff' }, h('b', { class: ['diff', diffCls] }, formatSignedHours(s.diff)), ' ', h('span', { class: 'muted' }, diffText)),
+      // Con el mes a medias la diferencia confunde: no se muestra
+      partial || !s.daysKnown ? null : h('p', { class: 'hs-diff' }, h('b', { class: ['diff', diffCls] }, formatSignedHours(s.diff)), ' ', h('span', { class: 'muted' }, diffText)),
       h('p', { class: 'hs-foot muted small' },
         `Objetivo: ${workdays} días laborables × ${formatHours(weekly / (Number(state.settings.workDaysPerWeek) || 5))} (festivos descontados).`,
         s.credited ? ` Incluye ${formatHours(s.credited)} de vacaciones.` : ''),
-      missing > 0 ? h('p', { class: 'notice notice-info small' }, icon('info'), h('span', {},
-        s.daysKnown ? `Faltan ${missing} ${missing === 1 ? 'día' : 'días'} por cargar: el total puede cambiar.` : 'Este mes todavía no tiene turnos cargados.')) : null);
+      !s.daysKnown ? h('p', { class: 'notice notice-info small' }, icon('info'), h('span', {}, 'Este mes todavía no tiene turnos cargados.')) : null);
 
     const stats = h('div', { class: 'stats' },
       stat('🌙', String(s.nights), s.nights === 1 ? 'noche' : 'noches'),
@@ -71,7 +79,7 @@ export function createHours(ctx) {
           h('div', { class: ['wb-bar', cls], 'aria-hidden': 'true' },
             h('span', { class: 'wb-fill', style: { width: `${fill}%` } }),
             h('span', { class: 'wb-mark', style: { left: `${mark}%` } })),
-          w.known < 7 ? h('span', { class: 'wb-note faint small' }, `${7 - w.known} ${7 - w.known === 1 ? 'día' : 'días'} sin plan`) : null);
+          w.known < 7 ? h('span', { class: 'wb-note faint small' }, `${plural(7 - w.known, 'día', 'días')} sin plan`) : null);
       })));
 
     const counts = Object.entries(s.shiftCounts).sort((a, b) => b[1] - a[1]);
@@ -93,6 +101,7 @@ export function createHours(ctx) {
           h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Mes anterior', on: { click: () => shift(-1) } }, icon('chevronLeft')),
           h('span', { class: 'pill-switch-label', 'aria-live': 'polite' }, cap(formatMonth(year, month))),
           h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Mes siguiente', on: { click: () => shift(1) } }, icon('chevronRight')))),
+      banners(ctx, state, 'horas'),
       summary,
       stats,
       weeks,

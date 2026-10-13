@@ -170,17 +170,41 @@ function pump() {
   });
 }
 
+// Lienzo → bytes PNG (lo mismo que haría tesseract.js por dentro, pero aquí: así dispose() no le pilla
+// convirtiendo la imagen con el worker ya terminado). Blob → bytes; lo demás se pasa tal cual.
+async function toBytes(image) {
+  let blob = null;
+  if (image && typeof image.convertToBlob === 'function') blob = await image.convertToBlob();
+  else if (image && typeof image.toBlob === 'function') blob = await new Promise((r) => image.toBlob(r));
+  else if (typeof Blob !== 'undefined' && image instanceof Blob) blob = image;
+  else return image;
+  if (!blob) throw new Error('OCR: no se pudo leer el lienzo');
+  return typeof blob.arrayBuffer === 'function' ? blob.arrayBuffer() : new Response(blob).arrayBuffer();
+}
+
+// Llamada a tesseract.js: si el worker se termina antes de que responda, su promesa no debe quedar sin capturar
+function call(p) {
+  Promise.resolve(p).catch(() => {});
+  return p;
+}
+
 async function runOn(s, job) {
   s.busy = true; s.job = job;
+  // ¿sigue siendo este el trabajo del worker? (dispose() o rutas nuevas lo terminan)
+  const current = () => s.job === job && pool.slots.includes(s);
   try {
+    const image = await toBytes(job.image);
+    if (!current()) return;
     const diff = {};
     for (const k of Object.keys(job.params)) if (s.params[k] !== job.params[k]) diff[k] = job.params[k];
     if (Object.keys(diff).length) {
       s.params = {}; // si falla a medias, se vuelven a fijar todos
-      await s.worker.setParameters(diff);
+      await call(s.worker.setParameters(diff));
+      if (!current()) return;
       s.params = { ...job.params };
     }
-    const { data } = await s.worker.recognize(job.image, {}, job.output);
+    // con bytes, tesseract.js envía el trabajo en el microtask siguiente: antes que el terminate() diferido de terminateAll
+    const { data } = await call(s.worker.recognize(image, {}, job.output));
     if (s.job === job) job.resolve(data);
   } catch (e) {
     s.params = {};

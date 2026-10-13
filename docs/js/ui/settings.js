@@ -1,24 +1,35 @@
-// Pestaña "Ajustes": perfil, códigos, recordatorios, calendario del iPhone, ntfy, copias, instalación.
+// Pestaña "Ajustes" (SPEC §10): 1) Calendario del iPhone, 2) Mis turnos y horarios, 3) Horas de contrato
+// y Recordatorios, 4) Copia de seguridad, 5) Instalar, 6) Opciones avanzadas (plegadas), 7) Acerca de.
 import {
-  buildICS, buildSetupLink, calendarUrls, exportBackup, importBackup, pullBackup, randomTopic, testConnection,
-  testNtfy, toKey, updateSettings, formatHours, hasTime,
+  buildICS, buildSetupLink, calendarUrls, createDefaultState, exportBackup, fetchRemoteBackup, formatHours, hasTime, importBackup,
+  isReadOnlyDevice, isSyncKey, listBeforeImport, normalizeSyncConfig, randomTopic, saveBeforeImport, testConnection, testNtfy,
+  toKey, undoImport, updateSettings,
 } from '../core/index.js';
 import { badgeFromDef, displayName, groupCodes, timeRange } from './badge.js';
-import { ago, minutesText, copyText, dateTime, fmtNum, h, isIOS, isStandalone, parseNum, shareOrDownload, setChildren } from './dom.js';
-import { icon, shareIcon } from './icons.js';
+import {
+  copyText, dateTime, fmtNum, h, isStandalone, minutesText, parseNum, plural, safeStorage, setChildren, shareOrDownload,
+} from './dom.js';
+import { icon } from './icons.js';
 import { confirmDialog } from './sheet.js';
 import { unconfirmedInUse } from './attention.js';
 import { showOnboarding } from './onboarding.js';
-import { openPasteSetup } from './setup.js';
+import { alertsNotice, openPasteSetup, runSetup, subscribeButton, subscribeSteps, takeOver } from './setup.js';
+import { banners } from './banners.js';
+import { installSteps } from './install.js';
+import { isConfigured, syncState } from './syncStatus.js';
+import { DRAFT_KEY } from './scan.js';
 
 const MINUTES = [15, 30, 45, 60, 90, 120];
+const CORE_SHIFTS = ['F1', 'S1', 'N1', 'Z1'];
 
 export function createSettings(ctx) {
   const { store } = ctx;
+  const ls = safeStorage();
   const el = h('section', { 'aria-label': 'Ajustes' });
   const busy = {}; // botones en curso
   let showToken = false;
-  let pendingCode = null;
+  let showAllCodes = false;
+  let form = null; // conexión con GitHub mientras se escribe (no se guarda hasta «Guardar y conectar»)
 
   const set = (patch) => store.set((s) => updateSettings(s, patch));
 
@@ -28,26 +39,27 @@ export function createSettings(ctx) {
     h('div', { class: 'card set-card' }, rows),
     footer ? h('p', { class: 'set-footer' }, footer) : null);
 
-  const row = (label, control, { sub, icon: ic, cls } = {}) => h('div', { class: ['set-row', cls] },
+  const row = (label, control, { sub, icon: ic, cls, tag = 'div' } = {}) => h(tag, { class: ['set-row', cls] },
     ic ? h('span', { class: ['set-icon', `si-${ic}`], 'aria-hidden': 'true' }, icon(ic)) : null,
-    h('div', { class: 'set-row-main' }, h('span', { class: 'set-label' }, label), sub ? h('span', { class: 'set-sub' }, sub) : null),
+    h('span', { class: 'set-row-main' }, h('span', { class: 'set-label' }, label), sub ? h('span', { class: 'set-sub' }, sub) : null),
     control);
 
-  function toggle(fkey, checked, onChange, label) {
-    return h('input', { type: 'checkbox', class: 'switch', checked, 'aria-label': label, dataset: { fkey }, on: { change: (e) => onChange(e.target.checked) } });
-  }
+  // Fila con interruptor: toda la fila (label) lo activa
+  const switchRow = (label, fkey, checked, onChange, opts = {}) => row(label,
+    h('input', { type: 'checkbox', class: 'switch', checked, dataset: { fkey }, on: { change: (e) => onChange(e.target.checked) } }),
+    { ...opts, tag: 'label', cls: ['set-row-switch', opts.cls].filter(Boolean).join(' ') });
 
   function actionButton(id, label, ic, run, cls = 'btn-secondary') {
     return h('button', {
       class: ['btn', cls, busy[id] && 'is-busy'], type: 'button', disabled: Boolean(busy[id]), dataset: { fkey: `btn-${id}` },
       on: { click: async () => {
         busy[id] = true; refresh();
-        try { await run(); } finally { busy[id] = false; refresh(); }
+        try { await run(); } catch (e) { console.error(e); ctx.toast(e?.message || 'Algo falló.', { type: 'error' }); } finally { busy[id] = false; refresh(); }
       } },
     }, busy[id] ? h('span', { class: 'spinner spinner-sm' }) : (ic ? icon(ic) : null), label);
   }
 
-  // Re-pinta conservando el foco del botón pulsado (lectores de pantalla)
+  // Re-pinta conservando el foco del botón pulsado (lectores de pantalla) y lo desplegado
   function refresh() {
     const fkey = el.contains(document.activeElement) ? document.activeElement.dataset.fkey : null;
     const open = new Set([...el.querySelectorAll('details[open]')].map((d) => d.dataset.fkey));
@@ -61,8 +73,100 @@ export function createSettings(ctx) {
 
   const steps = (...items) => h('ol', { class: 'steps' }, items.map((it) => h('li', {}, it)));
 
-  // ---------- Secciones ----------
-  function profile(s) {
+  // ---------- 1. Calendario del iPhone ----------
+  function calendar(state) {
+    const s = state.settings.sync;
+    const st = syncState(state, ctx.now(), { busy: ctx.background?.busy?.() });
+    const configured = s.enabled && isConfigured(s);
+    const statusIcon = { off: 'calendar', ok: 'check', busy: 'refresh', pending: 'refresh', transient: 'cloud', readonly: 'phone', error: 'warning' }[st.kind];
+    const urls = configured ? calendarUrls(s) : null;
+
+    const status = h('div', { class: ['cal-status', `cal-${st.kind}`], 'data-testid': 'sync-status', dataset: { kind: st.kind } },
+      h('span', { class: 'cal-status-icon', 'aria-hidden': 'true' }, st.kind === 'busy' ? h('span', { class: 'spinner spinner-sm' }) : icon(statusIcon)),
+      h('span', { class: 'cal-status-main' },
+        h('span', { class: 'cal-status-title' }, st.title),
+        st.text ? h('span', { class: 'cal-status-text' }, st.text) : null));
+
+    const blocks = [status];
+    if (st.kind === 'readonly') {
+      blocks.push(h('div', { class: 'set-actions' },
+        h('button', { class: 'btn btn-secondary btn-block', type: 'button', 'data-testid': 'takeover', on: { click: () => takeOver(ctx) } }, icon('phone'), 'Usar este dispositivo')));
+    }
+    if (st.kind === 'error') {
+      blocks.push(h('div', { class: 'set-actions' },
+        h('button', { class: 'btn btn-primary btn-block', type: 'button', 'data-testid': 'setup-paste-open', on: { click: () => openPasteSetup(ctx, { renew: true }) } }, icon('link'), 'Tengo un enlace nuevo')));
+    }
+    if (!configured) {
+      blocks.push(h('div', { class: 'set-actions' },
+        h('p', { class: 'set-hint' }, 'Quien te ayuda con la app te envía un enlace de configuración (por WhatsApp o correo). Cuando lo tengas, toca aquí:'),
+        h('button', { class: 'btn btn-primary btn-lg btn-block', type: 'button', 'data-testid': 'setup-paste-open', on: { click: () => openPasteSetup(ctx) } }, icon('link'), 'Tengo un enlace')));
+    } else {
+      blocks.push(h('div', { class: 'set-actions set-subscribe' },
+        alertsNotice(),
+        subscribeButton(ctx, s),
+        subscribeSteps(),
+        st.kind !== 'error' ? h('button', { class: 'link-btn link-center', type: 'button', 'data-testid': 'setup-paste-renew', on: { click: () => openPasteSetup(ctx, { renew: true }) } }, 'Tengo un enlace nuevo') : null));
+    }
+    return h('section', { class: 'set-group', id: 'set-calendar' },
+      h('h2', { class: 'set-title' }, 'Calendario del iPhone'),
+      h('div', { class: 'card set-card cal-card' }, blocks),
+      configured ? details('guide-cal', '¿No se abre o no se actualiza?',
+        h('p', { class: 'hint' }, 'Si al tocar «Suscribirme en el iPhone» no pasa nada, hazlo a mano: abre ', h('b', {}, 'Ajustes'),
+          ' del iPhone (en algunos se llama «Configuración») → Calendario → Cuentas → «Agregar cuenta» (o «Añadir cuenta») → Otra → «Agregar calendario suscrito», y pega este enlace:'),
+        urls ? h('div', { class: 'copy-line' },
+          h('code', {}, urls.https),
+          h('button', { class: 'btn btn-tinted btn-sm', type: 'button', on: { click: async () => ctx.toast(await copyText(urls.https) ? 'Enlace copiado' : 'No se pudo copiar', { type: 'ok' }) } }, icon('copy'), 'Copiar')) : null,
+        h('p', { class: 'hint' }, 'En iOS 18 el camino es: Ajustes → Apps → Calendario → Cuentas de calendario.'),
+        h('p', { class: 'hint' }, h('b', {}, 'Para que se actualice más a menudo: '), 'Ajustes → Calendario → Cuentas → «Obtener datos» → en «Calendarios suscritos» elige «Cada 15 minutos» o «Cada hora».'),
+        h('p', { class: 'hint' }, 'Si cambias un turno de mañana, abre un momento la app Calendario para que lo recoja.')) : null);
+  }
+
+  // ---------- 2. Mis turnos y horarios ----------
+  function codes(state) {
+    const unconf = unconfirmedInUse(state, ctx.now());
+    const used = new Set(Object.values(state.days || {}).flatMap((d) => (Array.isArray(d?.codes) ? d.codes : [])));
+    const all = groupCodes(state).flatMap((g) => g.codes);
+    const primary = all.filter((d) => used.has(d.code) || CORE_SHIFTS.includes(d.code));
+    const rest = all.filter((d) => !primary.includes(d));
+
+    const codeRow = (def) => {
+      const u = unconf.get(def.code); // sin confirmar y usado
+      const isPlace = def.kind === 'place';
+      const sub = isPlace
+        ? (def.place || 'Sin dirección')
+        : [timeRange(def), def.breakMin && hasTime(def) ? `pausa ${def.breakMin} min` : '', def.place].filter(Boolean).join(' · ');
+      return h('button', {
+        class: ['set-row', 'code-row', u && 'unconfirmed'], type: 'button', dataset: { code: def.code, fkey: `code-${def.code}` },
+        'aria-label': `${def.code === '-' ? 'Libre' : def.code}: ${displayName(def)}${hasTime(def) ? `, ${timeRange(def)}` : ''}${u ? ', horario sin confirmar' : ''}`,
+        on: { click: () => ctx.openCode(def.code) },
+      },
+      h('span', { class: 'code-badge' }, badgeFromDef(def, { title: false })),
+      h('span', { class: 'set-row-main' },
+        h('span', { class: 'set-label' }, isPlace ? `Lugar ${def.code}` : displayName(def)),
+        sub ? h('span', { class: ['set-sub', isPlace && !def.place && 'faint'] }, sub) : null),
+      u ? h('span', { class: 'pill pill-warn' }, u.next ? 'Confirmar' : 'Sin confirmar') : null,
+      h('span', { class: 'row-chevron', 'aria-hidden': 'true' }, icon('chevronRight')));
+    };
+    const pending = [...unconf.values()].filter((v) => v.next).map((v) => v.def);
+    return h('section', { class: 'set-group', id: 'set-codes' },
+      h('h2', { class: 'set-title' }, 'Mis turnos y horarios'),
+      pending.length ? h('div', { class: 'notice notice-warn' }, icon('warning'), h('p', {},
+        h('b', {}, pending.length === 1 ? `Confirma el horario de ${pending[0].code}. ` : `Confirma los horarios de ${pending.map((d) => d.code).join(', ')}. `),
+        'La app los supuso; tócalos para revisarlos.')) : null,
+      h('div', { class: 'card set-card codes-card' },
+        primary.map(codeRow),
+        showAllCodes && rest.length ? [h('h3', { class: 'set-subtitle' }, 'Otros códigos'), ...rest.map(codeRow)] : null),
+      h('div', { class: 'btn-stack' },
+        rest.length ? h('button', {
+          class: 'btn btn-plain btn-block', type: 'button', 'data-testid': 'codes-all', dataset: { fkey: 'codes-all' },
+          on: { click: () => { showAllCodes = !showAllCodes; refresh(); } },
+        }, showAllCodes ? 'Ver menos códigos' : `Ver todos los códigos (${rest.length} más)`) : null,
+        h('button', { class: 'btn btn-secondary btn-block', type: 'button', 'data-testid': 'code-add', on: { click: () => ctx.openCode(null) } }, icon('plus'), 'Añadir código')),
+      h('p', { class: 'set-footer' }, 'Toca un código para cambiar su horario, pausa o lugar. La pausa se descuenta de las horas; los lugares no suman horas.'));
+  }
+
+  // ---------- 3. Horas de contrato y recordatorios ----------
+  function contract(s) {
     const name = h('input', {
       class: 'input input-inline input-name', value: s.name || '', maxlength: '30', placeholder: 'Tu nombre', 'aria-label': 'Nombre', autocomplete: 'given-name',
       dataset: { fkey: 'name' }, on: { change: (e) => set({ name: e.target.value.trim() }) },
@@ -78,51 +182,24 @@ export function createSettings(ctx) {
       } },
     });
     const daily = (Number(s.weeklyHours) || 35) / (Number(s.workDaysPerWeek) || 5);
-    return group('Tú', [
-      row('Nombre', name, { icon: 'user' }),
-      row('Horas de contrato', h('span', { class: 'inline-unit' }, hours, h('span', { class: 'unit' }, 'h/sem')), { icon: 'clock', sub: `${formatHours(daily * 60)} por día laborable (lun–vie)` }),
-    ]);
-  }
-
-  function codes(state) {
-    const unconf = unconfirmedInUse(state, ctx.now());
-    const groups = groupCodes(state);
-    const codeRow = (def) => {
-      const u = def.confirmed === false && ['shift', 'event', 'other'].includes(def.kind);
-      const used = unconf.get(def.code);
-      return h('button', {
-        class: ['set-row', 'code-row', u && 'unconfirmed'], type: 'button', dataset: { code: def.code, fkey: `code-${def.code}` },
-        'aria-label': `${def.code === '-' ? 'Libre' : def.code}: ${def.name}${hasTime(def) ? `, ${timeRange(def)}` : ''}${u ? ', horario sin confirmar' : ''}`,
-        on: { click: () => ctx.openCode(def.code) },
-      },
-      h('span', { class: 'code-badge' }, badgeFromDef(def, { title: false })),
-      h('span', { class: 'set-row-main' },
-        h('span', { class: 'set-label' }, displayName(def)),
-        h('span', { class: 'set-sub' }, [timeRange(def), !u && def.breakMin && hasTime(def) ? `pausa ${def.breakMin} min` : '', def.kind !== 'place' ? def.place : ''].filter(Boolean).join(' · ') || ' ')),
-      u ? h('span', { class: 'pill pill-warn' }, used?.next ? 'Confirmar' : 'Sin confirmar') : null,
-      h('span', { class: 'row-chevron', 'aria-hidden': 'true' }, icon('chevronRight')));
-    };
-    // Lugares: fichas compactas (insignia + dirección si la tiene)
-    const placeChip = (def) => h('button', {
-      class: 'place-chip', type: 'button', dataset: { code: def.code, fkey: `code-${def.code}` },
-      'aria-label': `Lugar ${def.code}${def.place ? `: ${def.place}` : ''}`, on: { click: () => ctx.openCode(def.code) },
-    }, badgeFromDef(def, { title: false }), def.place ? h('span', { class: 'place-chip-text' }, def.place) : null);
-    const pending = groups.flatMap((g) => g.codes).filter((d) => d.confirmed === false && unconf.get(d.code)?.next);
-    return h('section', { class: 'set-group', id: 'set-codes' },
-      h('h2', { class: 'set-title' }, 'Códigos y horarios'),
-      pending.length ? h('div', { class: 'notice notice-warn' }, icon('warning'), h('p', {},
-        h('b', {}, pending.length === 1 ? `Confirma el horario de ${pending[0].code}. ` : `Confirma los horarios de ${pending.map((d) => d.code).join(', ')}. `),
-        'La app los ha supuesto; tócalos para revisarlos.')) : null,
-      ...groups.map((g) => h('div', { class: 'card set-card codes-card' },
-        h('h3', { class: 'set-subtitle' }, g.title),
-        g.id === 'place' ? h('div', { class: 'place-chips' }, g.codes.map(placeChip)) : g.codes.map(codeRow))),
-      h('button', { class: 'btn btn-secondary btn-block', type: 'button', on: { click: () => ctx.openCode(null) } }, icon('plus'), 'Añadir código'),
-      h('p', { class: 'set-footer' }, 'Toca un código para cambiar su horario, pausa o lugar. La pausa se descuenta de las horas; los lugares no suman horas.'));
+    return group('Horas de contrato', [
+      row('Horas por semana', h('span', { class: 'inline-unit' }, hours, h('span', { class: 'unit' }, 'h')), { icon: 'clock', sub: `${formatHours(daily * 60)} por día (lun–vie)` }),
+      row('Tu nombre', name, { icon: 'user' }),
+    ], { id: 'set-hours' });
   }
 
   function reminders(state) {
     const r = state.settings.reminders;
-    const via = [state.settings.sync.enabled && 'Calendario del iPhone', state.settings.ntfy.enabled && 'ntfy'].filter(Boolean);
+    const sy = state.settings.sync, nt = state.settings.ntfy;
+    const st = syncState(state, ctx.now());
+    const calOk = ['ok', 'readonly', 'busy'].includes(st.kind);
+    const ntfyOk = nt.enabled && nt.topic && !nt.lastError;
+    let footer;
+    if (calOk) footer = `✅ Los avisos van al Calendario del iPhone${ntfyOk ? ' y a ntfy' : ''}, si te suscribiste con «Suscribirme en el iPhone».`;
+    else if (sy.enabled && st.kind === 'error') footer = '⚠️ El calendario no se está actualizando: los avisos de los turnos nuevos pueden no llegar. Mira «Calendario del iPhone», arriba.';
+    else if (sy.enabled && (st.kind === 'pending' || st.kind === 'transient')) footer = '⏳ El calendario se está preparando. Los avisos llegarán cuando esté listo y te suscribas.';
+    else if (ntfyOk) footer = '✅ Los avisos te llegan por ntfy.';
+    else footer = '⚠️ Todavía no te llegan avisos: falta conectar el Calendario del iPhone (arriba).';
     const time = h('input', {
       type: 'time', class: 'input input-inline input-time', value: r.eveningTime || '20:00', 'aria-label': 'Hora del aviso de la víspera',
       disabled: !r.eveningBefore, dataset: { fkey: 'eveningTime' },
@@ -133,163 +210,21 @@ export function createSettings(ctx) {
       value: String(r.minutesBefore), on: { change: (e) => set({ reminders: { minutesBefore: Number(e.target.value) } }) },
     }, [...new Set([...MINUTES, Number(r.minutesBefore) || 60])].sort((a, b) => a - b).map((m) => h('option', { value: String(m) }, minutesText(m))));
     return group('Recordatorios', [
-      row('La víspera', toggle('eve', r.eveningBefore, (v) => set({ reminders: { eveningBefore: v } }), 'Aviso la víspera'), { icon: 'bell', sub: 'Un aviso la tarde anterior' }),
-      row('Hora', time, { cls: 'set-row-sub' }),
-      row('Antes del turno', toggle('pre', r.beforeStart, (v) => set({ reminders: { beforeStart: v } }), 'Aviso antes del turno'), { icon: 'clock', sub: 'Un aviso poco antes de empezar' }),
+      switchRow('La víspera', 'eve', r.eveningBefore, (v) => set({ reminders: { eveningBefore: v } }), { icon: 'bell', sub: 'Un aviso la noche antes' }),
+      row('A las', time, { cls: 'set-row-sub' }),
+      switchRow('Antes del turno', 'pre', r.beforeStart, (v) => set({ reminders: { beforeStart: v } }), { icon: 'clock', sub: 'Un aviso poco antes de empezar' }),
       row('Cuándo', mins, { cls: 'set-row-sub' }),
-    ], {
-      footer: via.length ? `✅ Los avisos te llegan por: ${via.join(' y ')}.`
-        : '⚠️ Para recibir los avisos, activa abajo el Calendario del iPhone o ntfy.',
-    });
+    ], { id: 'set-reminders', footer });
   }
 
-  function calendar(state) {
-    const s = state.settings.sync;
-    const configured = Boolean(s.owner && s.repo && s.token);
-    const urls = s.owner && s.repo ? calendarUrls(s) : null;
-    let status, statusCls;
-    if (!s.enabled) { status = configured ? 'Desactivado' : 'Sin configurar'; statusCls = 'pill-muted'; }
-    else if (s.lastError) { status = 'Con problemas'; statusCls = 'pill-alert'; }
-    else if (s.lastPushAt) { status = 'Funcionando'; statusCls = 'pill-ok'; }
-    else { status = 'Pendiente'; statusCls = 'pill-warn'; }
-
-    const owner = h('input', { class: 'input', value: s.owner || '', placeholder: 'usuario', autocapitalize: 'off', autocomplete: 'off', spellcheck: 'false', 'aria-label': 'Usuario de GitHub', dataset: { fkey: 'owner' }, on: { change: (e) => set({ sync: { owner: e.target.value.trim(), lastError: null, lastPushHash: null } }) } });
-    const repo = h('input', { class: 'input', value: s.repo || '', placeholder: 'repositorio', autocapitalize: 'off', autocomplete: 'off', spellcheck: 'false', 'aria-label': 'Repositorio', dataset: { fkey: 'repo' }, on: { change: (e) => set({ sync: { repo: e.target.value.trim(), lastError: null, lastPushHash: null } }) } });
-    const token = h('input', {
-      class: 'input input-token', type: showToken ? 'text' : 'password', value: s.token || '', placeholder: 'github_pat_…', autocapitalize: 'off', autocomplete: 'off', spellcheck: 'false',
-      'aria-label': 'Token de GitHub', dataset: { fkey: 'token' }, on: { change: (e) => set({ sync: { token: e.target.value.trim(), lastError: null, lastPushHash: null } }) },
-    });
-    const eye = h('button', { class: 'icon-btn', type: 'button', 'aria-label': showToken ? 'Ocultar token' : 'Mostrar token', dataset: { fkey: 'eye' }, on: { click: () => { showToken = !showToken; refresh(); } } }, icon(showToken ? 'eyeOff' : 'eye'));
-
-    const subscribe = urls ? h('a', {
-      class: ['btn', 'btn-primary', 'btn-lg', 'btn-block', !(s.enabled && configured) && 'is-disabled'],
-      href: urls.webcal, 'aria-disabled': s.enabled && configured ? 'false' : 'true', dataset: { testid: 'webcal' },
-      on: { click: (e) => { if (!(s.enabled && configured)) { e.preventDefault(); ctx.toast('Primero activa y configura la sincronización.', { type: 'error' }); } } },
-    }, icon('calendar'), 'Suscribir en el iPhone') : null;
-
-    return h('section', { class: 'set-group', id: 'set-calendar' },
-      h('h2', { class: 'set-title' }, 'Calendario del iPhone'),
-      h('div', { class: 'card set-card' },
-        h('div', { class: 'set-intro' },
-          h('span', { class: 'set-intro-icon', 'aria-hidden': 'true' }, '📅'),
-          h('p', {}, 'Tus turnos aparecen en la app Calendario del iPhone, con avisos, y se actualizan solos.')),
-        row('Estado', h('span', { class: ['pill', statusCls], dataset: { testid: 'sync-status' } }, status), {
-          icon: 'cloud',
-          sub: s.lastError ? s.lastError : s.lastPushAt ? `Último envío: ${ago(s.lastPushAt, ctx.now())}` : configured ? 'Aún no se ha enviado nada' : 'Necesita el enlace de configuración',
-          cls: s.lastError ? 'has-error' : '',
-        }),
-        row('Publicar mis turnos', toggle('syncEnabled', Boolean(s.enabled), (v) => {
-          set({ sync: { enabled: v, lastError: null } });
-          if (v && configured) ctx.background?.syncNow({ manual: true });
-        }, 'Publicar mis turnos en el calendario'), { icon: 'refresh' }),
-        h('div', { class: 'set-actions' },
-          !configured ? h('button', { class: 'btn btn-primary btn-block', type: 'button', 'data-testid': 'setup-paste-open', on: { click: () => openPasteSetup(ctx) } }, icon('link'), 'Tengo un enlace de configuración') : null,
-          configured ? subscribe : null,
-          s.enabled && configured ? actionButton('push', 'Enviar ahora', 'upload', async () => {
-            const r = await ctx.background.syncNow({ manual: true, force: true });
-            ctx.toast(r?.message || 'Listo', { type: r?.ok ? 'ok' : 'error' });
-          }) : null)),
-      details('guide-cal', 'Cómo suscribirte (paso a paso)',
-        steps(
-          ['Toca ', h('b', {}, '«Suscribir en el iPhone»'), '.'],
-          ['El iPhone pregunta si quieres suscribirte: toca ', h('b', {}, '«Suscribirse»'), '.'],
-          ['Si quieres, cambia el nombre a «Turnos» y elige el color naranja.'],
-          [h('b', {}, 'Muy importante: '), 'desactiva ', h('b', {}, '«Eliminar alertas»'), ' («Remove Alerts»). Si no, el iPhone borra los avisos de tus turnos.'],
-          ['Toca ', h('b', {}, '«OK»'), '. En unos minutos verás tus turnos en la app Calendario.']),
-        h('p', { class: 'hint' }, 'Otra forma: Ajustes del iPhone → Calendario → Cuentas → Añadir cuenta → Otra → «Añadir calendario suscrito», y pega este enlace:'),
-        urls ? h('div', { class: 'copy-line' },
-          h('code', {}, urls.https),
-          h('button', { class: 'btn btn-tinted btn-sm', type: 'button', on: { click: async () => ctx.toast(await copyText(urls.https) ? 'Enlace copiado' : 'No se pudo copiar', { type: 'ok' }) } }, icon('copy'), 'Copiar')) : null,
-        h('p', { class: 'hint' }, 'El calendario se actualiza solo (más o menos cada hora). Si cambias un turno aquí, aparece allí al rato.')),
-      details('setup-cal', 'Configuración (para quien te ayuda)',
-        h('p', { class: 'hint' }, 'Se necesita un repositorio público de GitHub y un token «fine-grained» con permiso Contents: Read and write solo en ese repositorio. Lo más fácil: enviar a este teléfono un enlace de configuración.'),
-        h('div', { class: 'field-row' },
-          h('label', { class: 'field' }, h('span', { class: 'label' }, 'Usuario'), owner),
-          h('label', { class: 'field' }, h('span', { class: 'label' }, 'Repositorio'), repo)),
-        h('div', { class: 'field' }, h('span', { class: 'label' }, 'Token'), h('div', { class: 'input-with-btn' }, token, eye)),
-        h('div', { class: 'btn-row' },
-          h('button', { class: 'btn btn-secondary', type: 'button', on: { click: () => openPasteSetup(ctx) } }, icon('link'), 'Pegar enlace'),
-          actionButton('test', 'Probar conexión', 'link', async () => {
-            const r = await testConnection(store.get().settings.sync);
-            ctx.toast(r.message, { type: r.ok ? 'ok' : 'error', duration: 6000 });
-            if (r.ok && r.private) ctx.toast('Ojo: el repositorio es privado. El iPhone solo puede suscribirse a uno público.', { type: 'error', duration: 8000 });
-          }),
-          configured ? h('button', {
-            class: 'btn btn-secondary', type: 'button',
-            on: { click: async () => {
-              const link = buildSetupLink(location.href, store.get().settings.sync);
-              const ok = await copyText(link);
-              ctx.toast(ok ? 'Enlace de configuración copiado. ¡Contiene el token: envíalo solo a Mauricio!' : 'No se pudo copiar', { type: ok ? 'ok' : 'error', duration: 7000 });
-            } },
-          }, icon('copy'), 'Copiar enlace de configuración') : null)),
-      h('div', { class: 'card set-card' },
-        row('Archivo .ics', actionButton('ics', 'Exportar', 'share', async () => {
-          const res = await shareOrDownload('turnos.ics', buildICS(store.get(), { now: ctx.now() }), 'text/calendar');
-          if (res === 'downloaded') ctx.toast('Archivo turnos.ics descargado', { type: 'ok' });
-        }, 'btn-tinted btn-sm'), { icon: 'download', sub: 'Para importar una vez (no se actualiza)' })));
-  }
-
-  function ntfy(state) {
-    const n = state.settings.ntfy;
-    const next = Object.entries(n.scheduled || {}).filter(([k, v]) => k !== 'turnos-keepalive' && new Date(v.at) > ctx.now())
-      .map(([, v]) => new Date(v.at)).sort((a, b) => a - b)[0];
-    const topicInput = h('input', {
-      class: 'input input-mono', value: n.topic || '', placeholder: 'turnos-mauricio-…', autocapitalize: 'off', autocomplete: 'off', spellcheck: 'false',
-      'aria-label': 'Tema de ntfy', dataset: { fkey: 'topic' }, on: { change: (e) => set({ ntfy: { topic: e.target.value.trim().replace(/\s+/g, '-'), lastError: null } }) },
-    });
-    const server = h('input', { class: 'input', value: n.server || 'https://ntfy.sh', 'aria-label': 'Servidor de ntfy', autocapitalize: 'off', spellcheck: 'false', dataset: { fkey: 'ntfyServer' }, on: { change: (e) => set({ ntfy: { server: e.target.value.trim() || 'https://ntfy.sh' } }) } });
-    let status;
-    if (!n.enabled) status = h('span', { class: 'pill pill-muted' }, 'Desactivado');
-    else if (n.lastError) status = h('span', { class: 'pill pill-alert' }, 'Con problemas');
-    else status = h('span', { class: 'pill pill-ok' }, 'Activado');
-    return h('section', { class: 'set-group', id: 'set-ntfy' },
-      h('h2', { class: 'set-title' }, 'Notificaciones con ntfy'),
-      h('div', { class: 'card set-card' },
-        h('div', { class: 'set-intro' },
-          h('span', { class: 'set-intro-icon', 'aria-hidden': 'true' }, '🔔'),
-          h('p', {}, 'Opcional: avisos como notificaciones con la app gratuita «ntfy». No necesitas cuenta.')),
-        row('Usar ntfy', toggle('ntfyEnabled', Boolean(n.enabled), (v) => {
-          const patch = { ntfy: { enabled: v, lastError: null } };
-          if (v && !store.get().settings.ntfy.topic) patch.ntfy.topic = randomTopic();
-          set(patch);
-          ctx.background?.ntfyNow({ manual: true });
-        }, 'Usar ntfy'), { icon: 'bell' }),
-        row('Estado', status, { sub: n.lastError || (n.enabled ? (next ? `Próximo aviso: ${dateTime(next.toISOString())}` : 'No hay avisos en los próximos 3 días') : ''), cls: n.lastError ? 'has-error' : '' }),
-        h('div', { class: 'set-block' },
-          h('span', { class: 'label' }, 'Tu tema (como una contraseña: no lo compartas)'),
-          h('div', { class: 'input-with-btn' }, topicInput,
-            h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Copiar tema', on: { click: async () => ctx.toast(await copyText(store.get().settings.ntfy.topic) ? 'Tema copiado' : 'No se pudo copiar', { type: 'ok' }) } }, icon('copy'))),
-          h('div', { class: 'btn-row' },
-            h('button', { class: 'btn btn-secondary btn-sm', type: 'button', on: { click: async () => {
-              if (store.get().settings.ntfy.topic) {
-                const ok = await confirmDialog({ title: '¿Crear un tema nuevo?', text: 'Tendrás que suscribirte otra vez en la app ntfy con el tema nuevo.', ok: 'Crear nuevo' });
-                if (!ok) return;
-              }
-              set({ ntfy: { topic: randomTopic(), lastError: null } });
-            } } }, icon('refresh'), 'Generar tema'),
-            actionButton('ntfyTest', 'Enviar prueba', 'bell', async () => {
-              const r = await testNtfy(store.get().settings.ntfy);
-              ctx.toast(r.message, { type: r.ok ? 'ok' : 'error', duration: 6000 });
-            }, 'btn-tinted btn-sm')))),
-      details('guide-ntfy', 'Cómo activarlo (paso a paso)',
-        steps(
-          ['Instala la app gratuita ', h('b', {}, '«ntfy»'), ' desde la App Store.'],
-          ['Ábrela y toca el botón ', h('b', {}, '«+»'), ' (arriba).'],
-          ['Escribe tu tema: ', h('code', { class: 'topic-code' }, n.topic || '(pulsa «Generar tema»)'), '.'],
-          ['Toca ', h('b', {}, '«Subscribe»'), ' y permite las notificaciones.'],
-          ['Vuelve aquí y toca ', h('b', {}, '«Enviar prueba»'), '. ¡Te debería llegar un aviso!']),
-        h('p', { class: 'hint' }, 'ntfy programa los avisos con hasta 3 días de antelación. Abre Turnos de vez en cuando para que siempre estén al día (te lo recordaremos).'),
-        h('label', { class: 'field' }, h('span', { class: 'label' }, 'Servidor (avanzado)'), server)));
-  }
-
-  function backup(state) {
-    const s = state.settings.sync;
+  // ---------- 4. Copia de seguridad ----------
+  function backup() {
     const fileInput = h('input', {
-      type: 'file', accept: 'application/json,.json', class: 'visually-hidden', tabindex: '-1', 'data-testid': 'import-file',
+      type: 'file', accept: 'application/json,.json', class: 'visually-hidden', tabindex: '-1', 'data-testid': 'import-file', id: 'import-file-input',
       on: { change: async () => {
         const f = fileInput.files[0];
         fileInput.value = '';
-        if (f) await importText(await f.text());
+        if (f) await importText(await f.text(), { from: 'del archivo' });
       } },
     });
     return group('Copia de seguridad', [
@@ -297,94 +232,307 @@ export function createSettings(ctx) {
         const json = exportBackup(store.get(), { now: ctx.now() });
         const res = await shareOrDownload(`turnos-mauricio-${toKey(ctx.now())}.json`, json, 'application/json');
         if (res === 'downloaded') ctx.toast('Copia descargada', { type: 'ok' });
-      }, 'btn-tinted btn-sm'), { icon: 'download', sub: 'Turnos y ajustes en un archivo' }),
-      row('Importar copia', h('label', { class: 'btn btn-tinted btn-sm', role: 'button', tabindex: '0', on: { keydown: (e) => { if (e.key === 'Enter') fileInput.click(); } } }, icon('upload'), 'Importar', fileInput),
-        { icon: 'upload', sub: 'Reemplaza los datos actuales' }),
-      s.owner && s.repo && s.token ? row('Restaurar desde GitHub', actionButton('pull', 'Restaurar', 'cloud', async () => {
-        try {
-          const json = await pullBackup(store.get().settings.sync);
-          await importText(json, 'GitHub');
-        } catch (e) {
-          ctx.toast(e.message || 'No se pudo descargar la copia.', { type: 'error' });
-        }
-      }, 'btn-tinted btn-sm'), { icon: 'cloud', sub: 'La última copia enviada' }) : null,
-    ]);
+      }, 'btn-tinted btn-sm'), { icon: 'download', sub: 'Tus turnos y ajustes en un archivo' }),
+      row('Importar copia', h('label', { class: 'btn btn-tinted btn-sm', for: 'import-file-input', role: 'button', tabindex: '0', on: { keydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInput.click(); } } } }, icon('upload'), 'Importar'),
+        { icon: 'upload', sub: 'Reemplaza los datos de este teléfono (se puede deshacer)' }),
+      fileInput,
+    ], { id: 'set-backup', footer: 'La copia no lleva la conexión del calendario: en otro teléfono, después de importarla, pega otra vez el enlace.' });
   }
 
-  async function importText(text, from = 'el archivo') {
-    let next;
+  // Importar (archivo o copia de internet): vista previa, confirmación, copia local de seguridad y «Deshacer»
+  async function importText(text, { from = 'del archivo', savedAt = null } = {}) {
+    const now = ctx.now();
+    let force = false;
+    let preview;
     try {
-      next = importBackup(store.get(), text, { now: ctx.now() });
+      preview = importBackup(store.get(), text, { now });
     } catch (e) {
-      ctx.toast(e.message, { type: 'error', duration: 6000 });
-      return;
+      if (e?.code !== 'EMPTY_BACKUP') { ctx.toast(e.message, { type: 'error', duration: 7000 }); return; }
+      const ok = await confirmDialog({
+        icon: '⚠️', title: 'Esa copia está vacía', danger: true,
+        text: 'No tiene ningún día con turnos. Si la importas, este teléfono se queda sin turnos.',
+        ok: 'Importar igualmente', cancel: 'No importar',
+      });
+      if (!ok) return;
+      force = true;
+      try { preview = importBackup(store.get(), text, { now, force }); } catch (e2) { ctx.toast(e2.message, { type: 'error' }); return; }
     }
-    const n = Object.keys(next.days).length;
+    const n = Object.keys(preview.days).length;
+    const localDays = store.get().days || {};
+    const local = Object.keys(localDays).length;
+    let at = savedAt;
+    if (!at) { try { at = JSON.parse(text)?.exportedAt || null; } catch { at = null; } }
+    const newestLocal = Object.values(localDays).map((d) => d?.updatedAt || '').sort().pop() || '';
+    const localNewer = Boolean(at && newestLocal && newestLocal > at);
     const ok = await confirmDialog({
-      icon: '📥', title: '¿Restaurar la copia?',
-      text: `La copia de ${from} tiene ${n} ${n === 1 ? 'día' : 'días'} con turnos. Reemplazará los datos de este teléfono.`,
-      ok: 'Restaurar', cancel: 'Cancelar',
+      icon: '📥', title: '¿Reemplazar con esta copia?', danger: true,
+      text: `La copia ${from}${at ? ` (del ${dateTime(at)})` : ''} tiene ${plural(n, 'día', 'días')} con turnos; este teléfono tiene ${local}. `
+        + `Los datos de este teléfono se reemplazarán.${localNewer ? ' Ojo: aquí hay cambios más nuevos que la copia.' : ''}`,
+      ok: 'Reemplazar', cancel: 'Cancelar',
     });
     if (!ok) return;
-    store.set(() => next);
-    ctx.toast(`Copia restaurada: ${n} días`, { type: 'ok' });
-  }
-
-  function install() {
-    if (isStandalone()) {
-      return group('Pantalla de inicio', [row('Instalada', h('span', { class: 'pill pill-ok' }, '✓'), { icon: 'phone', sub: 'La app ya está en tu pantalla de inicio.' })]);
+    const backupKey = saveBeforeImport(store.get(), ls, { now: ctx.now() });
+    if (!backupKey && !(await confirmDialog({
+      title: 'No se podrá deshacer', text: 'No hay espacio para guardar una copia de lo actual: no se podrá deshacer. ¿Importar igualmente?',
+      ok: 'Importar', cancel: 'Cancelar', danger: true,
+    }))) return;
+    try {
+      store.set((s) => importBackup(s, text, { now: ctx.now(), force }));
+    } catch (e) {
+      ctx.toast(e.message || 'No se pudo importar la copia.', { type: 'error' });
+      return;
     }
-    return h('section', { class: 'set-group', id: 'set-install' },
-      h('h2', { class: 'set-title' }, 'Añadir a pantalla de inicio'),
-      h('div', { class: 'card set-card guide-card' },
-        steps(
-          [isIOS() ? 'Abre esta página en ' : 'En el iPhone, abre esta página en ', h('b', {}, 'Safari'), '.'],
-          ['Toca el botón ', h('b', {}, 'Compartir'), ' ', shareIcon(), ' (abajo en la pantalla).'],
-          ['Desliza hacia abajo y toca ', h('b', {}, '«Añadir a pantalla de inicio»'), ' ', icon('addSquare', 'icon icon-inline')],
-          ['Toca ', h('b', {}, '«Añadir»'), '. Ya tienes el icono naranja «Turnos».']),
-        h('p', { class: 'hint' }, 'Importante: los datos de Safari y los de la app instalada están separados. Usa siempre el icono de la pantalla de inicio.')));
+    ctx.toast(`Copia restaurada: ${plural(n, 'día', 'días')}`, {
+      type: 'ok', duration: 10000,
+      action: backupKey ? { label: 'Deshacer', run: () => undo(backupKey) } : undefined,
+    });
   }
 
+  function undo(key) {
+    const prev = undoImport(ls, store.get(), { now: new Date(), key });
+    if (!prev) return; // segundo toque: ya no hay copia
+    store.set(() => prev);
+    ctx.toast('Listo: todo está como antes', { type: 'ok' });
+  }
+
+  // ---------- 5. Instalar ----------
+  function install(state) {
+    if (isStandalone()) return null;
+    const hasDays = Object.keys(state.days || {}).length > 0;
+    return h('section', { class: 'set-group', id: 'set-install' },
+      h('h2', { class: 'set-title' }, 'Instalar en la pantalla de inicio'),
+      h('div', { class: 'card set-card guide-card' },
+        installSteps(),
+        h('p', { class: 'hint' }, 'Importante: los datos de Safari y los de la app instalada están separados. Usa siempre el icono de la pantalla de inicio.'),
+        hasDays ? h('p', { class: 'hint' }, 'Para pasar tus turnos de aquí a la app: «Exportar» en Copia de seguridad, y después «Importar» dentro de la app.') : null));
+  }
+
+  // ---------- 6. Opciones avanzadas (plegadas) ----------
+  function advanced(state) {
+    const s = state.settings.sync;
+    const n = state.settings.ntfy;
+    const f = form || { owner: s.owner || '', repo: s.repo || '', branch: s.branch || '', token: s.token || '' };
+    const edit = (k) => (e) => { form = { ...(form || f), [k]: e.target.value.trim() }; };
+    const input = (k, label, extra = {}) => h('input', {
+      class: 'input', value: f[k], autocapitalize: 'off', autocomplete: 'off', spellcheck: 'false', 'aria-label': label,
+      dataset: { fkey: `gh-${k}` }, on: { input: edit(k) }, ...extra,
+    });
+    const token = input('token', 'Token de GitHub', { type: showToken ? 'text' : 'password', placeholder: 'github_pat_…', class: 'input input-token' });
+    const eye = h('button', { class: 'icon-btn', type: 'button', 'aria-label': showToken ? 'Ocultar token' : 'Mostrar token', dataset: { fkey: 'eye' }, on: { click: () => { showToken = !showToken; refresh(); } } }, icon(showToken ? 'eyeOff' : 'eye'));
+    const formCfg = () => normalizeSyncConfig({ ...(form || f) });
+    const readOnly = isReadOnlyDevice(s);
+    const canLink = s.enabled && isSyncKey(s.key) && !readOnly && Boolean(s.lastPushAt || s.lastPullAt);
+
+    const tech = s.enabled ? h('ul', { class: 'tech-list' },
+      h('li', {}, h('span', {}, 'Este dispositivo'), h('code', {}, s.deviceId || '—')),
+      h('li', {}, h('span', {}, 'Publica'), h('span', {}, !s.publisher ? '—' : s.publisher === s.deviceId ? 'este dispositivo' : `otro (${s.publisher})`)),
+      h('li', {}, h('span', {}, 'Copia (rev)'), h('span', {}, String(s.baseRev || 0))),
+      h('li', {}, h('span', {}, 'Último envío'), h('span', {}, s.lastPushAt ? dateTime(s.lastPushAt) : '—')),
+      h('li', {}, h('span', {}, 'Última lectura'), h('span', {}, s.lastPullAt ? dateTime(s.lastPullAt) : '—')),
+      s.lastErrorDetail || s.lastError ? h('li', { class: 'tech-error' }, h('span', {}, 'Último error'), h('span', {}, `${s.lastErrorCode || ''} ${s.lastErrorDetail || s.lastError}`.trim())) : null) : null;
+
+    const ghCard = h('div', { class: 'card set-card adv-card', id: 'set-github' },
+      h('h3', { class: 'adv-title' }, 'Conexión con GitHub'),
+      h('p', { class: 'hint' }, 'Un repositorio público solo para datos (no el de la app) y un token «fine-grained» con permiso Contents: Read and write solo en ese repositorio. Lo más fácil para Mauricio: enviarle un enlace con «Crear enlace para Mauricio».'),
+      h('div', { class: 'field-row' },
+        h('label', { class: 'field' }, h('span', { class: 'label' }, 'Usuario'), input('owner', 'Usuario de GitHub', { placeholder: 'usuario' })),
+        h('label', { class: 'field' }, h('span', { class: 'label' }, 'Repositorio'), input('repo', 'Repositorio', { placeholder: 'mauricio-datos' }))),
+      h('label', { class: 'field' }, h('span', { class: 'label' }, 'Rama (vacía = la principal)'), input('branch', 'Rama', { placeholder: '' })),
+      h('div', { class: 'field' }, h('span', { class: 'label' }, 'Token'), h('div', { class: 'input-with-btn' }, token, eye)),
+      h('div', { class: 'btn-row' },
+        actionButton('test', 'Probar', 'link', async () => {
+          const cfg = formCfg();
+          if (!cfg) { ctx.toast('Revisa los datos: usuario, repositorio, rama o token no válidos.', { type: 'error' }); return; }
+          const r = await testConnection(cfg);
+          ctx.toast(r.ok ? r.message : `${r.message} ${r.detail || ''}`.trim(), { type: r.ok ? 'ok' : 'error', duration: 7000 });
+          if (r.ok && r.private) ctx.toast('Ojo: el repositorio es privado. El iPhone solo puede suscribirse a uno público.', { type: 'error', duration: 8000 });
+          if (r.ok && r.warning) ctx.toast(r.warning, { type: 'error', duration: 9000 });
+        }, 'btn-secondary btn-sm'),
+        actionButton('connect', 'Guardar y conectar', 'cloud', async () => {
+          const cfg = formCfg();
+          if (!cfg) { ctx.toast('Revisa los datos: usuario, repositorio, rama o token no válidos.', { type: 'error' }); return; }
+          const ok = await runSetup(ctx, cfg, { confirm: false });
+          if (ok) form = null;
+        }, 'btn-primary btn-sm')),
+      tech,
+      s.enabled ? h('div', { class: 'btn-row' },
+        actionButton('push', 'Actualizar el calendario ahora', 'upload', () => ctx.background.runSync({ manual: true, force: true }), 'btn-secondary btn-sm'),
+        canLink ? h('button', {
+          class: 'btn btn-tinted btn-sm', type: 'button', 'data-testid': 'make-link',
+          on: { click: async () => {
+            const link = buildSetupLink(location.href, store.get().settings.sync);
+            const ok = await copyText(link);
+            ctx.toast(ok ? 'Enlace copiado. Lleva la clave y el token: envíalo solo a Mauricio.' : 'No se pudo copiar', { type: ok ? 'ok' : 'error', duration: 8000 });
+          } },
+        }, icon('copy'), 'Crear enlace para Mauricio') : null,
+        h('button', {
+          class: 'btn btn-danger-plain btn-sm', type: 'button',
+          on: { click: async () => {
+            const ok = await confirmDialog({ title: '¿Desconectar el calendario?', text: 'Este dispositivo dejará de leer y de publicar. El calendario de internet no se borra.', ok: 'Desconectar', danger: true });
+            if (ok) set({ sync: { enabled: false } });
+          } },
+        }, 'Desconectar')) : null);
+
+    const placesCard = h('div', { class: 'card set-card adv-card' },
+      h('h3', { class: 'adv-title' }, 'Calendario publicado'),
+      switchRow('Publicar lugares en el calendario', 'places', Boolean(s.publishPlaces), (v) => set({ sync: { publishPlaces: v } }), {
+        sub: 'El calendario es público: quien tenga el enlace ve los horarios. Con esto también verá los lugares (F51, S31…). Las notas nunca se publican.',
+      }),
+      row('Archivo .ics', actionButton('ics', 'Exportar', 'share', async () => {
+        const res = await shareOrDownload('turnos.ics', buildICS(store.get(), { now: ctx.now() }), 'text/calendar');
+        if (res === 'downloaded') ctx.toast('Archivo turnos.ics descargado', { type: 'ok' });
+      }, 'btn-tinted btn-sm'), { sub: 'Para importar una sola vez (no se actualiza)' }));
+
+    const next = Object.entries(n.scheduled || {}).filter(([k, v]) => k !== 'turnos-keepalive' && new Date(v.at) > ctx.now())
+      .map(([, v]) => new Date(v.at)).sort((a, b) => a - b)[0];
+    const topicInput = h('input', {
+      class: 'input input-mono', value: n.topic || '', placeholder: 'turnos-mauricio-…', autocapitalize: 'off', autocomplete: 'off', spellcheck: 'false',
+      'aria-label': 'Tema de ntfy', dataset: { fkey: 'topic' }, on: { change: (e) => set({ ntfy: { topic: e.target.value.trim().replace(/\s+/g, '-'), lastError: null } }) },
+    });
+    const server = h('input', { class: 'input', value: n.server || 'https://ntfy.sh', 'aria-label': 'Servidor de ntfy', autocapitalize: 'off', spellcheck: 'false', dataset: { fkey: 'ntfyServer' }, on: { change: (e) => set({ ntfy: { server: e.target.value.trim() || 'https://ntfy.sh' } }) } });
+    const ntfyCard = h('div', { class: 'card set-card adv-card', id: 'set-ntfy' },
+      h('h3', { class: 'adv-title' }, 'Notificaciones con ntfy (opcional)'),
+      h('p', { class: 'hint' }, 'Avisos como notificaciones con la app gratuita «ntfy», sin cuenta. Útil para cambios de última hora.'),
+      switchRow('Usar ntfy', 'ntfyEnabled', Boolean(n.enabled), (v) => {
+        const patch = { ntfy: { enabled: v, lastError: null } };
+        if (v && !store.get().settings.ntfy.topic) patch.ntfy.topic = randomTopic();
+        set(patch);
+        ctx.background?.ntfyNow({ manual: true });
+      }, { sub: n.lastError ? n.lastError : n.enabled ? (next ? `Próximo aviso: ${dateTime(next.toISOString())}` : 'No hay avisos en los próximos 3 días') : 'Desactivado', cls: n.lastError ? 'has-error' : '' }),
+      n.enabled || n.topic ? h('div', { class: 'set-block' },
+        h('span', { class: 'label' }, 'Tema (como una contraseña: no lo compartas)'),
+        h('div', { class: 'input-with-btn' }, topicInput,
+          h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Copiar tema', on: { click: async () => ctx.toast(await copyText(store.get().settings.ntfy.topic) ? 'Tema copiado' : 'No se pudo copiar', { type: 'ok' }) } }, icon('copy'))),
+        h('div', { class: 'btn-row' },
+          h('button', { class: 'btn btn-secondary btn-sm', type: 'button', on: { click: async () => {
+            if (store.get().settings.ntfy.topic) {
+              const ok = await confirmDialog({ title: '¿Crear un tema nuevo?', text: 'Habrá que suscribirse otra vez en la app ntfy con el tema nuevo.', ok: 'Crear nuevo' });
+              if (!ok) return;
+            }
+            set({ ntfy: { topic: randomTopic(), lastError: null } });
+          } } }, icon('refresh'), 'Tema nuevo'),
+          actionButton('ntfyTest', 'Enviar prueba', 'bell', async () => {
+            const r = await testNtfy(store.get().settings.ntfy);
+            ctx.toast(r.message, { type: r.ok ? 'ok' : 'error', duration: 6000 });
+          }, 'btn-tinted btn-sm')),
+        details('guide-ntfy', 'Cómo activarlo (paso a paso)',
+          steps(
+            ['Instala la app gratuita ', h('b', {}, '«ntfy»'), ' desde la App Store.'],
+            ['Ábrela y toca ', h('b', {}, '«+»'), ' (arriba).'],
+            ['Escribe el tema: ', h('code', { class: 'topic-code' }, n.topic || '(toca «Tema nuevo»)'), '.'],
+            ['Toca ', h('b', {}, '«Subscribe»'), ' (suscribirse) y permite las notificaciones.'],
+            ['Vuelve aquí y toca ', h('b', {}, '«Enviar prueba»'), '. Debería llegarte un aviso.']),
+          h('p', { class: 'hint' }, 'ntfy programa los avisos con hasta 3 días de antelación: hay que abrir Turnos de vez en cuando.'),
+          h('label', { class: 'field' }, h('span', { class: 'label' }, 'Servidor'), server))) : null);
+
+    const copies = listBeforeImport(ls);
+    const restoreCard = h('div', { class: 'card set-card adv-card', id: 'set-restore' },
+      h('h3', { class: 'adv-title' }, 'Restaurar'),
+      isConfigured(s) && s.enabled ? [
+        row('Juntar con la copia de internet', actionButton('pull', 'Juntar', 'cloud', async () => {
+          const r = await ctx.syncQueue.pull();
+          if (r.ok) ctx.toast(r.pulledDays?.length ? `Listo: llegaron ${plural(r.pulledDays.length, 'día', 'días')} de la copia de internet.` : 'Listo: no había nada nuevo en la copia de internet.', { type: 'ok' });
+          else ctx.toast(r.error.message, { type: 'error', duration: 7000 });
+        }, 'btn-tinted btn-sm'), { sub: 'Recomendado: no se pierde nada de este teléfono' }),
+        row('Reemplazar con la copia de internet', actionButton('replace', 'Reemplazar', 'download', async () => {
+          let got;
+          try { got = await fetchRemoteBackup(store.get().settings.sync); } catch (e) { ctx.toast(e.message || 'No se pudo descargar la copia.', { type: 'error', duration: 7000 }); return; }
+          await importText(JSON.stringify(got.data), { from: 'de internet', savedAt: got.meta?.savedAt || null });
+        }, 'btn-tinted btn-sm'), { sub: 'Este teléfono queda igual que la copia (se puede deshacer)' }),
+      ] : h('p', { class: 'hint' }, 'Con el calendario conectado puedes recuperar aquí la copia de internet.'),
+      copies.map((c) => row(`Copia de antes de importar`, h('button', {
+        class: 'btn btn-tinted btn-sm', type: 'button',
+        on: { click: async () => {
+          const ok = await confirmDialog({ title: '¿Volver a esta copia?', text: `Copia del ${dateTime(c.at)} con ${plural(c.days, 'día', 'días')}. Reemplaza los datos de este teléfono.`, ok: 'Volver a esta copia', danger: true });
+          if (ok) undo(c.key);
+        } },
+      }, 'Recuperar'), { sub: `${dateTime(c.at)} · ${plural(c.days, 'día', 'días')}` })));
+
+    const dangerCard = h('div', { class: 'card set-card adv-card' },
+      h('h3', { class: 'adv-title' }, 'Borrar'),
+      row('Borrar todos los datos', h('button', { class: 'btn btn-danger btn-sm', type: 'button', 'data-testid': 'wipe', on: { click: wipe } }, icon('trash'), 'Borrar'),
+        { sub: 'Turnos, códigos y ajustes de este dispositivo. La copia de internet no se toca.' }));
+
+    return h('details', { class: 'advanced', id: 'set-advanced', dataset: { fkey: 'advanced' }, 'data-testid': 'advanced' },
+      h('summary', {}, h('span', { class: 'adv-sum-main' }, h('span', { class: 'adv-sum-title' }, 'Opciones avanzadas'), h('span', { class: 'adv-sum-sub' }, 'Para quien te ayuda con la app')), icon('chevronDown', 'icon chev')),
+      h('div', { class: 'advanced-body' }, ghCard, placesCard, ntfyCard, restoreCard, dangerCard));
+  }
+
+  async function wipe() {
+    const ok1 = await confirmDialog({
+      icon: '🗑️', title: '¿Borrar todos los datos?', danger: true,
+      text: 'Se borran tus turnos, códigos y ajustes de este dispositivo (también la conexión del calendario). La copia de internet no se toca.',
+      ok: 'Continuar', cancel: 'Cancelar',
+    });
+    if (!ok1) return;
+    const ok2 = await confirmDialog({ title: '¿Seguro?', text: 'Este dispositivo se quedará vacío, como recién instalado.', ok: 'Sí, borrar todo', cancel: 'No, cancelar', danger: true });
+    if (!ok2) return;
+    // Avisos de ntfy ya programados: se cancelan antes (después ya no se sabría cuáles eran)
+    const n = store.get().settings.ntfy;
+    if (n.enabled || Object.keys(n.scheduled || {}).length) {
+      set({ ntfy: { enabled: false } });
+      try { await ctx.background?.ntfyNow(); } catch { /* sin red: no pasa nada */ }
+    }
+    const key = saveBeforeImport(store.get(), ls, { now: ctx.now() });
+    try { ls?.removeItem(DRAFT_KEY); } catch { /* nada */ }
+    form = null;
+    store.set(() => updateSettings(createDefaultState(), { onboardingDone: true }));
+    ctx.toast('Datos borrados', { duration: 10000, action: key ? { label: 'Deshacer', run: () => undo(key) } : undefined });
+    window.scrollTo(0, 0);
+  }
+
+  // ---------- 7. Acerca de ----------
   function about() {
     return group('Acerca de', [
-      row('Turnos de Mauricio', h('span', { class: 'muted' }, `v${ctx.version}`), { icon: 'heart', sub: 'Tus datos se guardan solo en este teléfono (y en tu GitHub si activas el calendario).' }),
+      row('Turnos de Mauricio', h('span', { class: 'muted' }, `v${ctx.version}`), { icon: 'heart' }),
+      h('p', { class: 'set-note' }, h('b', {}, 'Tus datos: '),
+        'se guardan en este teléfono. Si conectas el calendario, tus horarios se publican en internet: quien tenga el enlace puede verlos (sin notas; los lugares, solo si se activa). La copia completa va cifrada.'),
       h('button', { class: 'set-row set-row-btn', type: 'button', on: { click: () => showOnboarding(ctx, { again: true }) } },
         h('span', { class: 'set-icon si-sparkles', 'aria-hidden': 'true' }, icon('sparkles')),
         h('span', { class: 'set-row-main' }, h('span', { class: 'set-label' }, 'Ver la bienvenida otra vez')),
         h('span', { class: 'row-chevron', 'aria-hidden': 'true' }, icon('chevronRight'))),
-    ]);
+    ], { id: 'set-about' });
   }
 
   function render(state) {
     const s = state.settings;
-    setChildren(el, 
+    setChildren(el,
       h('header', { class: 'page-head' }, h('h1', { class: 'large-title' }, 'Ajustes')),
-      profile(s),
-      codes(state),
-      reminders(state),
+      banners(ctx, state, 'ajustes'),
       calendar(state),
-      ntfy(state),
-      backup(state),
-      install(),
+      codes(state),
+      contract(s),
+      reminders(state),
+      backup(),
+      install(state),
+      advanced(state),
       about(),
     );
+  }
+
+  function scrollToSection(section) {
+    requestAnimationFrame(() => {
+      const target = document.getElementById(`set-${section}`);
+      const adv = document.getElementById('set-advanced');
+      if (target && adv && adv.contains(target)) adv.open = true;
+      target?.scrollIntoView({ block: 'start' });
+    });
   }
 
   return {
     el,
     render,
+    // opts: { section: 'calendar' | 'codes' | 'advanced' | … } o { code }
     onShow(opts) {
       if (opts?.code) {
-        pendingCode = opts.code;
-        requestAnimationFrame(() => {
-          document.getElementById('set-codes')?.scrollIntoView({ block: 'start' });
-          const c = pendingCode;
-          pendingCode = null;
-          if (c && store.get().codes[c]) ctx.openCode(c);
-        });
+        const c = opts.code;
+        scrollToSection('codes');
+        requestAnimationFrame(() => ctx.openCode(c));
         return true;
       }
+      if (opts?.section) { scrollToSection(opts.section); return true; }
       return false;
     },
+    importText,
   };
 }

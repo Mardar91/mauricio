@@ -1,10 +1,11 @@
-// Entrada de la UI: crea el store, las pestañas, el service worker y las tareas de fondo.
-import { createStore, parseSetupLink, toKey } from './core/index.js';
-import { h, clear } from './ui/dom.js';
+// Entrada de la UI: crea el store y la cola de sincronización, las pestañas, el service worker y las
+// tareas de fondo.
+import { createStore, createSyncQueue, ensureSyncIdentity, parseSetupLink, toKey, updateSettings } from './core/index.js';
+import { h, clear, safeStorage } from './ui/dom.js';
 import { icon } from './ui/icons.js';
 import { toast } from './ui/toast.js';
-import { closeAllSheets, sheetsOpen } from './ui/sheet.js';
-import { confirmAndApplySetup } from './ui/setup.js';
+import { closeAllSheets, confirmDialog, sheetsOpen } from './ui/sheet.js';
+import { openSetupLink } from './ui/setup.js';
 import { createToday } from './ui/today.js';
 import { createCalendar } from './ui/calendar.js';
 import { createScan } from './ui/scan.js';
@@ -17,7 +18,7 @@ import { createBackground } from './ui/background.js';
 import { attentionCount } from './ui/attention.js';
 
 // Debe coincidir con VERSION en sw.js
-export const APP_VERSION = '1.1.0';
+export const APP_VERSION = '1.2.0';
 
 const TABS = [
   { id: 'hoy', label: 'Hoy', icon: 'today' },
@@ -27,13 +28,24 @@ const TABS = [
   { id: 'ajustes', label: 'Ajustes', icon: 'settings' },
 ];
 
-const store = createStore();
+const storage = safeStorage();
+// Último fallo al guardar (cuota llena, almacenamiento bloqueado): banner rojo hasta que vuelva a ir bien
+let saveError = storage ? null : { code: 'NO_STORAGE' };
+const store = createStore(storage, {
+  onError: (e) => {
+    saveError = e;
+    console.warn('[store] no se pudo guardar', e?.code, e?.detail);
+  },
+});
+const syncQueue = createSyncQueue(store);
 const views = {};
 const scrollPos = {};
 let current = null;
+let swReg = null;
 
 const ctx = {
   store,
+  syncQueue,
   version: APP_VERSION,
   now: () => new Date(),
   today: () => toKey(new Date()),
@@ -42,6 +54,9 @@ const ctx = {
   openDay: (key, opts) => openDayEditor(ctx, key, opts),
   openCode: (code, opts) => openCodeEditor(ctx, code, opts),
   background: null,
+  saveError: () => saveError,
+  updateApp,
+  updateChrome,
 };
 
 function buildShell() {
@@ -92,11 +107,19 @@ function go(tab, opts) {
     if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
   }
   document.body.dataset.tab = tab;
+  updateChrome();
   const handled = v.onShow?.(opts, prev === tab);
   if (!handled) window.scrollTo(0, prev === tab ? 0 : (scrollPos[tab] || 0));
 }
 
+// Sin barra de pestañas mientras se revisa un escaneo (la barra de «Guardar» ocupa su sitio)
+function updateChrome() {
+  const focus = current === 'escanear' && views.escanear && views.escanear.mode !== 'home';
+  document.body.classList.toggle('focus-mode', Boolean(focus));
+}
+
 function rerender(state) {
+  if (saveError && store.saveOk() && storage) saveError = null;
   for (const [id, v] of Object.entries(views)) {
     if (id === current) renderKeepingFocus(v, state);
     else v.dirty = true;
@@ -126,6 +149,7 @@ function renderKeepingFocus(v, state) {
     }
   }
   window.scrollTo(0, y);
+  updateChrome();
 }
 
 function updateTabDot(state) {
@@ -133,23 +157,39 @@ function updateTabDot(state) {
   if (dot) dot.hidden = attentionCount(state, new Date()) === 0;
 }
 
-// Enlace #setup=… para configurar la sincronización (lo envía el desarrollador)
+// Enlace #setup=… (lo envía quien ayuda): se limpia la URL enseguida (lleva el token)
 async function handleSetupLink() {
   const hash = location.hash || '';
-  if (!/setup=/.test(hash)) return;
-  const sync = parseSetupLink(hash);
-  history.replaceState(null, '', location.pathname + location.search); // el token no se queda en la URL
-  if (!sync) {
-    toast('El enlace de configuración no es válido o está incompleto.', { type: 'error' });
-    return;
+  if (!/setup=/.test(hash)) return false;
+  const link = location.href;
+  const cfg = parseSetupLink(hash);
+  history.replaceState(null, '', location.pathname + location.search);
+  if (!cfg) {
+    toast('Ese enlace no sirve: no es válido o está incompleto. Pide que te lo envíen otra vez.', { type: 'error', duration: 7000 });
+    return false;
   }
-  await confirmAndApplySetup(ctx, sync);
+  return openSetupLink(ctx, cfg, link);
 }
+
+// «Actualizar» (banner de datos más nuevos): busca la versión nueva y recarga
+async function updateApp() {
+  try {
+    const reg = swReg || (await navigator.serviceWorker?.getRegistration?.());
+    await reg?.update?.();
+    if (reg?.waiting) {
+      updateRequested = true;
+      reg.waiting.postMessage({ type: 'SKIP_WAITING' });
+      return;
+    }
+  } catch { /* sin service worker */ }
+  location.reload();
+}
+
+let updateRequested = false;
 
 function registerSW() {
   if (!('serviceWorker' in navigator) || location.protocol === 'file:') return;
   // Solo se recarga cuando el usuario pide actualizar (no en la primera instalación)
-  let updateRequested = false;
   navigator.serviceWorker.addEventListener('controllerchange', () => {
     if (!updateRequested) return;
     updateRequested = false;
@@ -161,10 +201,24 @@ function registerSW() {
     offered = true;
     toast('Hay una nueva versión de la app.', {
       duration: 0,
-      action: { label: 'Actualizar', run: () => { updateRequested = true; worker.postMessage({ type: 'SKIP_WAITING' }); } },
+      action: {
+        label: 'Actualizar',
+        run: async () => {
+          // Lo que se está editando en una hoja (o una foto que se está leyendo) se perdería
+          const busy = sheetsOpen() || views.escanear?.mode === 'processing';
+          if (busy && !(await confirmDialog({
+            title: '¿Actualizar ahora?', text: 'Se cerrará lo que estás haciendo sin guardar. Puedes actualizar después.',
+            ok: 'Actualizar', cancel: 'Ahora no',
+          }))) { offered = false; return; }
+          ctx.background?.flush();
+          updateRequested = true;
+          worker.postMessage({ type: 'SKIP_WAITING' });
+        },
+      },
     });
   };
   navigator.serviceWorker.register('sw.js').then((reg) => {
+    swReg = reg;
     if (reg.waiting && navigator.serviceWorker.controller) offer(reg.waiting);
     reg.addEventListener('updatefound', () => {
       const w = reg.installing;
@@ -172,9 +226,11 @@ function registerSW() {
         if (w.state === 'installed' && navigator.serviceWorker.controller) offer(w);
       });
     });
-    // Busca actualizaciones al volver a la app
+    // Busca actualizaciones al volver a la app (y vuelve a ofrecer una que se aplazó)
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible') reg.update().catch(() => {});
+      if (document.visibilityState !== 'visible') return;
+      reg.update().catch(() => {});
+      if (reg.waiting && navigator.serviceWorker.controller) offer(reg.waiting);
     });
   }).catch(() => { /* sin service worker: la app funciona igual online */ });
 }
@@ -183,6 +239,7 @@ function registerSW() {
 function exposeTestHooks() {
   window.__turnosTest = {
     store,
+    syncQueue,
     go,
     version: APP_VERSION,
     injectScanResult: (result) => { go('escanear'); return views.escanear.showReview(result, { source: 'test' }); },
@@ -190,31 +247,49 @@ function exposeTestHooks() {
   };
 }
 
+// Al volver a la app: releer lo guardado (otra pestaña o la app pudo cambiarlo) y re-pintar
+function onReturn() {
+  store.refresh();
+  for (const v of Object.values(views)) v.dirty = true;
+  if (!sheetsOpen()) renderKeepingFocus(views[current], store.get());
+}
+
 function start() {
+  // Identidad de la sincronización antes de la primera petición (dispositivos ya conectados)
+  const s0 = store.get().settings.sync;
+  if (s0.enabled && !s0.deviceId) store.set((s) => ensureSyncIdentity(s, { key: false }));
+
   buildShell();
   store.subscribe(rerender);
   updateTabDot(store.get());
   ctx.background = createBackground(ctx);
+  ctx.background.onBusy(() => { if (current === 'ajustes' && !sheetsOpen()) renderKeepingFocus(views[current], store.get()); });
   exposeTestHooks();
   const state = store.get();
-  go('hoy');
+
+  // Un plan a medio revisar (la app se cerró o se actualizó): se sigue donde estaba
+  const draft = views.escanear.draftInfo?.();
+  if (draft && Date.now() - draft.at < 6 * 3600 * 1000 && !/setup=/.test(location.hash)) go('escanear');
+  else {
+    go('hoy');
+    if (draft) toast('Tienes un plan a medio revisar.', { action: { label: 'Seguir', run: () => go('escanear') }, duration: 8000 });
+  }
   document.documentElement.classList.add('ready');
 
   // Refresca la vista "Hoy" (cuenta atrás) cada 30 s
-  setInterval(() => { if (current === 'hoy' && !document.hidden) views.hoy.tick?.(); }, 30000);
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') {
-      for (const v of Object.values(views)) v.dirty = true;
-      if (!sheetsOpen()) renderKeepingFocus(views[current], store.get());
-    }
-  });
+  setInterval(() => { if (current === 'hoy' && !document.hidden && !sheetsOpen()) views.hoy.tick?.(); }, 30000);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') onReturn(); });
+  window.addEventListener('pageshow', (e) => { if (e.persisted) onReturn(); });
 
   navigator.storage?.persist?.().catch(() => {});
   registerSW();
 
   if (/setup=/.test(location.hash)) {
-    // Primero el enlace; después, si es la primera vez, la bienvenida
-    handleSetupLink().finally(() => { if (!store.get().settings.onboardingDone) showOnboarding(ctx); });
+    // Primero el enlace. Si se conectó, el propio enlace ya guio (y queda abierto el paso de suscribirse);
+    // si no, después la bienvenida
+    handleSetupLink().then((applied) => {
+      if (applied && !store.get().settings.onboardingDone) store.set((s) => updateSettings(s, { onboardingDone: true }));
+    }).catch((e) => console.error(e)).finally(() => { if (!store.get().settings.onboardingDone) showOnboarding(ctx); });
   } else if (!state.settings.onboardingDone) {
     showOnboarding(ctx);
   }
@@ -231,7 +306,7 @@ try {
   if (app) {
     app.innerHTML = '';
     app.append(h('div', { class: 'fatal' },
-      h('h1', {}, 'Algo ha fallado 😕'),
+      h('h1', {}, 'Algo falló 😕'),
       h('p', {}, 'Cierra la app y vuelve a abrirla. Tus turnos siguen guardados en el teléfono.'),
       h('button', { class: 'btn btn-primary', type: 'button', on: { click: () => location.reload() } }, 'Volver a intentar')));
   }

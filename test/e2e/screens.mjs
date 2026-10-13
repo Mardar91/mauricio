@@ -1,10 +1,14 @@
-// Capturas de todas las vistas (iPhone 390×844 @3x, claro y oscuro) en test/e2e/out/ para revisar el diseño.
-// También comprueba que nada se sale por los lados a 360 px.
+// Capturas de todas las vistas y estados (iPhone 390×844 @3x, claro y oscuro) en test/e2e/out/ para
+// revisar el diseño, y comprobación de que nada se sale por los lados a 360 px (con capturas w360-*).
 // Uso: node test/e2e/screens.mjs [--only nombre] [--theme light|dark] [--scale 3]
+import fs from 'node:fs';
 import path from 'node:path';
 import { chromium } from 'playwright';
 import { startServer } from '../tools/serve.mjs';
-import { NOW, OUT, core, demoState, ensureOut, findOverflow, iphoneContext, mockNetwork, preparePage } from './helpers.mjs';
+import {
+  KEY, NOW, OUT, OWNER, REPO, SYNC, TOKEN, core, demoState, ensureOut, fakeGitHub, findOverflow, iphoneContext, mockNetwork,
+  preparePage, seedRemote,
+} from './helpers.mjs';
 
 const args = process.argv.slice(2);
 const opt = (n, d) => { const i = args.indexOf(`--${n}`); return i >= 0 ? args[i + 1] : d; };
@@ -13,17 +17,22 @@ const themes = opt('theme', '') ? [opt('theme')] : ['light', 'dark'];
 const scale = Number(opt('scale', 3));
 
 ensureOut();
+if (!only) for (const f of fs.readdirSync(OUT)) if (f.endsWith('.png')) fs.rmSync(path.join(OUT, f));
 const server = await startServer(0);
 const APP = `${server.url}/docs/`;
 const PHOTO = path.join(process.cwd(), 'test/fotos/phone-2026-10-b.jpg');
+const PHOTO2 = path.join(process.cwd(), 'test/fotos/phone-2026-10-a.jpg');
 const browser = await chromium.launch({ args: ['--lang=es-ES'] });
 const problems = [];
 
-// Reconocedor lento de mentira para capturar el progreso
+// Reconocedor lento de mentira para capturar el progreso (y que después no lee nada)
 const SLOW_RECOGNIZER = `export async function recognize(input, o = {}) {
-  for (let i = 1; i <= 20; i++) { await new Promise((r) => setTimeout(r, 120)); o.onProgress?.(i / 20, i < 8 ? 'Buscando el mes…' : 'Leyendo los turnos…'); }
+  for (let i = 1; i <= 20; i++) { await new Promise((r) => setTimeout(r, 120)); o.onProgress?.(i / 20, i < 8 ? 'Buscando los días…' : 'Leyendo los turnos…'); }
   return { layout: 'unknown', month: null, year: null, days: [], warnings: [] };
 }
+export async function dispose() {}`;
+const OCR_FAIL = `export async function recognize() { return { layout: 'unknown', month: null, year: null, days: [], ocrFailed: true,
+  warnings: ['No se pudo iniciar el lector de texto. Comprueba la conexión a internet y vuelve a intentarlo.'] }; }
 export async function dispose() {}`;
 
 const FAKE_RESULT = {
@@ -42,6 +51,18 @@ const FAKE_RESULT = {
   ],
   warnings: [],
 };
+// Noviembre: mes sin leer, un día dudoso y días que no se pudieron leer
+const HARD_RESULT = {
+  layout: 'phone-list', month: null, year: null,
+  days: [
+    { day: 2, codes: ['F1', 'F51'], confidence: 0.95 },
+    { day: 3, codes: ['S1', 'S52'], confidence: 0.52 },
+    { day: 4, codes: ['N1', 'N51'], confidence: 0.94 },
+    { day: 7, codes: ['-'], confidence: 0.9 },
+  ],
+  unread: [6],
+  warnings: ['No pude leer el mes con seguridad: elígelo a mano.', 'No pude leer bien el día 5: revísalo a mano.'],
+};
 
 const scenarios = [];
 const scenario = (name, fn, opts = {}) => scenarios.push({ name, fn, opts });
@@ -53,30 +74,38 @@ async function snap(page, name, { full = false, theme } = {}) {
   return file;
 }
 
-async function open(context, { state, now = NOW } = {}) {
+// standalone: app instalada (por defecto); false = pestaña de Safari
+async function open(context, { state, now = NOW, standalone = true, gh, hash = '' } = {}) {
   const errors = [];
-  const page = await preparePage(context, { state, now, errors });
-  await mockNetwork(page);
-  await page.goto(APP);
-  await page.waitForSelector('.tabbar');
+  const page = await preparePage(context, { state, now, errors, standalone });
+  await mockNetwork(page, { gh });
+  await page.goto(APP + hash);
+  await page.waitForSelector('.tabbar', { state: 'attached' });
   await page.waitForTimeout(300);
   page.__errors = errors;
   return page;
 }
 
 const tab = (page, id) => page.click(`.tab[data-tab="${id}"]`);
+const sheet = (page) => page.waitForSelector('.sheet-wrap.open').then(() => page.waitForTimeout(400));
+const closeSheet = async (page) => { await page.keyboard.press('Escape'); await page.waitForTimeout(350); };
+const connected = (extra = {}) => demoState({ sync: true, ...extra });
+const setupHash = () => core.buildSetupLink(APP, { owner: OWNER, repo: REPO, branch: '', token: TOKEN, key: KEY }).slice(APP.length);
 
 scenario('onboarding', async (ctx, theme) => {
-  const page = await open(ctx, { state: null });
+  const page = await open(ctx, { state: null, standalone: false });
   await page.waitForSelector('.onboarding.open');
   await snap(page, '01-onboarding-1', { theme });
   await page.click('.ob-bottom .btn-primary');
-  await snap(page, '01-onboarding-2', { theme });
+  await snap(page, '01-onboarding-2-instalar', { theme });
   await page.click('.ob-bottom .btn-primary');
-  await snap(page, '01-onboarding-3', { theme });
+  await snap(page, '01-onboarding-3-avisos', { theme });
   await page.click('.ob-bottom .btn-primary');
   await page.waitForTimeout(400);
-  await snap(page, '02-escanear-tras-bienvenida', { theme });
+  await snap(page, '02-safari-hoy-vacio', { theme });
+  await page.click('[data-testid="banner-safari"] .banner-btn');
+  await sheet(page);
+  await snap(page, '02-safari-instalar', { theme });
   return page;
 });
 
@@ -88,21 +117,35 @@ scenario('hoy-vacio', async (ctx, theme) => {
 });
 
 scenario('hoy', async (ctx, theme) => {
-  const page = await open(ctx, { state: demoState() });
+  const page = await open(ctx, { state: connected() });
+  await page.waitForFunction(() => /al día/.test(document.querySelector('[data-testid="sync-line"]')?.textContent || ''), null, { timeout: 10000 });
   await snap(page, '04-hoy', { theme });
   await snap(page, '04-hoy-completo', { theme, full: true });
   return page;
 });
 
+scenario('hoy-safari', async (ctx, theme) => {
+  const page = await open(ctx, { state: demoState(), standalone: false });
+  await snap(page, '04-hoy-safari', { theme });
+  return page;
+});
+
 scenario('hoy-trabajando', async (ctx, theme) => {
-  const page = await open(ctx, { state: demoState({ sync: true }), now: new Date('2026-10-13T17:40:00+02:00') });
+  const page = await open(ctx, { state: connected(), standalone: false, now: new Date('2026-10-13T17:40:00+02:00') });
   await snap(page, '05-hoy-trabajando', { theme });
   return page;
 });
 
 scenario('hoy-noche', async (ctx, theme) => {
-  const page = await open(ctx, { state: demoState({ sync: true }), now: new Date('2026-10-16T19:05:00+02:00') });
+  const page = await open(ctx, { state: connected(), standalone: false, now: new Date('2026-10-16T19:05:00+02:00') });
   await snap(page, '05-hoy-libre-noche', { theme });
+  return page;
+});
+
+scenario('hoy-error', async (ctx, theme) => {
+  const page = await open(ctx, { state: connected(), gh: fakeGitHub({ status: 401 }) });
+  await page.waitForSelector('[data-testid="sync-line"].sync-alert', { timeout: 10000 });
+  await snap(page, '05-hoy-calendario-con-error', { theme });
   return page;
 });
 
@@ -113,8 +156,11 @@ scenario('calendario', async (ctx, theme) => {
   await page.evaluate(() => window.scrollTo(0, 0));
   await snap(page, '06-calendario-arriba', { theme });
   await snap(page, '06-calendario-completo', { theme, full: true });
-  for (let i = 0; i < 4; i++) await page.click('button[aria-label="Mes anterior"]');
+  for (let i = 0; i < 4; i++) await page.click('#view-calendario button[aria-label="Mes anterior"]');
   await snap(page, '07-calendario-junio', { theme, full: true });
+  await page.click('.today-btn');
+  for (let i = 0; i < 2; i++) await page.click('#view-calendario button[aria-label="Mes siguiente"]');
+  await snap(page, '07-calendario-mes-vacio', { theme });
   return page;
 });
 
@@ -122,7 +168,7 @@ scenario('editar-dia', async (ctx, theme) => {
   const page = await open(ctx, { state: demoState() });
   await tab(page, 'calendario');
   await page.click('.day-row[data-key="2026-10-15"]');
-  await page.waitForSelector('.sheet-wrap.open');
+  await sheet(page);
   await snap(page, '08-editar-dia', { theme });
   await page.evaluate(() => { const b = document.querySelector('.sheet-body'); b.scrollTop = b.scrollHeight; });
   await page.click('.de-history summary');
@@ -135,15 +181,38 @@ scenario('editar-dia', async (ctx, theme) => {
   await page.fill('.sheet-code input[type="time"] >> nth=0', '07:00');
   await page.fill('.sheet-code input[type="time"] >> nth=1', '13:00');
   await snap(page, '09-codigo-nuevo', { theme });
-  await page.keyboard.press('Escape');
-  await page.waitForTimeout(300);
+  await page.click('.sheet-code .sheet-close');
+  await page.waitForSelector('.dialog-wrap.open');
+  await snap(page, '10-salir-sin-guardar', { theme });
+  await page.click('.dialog-wrap.open .btn-danger');
+  await page.waitForTimeout(400);
   await page.click('.sheet-day .btn-danger-plain');
   await snap(page, '10-confirmar-borrar', { theme });
-  await page.click('.dialog .btn-secondary');
+  await page.click('.dialog-wrap.open .btn-secondary');
   await page.click('.tile[data-code="F1"]');
-  await page.click('.sheet-day .btn-primary');
+  await page.click('[data-testid="day-save"]');
   await page.waitForSelector('.toast.show');
   await snap(page, '11-guardado-toast', { theme });
+  return page;
+});
+
+scenario('codigos', async (ctx, theme) => {
+  const page = await open(ctx, { state: demoState() });
+  await tab(page, 'ajustes');
+  await page.click('.code-row[data-code="S1"]');
+  await sheet(page);
+  await snap(page, '09-codigo-s1', { theme });
+  await page.click('.sheet-code .ce-more > summary');
+  await page.evaluate(() => { const b = document.querySelector('.sheet-body'); b.scrollTop = b.scrollHeight; });
+  await snap(page, '09-codigo-s1-mas-opciones', { theme });
+  await closeSheet(page);
+  await page.click('.code-row[data-code="S51"]');
+  await sheet(page);
+  await snap(page, '09-codigo-lugar', { theme });
+  await closeSheet(page);
+  await page.click('.code-row[data-code="F6"]');
+  await sheet(page);
+  await snap(page, '19-codigo-sin-confirmar', { theme });
   return page;
 });
 
@@ -152,22 +221,46 @@ scenario('escanear', async (ctx, theme) => {
   await tab(page, 'escanear');
   await snap(page, '12-escanear', { theme });
   await page.route('**/docs/js/recognize/index.js', (r) => r.fulfill({ contentType: 'text/javascript', body: SLOW_RECOGNIZER }));
-  await page.setInputFiles('input[data-testid="scan-pick"]', [PHOTO, path.join(process.cwd(), 'test/fotos/phone-2026-10-a.jpg')]);
+  await page.setInputFiles('input[data-testid="scan-pick"]', [PHOTO, PHOTO2]);
   await page.waitForSelector('.photo-item');
   await page.waitForTimeout(1600);
   await snap(page, '13-escanear-leyendo', { theme });
   await page.waitForSelector('.fallback', { timeout: 15000 });
   await snap(page, '14-escanear-no-leido', { theme });
   await page.selectOption('.fallback .month-picker select >> nth=0', '10');
-  await page.click('.fallback-card .btn-primary');
+  await page.click('[data-testid="fallback-manual"]');
   await page.waitForSelector('.review-list');
-  await page.click('.review-row[data-day="22"] .review-main');
-  await page.waitForSelector('.sheet-wrap.open');
-  await page.click('.tile[data-code="N1"]');
-  await snap(page, '15-a-mano-editor', { theme });
-  await page.click('.sheet-day .btn-primary');
-  await page.waitForTimeout(300);
   await snap(page, '15-a-mano', { theme });
+  await page.click('.review-row[data-day="22"] .review-main');
+  await sheet(page);
+  await page.click('.tile[data-code="S1"]');
+  await snap(page, '15-a-mano-editor', { theme });
+  await page.click('.de-photo-btn');
+  await sheet(page);
+  await page.waitForTimeout(300);
+  await snap(page, '15-a-mano-foto', { theme });
+  await closeSheet(page);
+  await page.click('[data-testid="day-done"]');
+  await page.waitForTimeout(400);
+  await page.evaluate(() => window.scrollTo(0, 1500));
+  await snap(page, '15-a-mano-abajo', { theme });
+  return page;
+});
+
+scenario('escanear-safari', async (ctx, theme) => {
+  const page = await open(ctx, { state: demoState(), standalone: false });
+  await tab(page, 'escanear');
+  await snap(page, '12-escanear-safari', { theme });
+  return page;
+});
+
+scenario('ocr-fallo', async (ctx, theme) => {
+  const page = await open(ctx, { state: demoState() });
+  await page.route('**/docs/js/recognize/index.js', (r) => r.fulfill({ contentType: 'text/javascript', body: OCR_FAIL }));
+  await tab(page, 'escanear');
+  await page.setInputFiles('input[data-testid="scan-pick"]', PHOTO);
+  await page.waitForSelector('[data-testid="ocr-failed"]');
+  await snap(page, '14-escanear-lector-no-arranca', { theme });
   return page;
 });
 
@@ -177,6 +270,33 @@ scenario('revision', async (ctx, theme) => {
   await page.waitForSelector('.review-list');
   await snap(page, '16-revision', { theme });
   await snap(page, '16-revision-completa', { theme, full: true });
+  await page.evaluate(() => window.scrollTo(0, 99999));
+  await snap(page, '16-revision-abajo', { theme });
+  return page;
+});
+
+scenario('revision-dificil', async (ctx, theme) => {
+  const page = await open(ctx, { state: demoState() });
+  await page.evaluate((r) => window.__turnosTest.injectScanResult(r), HARD_RESULT);
+  await page.waitForSelector('.review-list');
+  await snap(page, '16-revision-sin-mes', { theme });
+  await page.selectOption('.review-month select >> nth=0', '11');
+  await snap(page, '16-revision-sin-leer', { theme, full: true });
+  await page.evaluate(() => window.scrollTo(0, 99999));
+  await page.click('[data-testid="review-save"]');
+  await page.waitForSelector('.dialog-wrap.open');
+  await snap(page, '16-revision-faltan-dias', { theme });
+  return page;
+});
+
+scenario('revision-al-dia', async (ctx, theme) => {
+  const page = await open(ctx, { state: demoState() });
+  await page.evaluate((r) => window.__turnosTest.injectScanResult(r), {
+    layout: 'phone-list', month: 10, year: 2026, warnings: [],
+    days: [{ day: 13, codes: ['S1', 'S51'], confidence: 0.97 }, { day: 14, codes: ['-'], confidence: 0.95 }, { day: 15, codes: ['S1', 'S31'], confidence: 0.95 }],
+  });
+  await page.waitForSelector('.review-list');
+  await snap(page, '16-revision-al-dia', { theme });
   return page;
 });
 
@@ -185,40 +305,105 @@ scenario('horas', async (ctx, theme) => {
   await tab(page, 'horas');
   await snap(page, '17-horas', { theme });
   await snap(page, '17-horas-completo', { theme, full: true });
+  await page.evaluate(() => window.__turnosTest.store.set((s) => { s.days['2026-11-02'] = { codes: ['F1', 'F51'], note: '', source: 'manual', updatedAt: '2026-10-12T10:00:00.000Z' }; return s; }));
+  await page.click('#view-horas button[aria-label="Mes siguiente"]');
+  await snap(page, '17-horas-mes-a-medias', { theme });
   return page;
 });
 
 scenario('ajustes', async (ctx, theme) => {
-  const s = demoState({ sync: true, ntfy: true });
-  const page = await open(ctx, { state: s });
+  const page = await open(ctx, { state: demoState() });
   await tab(page, 'ajustes');
-  await snap(page, '18-ajustes', { theme });
-  await page.click('details[data-fkey="guide-cal"] summary');
-  await page.click('details[data-fkey="guide-ntfy"] summary');
-  await snap(page, '18-ajustes-completo', { theme, full: true });
-  await page.click('.code-row[data-code="F6"]');
-  await page.waitForSelector('.sheet-wrap.open');
-  await snap(page, '19-codigo-sin-confirmar', { theme });
+  await snap(page, '18-ajustes-sin-conectar', { theme });
+  await snap(page, '18-ajustes-sin-conectar-completo', { theme, full: true });
+  await page.click('#set-advanced > summary');
+  await page.waitForTimeout(200);
+  await snap(page, '18-ajustes-avanzado-completo', { theme, full: true });
+  await page.click('[data-testid="setup-paste-open"]');
+  await sheet(page);
+  await snap(page, '20-tengo-un-enlace', { theme });
   return page;
 });
 
-scenario('ajustes-sin-sync', async (ctx, theme) => {
-  const page = await open(ctx, { state: demoState() });
+scenario('ajustes-conectado', async (ctx, theme) => {
+  const page = await open(ctx, { state: connected({ ntfy: true }), standalone: false });
   await tab(page, 'ajustes');
-  await page.evaluate(() => document.getElementById('set-calendar').scrollIntoView());
-  await snap(page, '20-ajustes-calendario-sin-config', { theme });
+  await snap(page, '18-ajustes-conectado', { theme });
+  await page.click('details[data-fkey="guide-cal"] summary');
+  await snap(page, '18-ajustes-conectado-completo', { theme, full: true });
+  return page;
+});
+
+scenario('ajustes-solo-lectura', async (ctx, theme) => {
+  const gh = fakeGitHub();
+  await seedRemote(gh, demoState(), { deviceId: 'navegador' });
+  const st = core.updateSettings(demoState(), { sync: { ...SYNC, deviceId: 'iphone1' } });
+  const page = await open(ctx, { state: st, gh });
+  await page.waitForFunction(() => JSON.parse(localStorage.getItem('turnos-mauricio:v1')).settings.sync.publisher === 'navegador', null, { timeout: 10000 });
+  await tab(page, 'ajustes');
+  await page.waitForSelector('[data-testid="takeover"]');
+  await snap(page, '18-ajustes-solo-lectura', { theme });
+  await page.click('[data-testid="takeover"]');
+  await page.waitForSelector('.dialog-wrap.open');
+  await snap(page, '18-ajustes-usar-este', { theme });
+  return page;
+});
+
+scenario('ajustes-error', async (ctx, theme) => {
+  const page = await open(ctx, { state: connected(), gh: fakeGitHub({ status: 401 }) });
+  await page.waitForFunction(() => JSON.parse(localStorage.getItem('turnos-mauricio:v1')).settings.sync.lastErrorCode === 'AUTH', null, { timeout: 10000 });
+  await tab(page, 'ajustes');
+  await snap(page, '18-ajustes-error', { theme });
   return page;
 });
 
 scenario('setup', async (ctx, theme) => {
-  const errors = [];
-  const page = await preparePage(ctx, { state: demoState(), errors });
-  await mockNetwork(page);
-  const link = core.buildSetupLink(APP, { owner: 'Mardar91', repo: 'mauricio', token: 'github_pat_x', branch: 'datos' });
-  await page.goto(link);
+  const page = await open(ctx, { state: demoState(), hash: setupHash() });
   await page.waitForSelector('.dialog-wrap.open');
-  await snap(page, '21-enlace-setup', { theme });
-  page.__errors = errors;
+  await snap(page, '21-enlace-confirmar', { theme });
+  await page.click('.dialog-wrap.open .btn-primary');
+  await page.waitForSelector('[data-testid="subscribe-step"]', { timeout: 15000 });
+  await page.waitForSelector('.sheet-subscribe [data-testid="webcal"][aria-disabled="false"]');
+  await snap(page, '22-suscribirme', { theme });
+  return page;
+});
+
+scenario('setup-safari', async (ctx, theme) => {
+  const page = await open(ctx, { state: demoState(), hash: setupHash(), standalone: false });
+  await page.waitForSelector('[data-testid="setup-safari"]');
+  await page.waitForTimeout(300);
+  await snap(page, '21-enlace-en-safari', { theme });
+  return page;
+});
+
+scenario('importar', async (ctx, theme) => {
+  const page = await open(ctx, { state: demoState() });
+  await tab(page, 'ajustes');
+  let small = core.createDefaultState();
+  for (const [k, c] of [['2026-10-20', ['F1']], ['2026-10-21', ['S1']], ['2026-10-22', ['N1']]]) small = core.setDay(small, k, c, { now: new Date('2026-10-01T10:00:00Z') });
+  const file = path.join(OUT, 'copia-pequena.json');
+  fs.writeFileSync(file, core.exportBackup(small, { now: new Date('2026-10-01T10:00:00Z') }));
+  await page.setInputFiles('input[data-testid="import-file"]', file);
+  await page.waitForSelector('.dialog-wrap.open');
+  await snap(page, '23-importar-confirmar', { theme });
+  await page.click('.dialog-wrap.open .btn-danger');
+  await page.waitForSelector('.toast.show .toast-action');
+  await snap(page, '23-importar-deshacer', { theme });
+  return page;
+});
+
+scenario('avisos-fijos', async (ctx, theme) => {
+  const st = demoState();
+  st.schema = 99;
+  const page = await open(ctx, { state: st });
+  await page.evaluate(() => {
+    const orig = Storage.prototype.setItem;
+    Storage.prototype.setItem = function (k, v) { if (String(k).startsWith('turnos-mauricio')) throw new DOMException('lleno', 'QuotaExceededError'); return orig.call(this, k, v); };
+    window.__turnosTest.store.set((s) => { s.days['2026-10-14'] = { codes: ['F1'], note: '', source: 'manual', updatedAt: new Date().toISOString() }; return s; });
+  });
+  await page.waitForSelector('[data-testid="banner-save"]');
+  await snap(page, '24-avisos-guardar-y-version', { theme });
+  page.__errors = page.__errors.filter((e) => !/no se pudo guardar/i.test(e));
   return page;
 });
 
@@ -239,11 +424,12 @@ for (const theme of themes) {
 // Desbordamientos a 360 px (y 390) en las vistas principales
 if (!only || only === 'overflow') {
   for (const width of [360, 390]) {
-    const ctx = await iphoneContext(browser, { width, height: 740, scale: 1 });
-    const page = await open(ctx, { state: demoState({ sync: true, ntfy: true }) });
+    const ctx = await iphoneContext(browser, { width, height: 740, scale: width === 360 ? 2 : 1 });
+    const page = await open(ctx, { state: demoState({ sync: true, ntfy: true }), standalone: false });
     for (const t of ['hoy', 'calendario', 'escanear', 'horas', 'ajustes']) {
       await tab(page, t);
       await page.waitForTimeout(200);
+      if (t === 'ajustes') { await page.click('#set-advanced > summary'); await page.waitForTimeout(150); }
       const of = await findOverflow(page);
       for (const o of of) problems.push(`[${width}px ${t}] ${o}`);
       if (width === 360) await page.screenshot({ path: path.join(OUT, `w360-${t}.png`), fullPage: true });
@@ -256,8 +442,10 @@ if (!only || only === 'overflow') {
     if (width === 360) await page.screenshot({ path: path.join(OUT, 'w360-editar-dia.png') });
     await page.keyboard.press('Escape');
     await page.waitForSelector('.sheet-wrap', { state: 'detached' });
-    await page.evaluate((r) => window.__turnosTest.injectScanResult(r), FAKE_RESULT);
+    await page.evaluate((r) => window.__turnosTest.injectScanResult(r), HARD_RESULT);
     await page.waitForSelector('.review-list');
+    await page.selectOption('.review-month select >> nth=0', '11');
+    await page.waitForTimeout(500);
     for (const o of await findOverflow(page)) problems.push(`[${width}px revision] ${o}`);
     if (width === 360) await page.screenshot({ path: path.join(OUT, 'w360-revision.png'), fullPage: true });
     for (const e of page.__errors) problems.push(`[${width}px] ${e}`);
